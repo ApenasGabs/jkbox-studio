@@ -5,14 +5,15 @@ import type { Jukebox } from './services/jukebox.js';
 export type ServerMessage =
   | { type: 'state'; state: ReturnType<Jukebox['queue']['state']> }
   | { type: 'progress'; positionSec: number; paused: boolean }
-  | { type: 'download'; trackId: string; status: string; progress: number; error: string | null };
+  | { type: 'download'; trackId: string; status: string; progress: number; error: string | null }
+  | { type: 'lyrics_offset'; trackId: string; offsetMs: number };
 
 export type ClientMessage = { type: 'progress'; queueId: number; positionSec: number; paused: boolean };
 
 /** Pushes queue/player/download updates to every connected screen and phone. */
 export function attachRealtime(server: Server, jukebox: Jukebox): WebSocketServer {
   const wss = new WebSocketServer({ server, path: '/ws' });
-  const { queue, downloads } = jukebox;
+  const { queue, downloads, lyrics } = jukebox;
 
   const broadcast = (message: ServerMessage) => {
     const data = JSON.stringify(message);
@@ -42,6 +43,7 @@ export function attachRealtime(server: Server, jukebox: Jukebox): WebSocketServe
     onDownload(track);
     pushState();
   });
+  lyrics.on('offset', (trackId, offsetMs) => broadcast({ type: 'lyrics_offset', trackId, offsetMs }));
 
   wss.on('connection', (socket) => {
     socket.send(JSON.stringify({ type: 'state', state: queue.state() } satisfies ServerMessage));

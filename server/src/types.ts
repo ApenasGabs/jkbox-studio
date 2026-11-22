@@ -63,3 +63,15 @@ export interface JukeboxState {
   nowPlaying: NowPlaying | null;
   queue: QueueEntryView[];
 }
+
+export type LyricsSource = 'lrclib' | 'local' | 'none';
+
+export interface TrackLyrics {
+  trackId: string;
+  syncedLrc: string | null;
+  plainLyrics: string | null;
+  instrumental: boolean;
+  source: LyricsSource;
+  offsetMs: number;
+  fetchedAt: number;
+}
