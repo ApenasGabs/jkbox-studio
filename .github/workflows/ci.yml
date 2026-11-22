@@ -23,6 +23,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Validate docker-compose.yml
+        run: |
+          cp .env.example .env
+          docker compose config -q
+          rm -f .env
       - name: Build image
         run: docker build -t jkbox-studio:ci .
       - name: Smoke test (yt-dlp + ffmpeg + healthcheck)

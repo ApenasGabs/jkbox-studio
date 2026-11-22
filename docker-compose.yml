@@ -8,8 +8,7 @@ services:
     container_name: jkbox-studio
     restart: unless-stopped
     env_file:
-      - path: .env
-        required: false
+      - .env
     environment:
       DATA_DIR: /data
     ports:
