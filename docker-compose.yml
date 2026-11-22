@@ -1,0 +1,26 @@
+services:
+  jkbox:
+    build:
+      context: .
+      args:
+        YTDLP_VERSION: latest
+    image: jkbox-studio:latest
+    container_name: jkbox-studio
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATA_DIR: /data
+    ports:
+      - "${PORT:-3000}:${PORT:-3000}"
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${PORT:-3000}/api/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    # Low footprint for old laptops; raise if you increase DOWNLOAD_CONCURRENCY.
+    mem_limit: 512m
