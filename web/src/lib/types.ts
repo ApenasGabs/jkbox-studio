@@ -10,6 +10,9 @@ export interface Track {
   title: string;
   artist: string;
   album: string | null;
+  genre?: string | null;
+  year?: number | null;
+  trackNumber?: number | null;
   durationSec: number | null;
   thumbnail: string | null;
   youtubeId?: string | null;
@@ -25,11 +28,53 @@ export interface SearchResult {
   title: string;
   artist: string;
   album?: string | null;
+  genre?: string | null;
+  year?: number | null;
+  trackNumber?: number | null;
   durationSec?: number | null;
   thumbnail?: string | null;
   spotifyUri?: string | null;
   trackId?: string;
   cached?: boolean;
+}
+
+export interface TrackMetadataPatch {
+  title?: string;
+  artist?: string;
+  album?: string | null;
+  genre?: string | null;
+  year?: number | null;
+  trackNumber?: number | null;
+}
+
+export interface CatalogCategory {
+  name: string;
+  trackCount: number;
+  albumCount: number;
+  artistCount: number;
+  cover: string | null;
+}
+
+export interface CatalogAlbum {
+  name: string;
+  artist: string;
+  genre: string | null;
+  year: number | null;
+  trackCount: number;
+  totalDurationSec: number;
+  cover: string | null;
+}
+
+export interface CatalogArtist {
+  name: string;
+  albumCount: number;
+  trackCount: number;
+  cover: string | null;
+}
+
+export interface CatalogArtistDetail extends CatalogArtist {
+  albums: CatalogAlbum[];
+  tracks: SearchResult[];
 }
 
 export const REACTION_EMOJIS = ['🔥', '👏', '❤️', '🎤', '🎉'] as const;

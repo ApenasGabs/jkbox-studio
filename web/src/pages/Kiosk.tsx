@@ -1,14 +1,24 @@
 import { QRCodeSVG } from 'qrcode.react';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { CatalogBrowser } from '../components/CatalogBrowser';
 import { Cover } from '../components/Cover';
 import { LyricsView } from '../components/LyricsView';
 import { QueueList } from '../components/QueueList';
 import { SourceBadge } from '../components/SourceBadge';
 import { useToast } from '../components/Toast';
+import { TrackMetadataModal } from '../components/TrackMetadataModal';
 import { VideoLyricsOverlay } from '../components/VideoLyricsOverlay';
 import { api, getHostPin, setHostPin } from '../lib/api';
+import {
+  type CatalogRoute,
+  type CatalogTab,
+  DEFAULT_CATEGORY_SUGGESTIONS,
+  type EditableTrack,
+  editableFromTrack,
+  mergeCategorySuggestions,
+} from '../lib/catalog';
 import { cssImageUrl, formatTime, isLoopback, remoteUrl } from '../lib/format';
-import type { AppConfig, QueueEntry } from '../lib/types';
+import type { AppConfig, QueueEntry, SearchResult, Track } from '../lib/types';
 import { useJukebox } from '../lib/useJukebox';
 import { useTrackLyrics } from '../lib/useTrackLyrics';
 
@@ -88,6 +98,14 @@ export function Kiosk() {
   const [videoFailedQueueId, setVideoFailedQueueId] = useState<number | null>(null);
   const [embedSrc, setEmbedSrc] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  const [catalogTab, setCatalogTab] = useState<CatalogTab>('categories');
+  const [catalogHistory, setCatalogHistory] = useState<CatalogRoute[]>([{ kind: 'root' }]);
+  const [catalogFilter, setCatalogFilter] = useState('');
+  const [catalogReloadKey, setCatalogReloadKey] = useState(0);
+  const [categorySuggestions, setCategorySuggestions] = useState<string[]>([...DEFAULT_CATEGORY_SUGGESTIONS]);
+  const [editingTrack, setEditingTrack] = useState<EditableTrack | null>(null);
+  const [addingKey, setAddingKey] = useState<string | null>(null);
   const [offsetBusy, setOffsetBusy] = useState(false);
   const [cinemaMode, setCinemaMode] = useState(false);
   const [cinemaIdle, setCinemaIdle] = useState(false);
@@ -345,8 +363,53 @@ export function Kiosk() {
   const showUpNextBanner = Boolean(
     current && nextUp && effectiveDuration > 0 && remainingSec <= UP_NEXT_WINDOW_SEC && dismissedUpNextId !== current.id,
   );
-  const controlsHidden = cinemaMode && cinemaIdle && !settingsOpen && unlocked;
+  const controlsHidden = cinemaMode && cinemaIdle && !settingsOpen && !catalogOpen && !editingTrack && unlocked;
   const backdrop = cssImageUrl(current?.track.thumbnail);
+
+  const enqueueFromCatalog = async (result: SearchResult) => {
+    const key = `${result.source}:${result.sourceId}`;
+    setAddingKey(key);
+    try {
+      const outcome = await api.enqueue(result);
+      toast.show(
+        outcome.duplicate
+          ? 'Essa já está na fila — voto registrado 👍'
+          : outcome.cached
+            ? 'Adicionada à fila ⚡'
+            : 'Adicionada! Baixando em segundo plano…',
+      );
+    } catch (err) {
+      toast.show((err as Error).message, true);
+    } finally {
+      setAddingKey(null);
+    }
+  };
+
+  const enqueueAlbumFromCatalog = async (items: SearchResult[], albumName: string) => {
+    try {
+      let addedCount = 0;
+      for (const item of items) {
+        const outcome = await api.enqueue(item);
+        if (!outcome.duplicate) addedCount += 1;
+      }
+      toast.show(
+        addedCount > 0
+          ? `${addedCount} música${addedCount === 1 ? '' : 's'} de "${albumName}" adicionada${addedCount === 1 ? '' : 's'} à fila ⚡`
+          : `As faixas de "${albumName}" já estavam na fila`,
+      );
+    } catch (err) {
+      toast.show((err as Error).message, true);
+    }
+  };
+
+  useEffect(() => {
+    if (!catalogOpen || editingTrack) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setCatalogOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [catalogOpen, editingTrack]);
 
   useEffect(() => {
     const onFullscreenChange = () => setIsFullscreen(Boolean(document.fullscreenElement));
@@ -614,9 +677,18 @@ export function Kiosk() {
                 />
                 <div className="max-w-3xl text-center">
                   <h1 className="text-3xl font-bold leading-tight [overflow-wrap:anywhere] sm:text-4xl lg:text-5xl">{current.track.title}</h1>
-                  <p className="mt-2 text-xl text-zinc-300">{current.track.artist}</p>
-                  <div className="mt-3 flex items-center justify-center gap-2 text-sm text-zinc-400">
+                  <p className="mt-2 text-xl text-zinc-300">
+                    {current.track.artist}
+                    {current.track.album ? ` · ${current.track.album}` : ''}
+                    {current.track.year ? ` (${current.track.year})` : ''}
+                  </p>
+                  <div className="mt-3 flex flex-wrap items-center justify-center gap-2 text-sm text-zinc-400">
                     <SourceBadge source={current.track.source} />
+                    {current.track.genre && (
+                      <span className="rounded-full border border-accent/35 bg-accent/15 px-2.5 py-0.5 text-xs font-medium text-purple-200">
+                        {current.track.genre}
+                      </span>
+                    )}
                     <span>pedido por {current.requesterName}</span>
                   </div>
                 </div>
@@ -627,10 +699,18 @@ export function Kiosk() {
                   <Cover src={current.track.thumbnail} alt={current.track.title} className="h-12 w-12 shrink-0 rounded-xl sm:h-14 sm:w-14" />
                   <div className="min-w-0 flex-1">
                     <h1 className="truncate text-lg font-bold leading-tight sm:text-2xl">{current.track.title}</h1>
-                    <p className="truncate text-sm text-zinc-300">{current.track.artist}</p>
+                    <p className="truncate text-sm text-zinc-300">
+                      {current.track.artist}
+                      {current.track.album ? ` · ${current.track.album}` : ''}
+                    </p>
                   </div>
                   <div className="hidden shrink-0 items-center gap-2 text-xs text-zinc-400 sm:flex">
                     <SourceBadge source={current.track.source} />
+                    {current.track.genre && (
+                      <span className="rounded-full border border-accent/35 bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-purple-200">
+                        {current.track.genre}
+                      </span>
+                    )}
                     <span>pedido por {current.requesterName}</span>
                   </div>
                 </div>
@@ -652,10 +732,18 @@ export function Kiosk() {
                 <Cover src={current.track.thumbnail} alt={current.track.title} className="h-12 w-12 shrink-0 rounded-xl sm:h-14 sm:w-14" />
                 <div className="min-w-0 flex-1">
                   <h1 className="truncate text-lg font-bold leading-tight sm:text-2xl">{current.track.title}</h1>
-                  <p className="truncate text-sm text-zinc-300">{current.track.artist}</p>
+                  <p className="truncate text-sm text-zinc-300">
+                    {current.track.artist}
+                    {current.track.album ? ` · ${current.track.album}` : ''}
+                  </p>
                 </div>
                 <div className="hidden shrink-0 items-center gap-2 text-xs text-zinc-400 sm:flex">
                   <SourceBadge source={current.track.source} />
+                  {current.track.genre && (
+                    <span className="rounded-full border border-accent/35 bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-purple-200">
+                      {current.track.genre}
+                    </span>
+                  )}
                   <span>pedido por {current.requesterName}</span>
                 </div>
               </div>
@@ -824,15 +912,95 @@ export function Kiosk() {
       {settingsOpen && (
         <HostPanel
           config={config}
+          currentTrack={current?.track ?? null}
           defaultView={defaultView}
           onDefaultViewChange={handleDefaultViewChange}
           reactionsEnabled={reactionsEnabled}
           onToggleReactions={() => setReactionsEnabled((v) => !v)}
+          onEditCurrentTrack={() => {
+            if (!current) return;
+            setSettingsOpen(false);
+            setEditingTrack(editableFromTrack(current.track));
+          }}
+          onOpenCatalog={() => {
+            setSettingsOpen(false);
+            setCatalogOpen(true);
+          }}
           onClose={() => setSettingsOpen(false)}
           onChanged={refreshConfig}
           run={run}
         />
       )}
+
+      {catalogOpen && (
+        <div
+          className="fixed inset-0 z-30 flex items-center justify-center bg-black/70 p-0 backdrop-blur-sm sm:p-6"
+          onClick={() => setCatalogOpen(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="kiosk-catalog-title"
+            onClick={(e) => e.stopPropagation()}
+            className="flex h-full w-full max-w-4xl flex-col gap-4 overflow-hidden bg-panel p-4 shadow-2xl sm:h-auto sm:max-h-[88vh] sm:rounded-3xl sm:border sm:border-white/15 sm:p-6"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 id="kiosk-catalog-title" className="text-xl font-bold">
+                  Catálogo do acervo
+                </h2>
+                <p className="text-xs text-zinc-400">
+                  Explore por categorias, álbuns e artistas ou edite metadados das faixas.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCatalogOpen(false)}
+                aria-label="Fechar catálogo"
+                className="rounded-lg px-2.5 py-1.5 text-zinc-400 hover:bg-white/10 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+
+            <input
+              value={catalogFilter}
+              onChange={(e) => setCatalogFilter(e.target.value)}
+              placeholder="Filtrar categorias, álbuns, artistas ou músicas…"
+              className="rounded-xl bg-white/10 px-4 py-2.5 text-sm text-white outline-none focus:ring-2 focus:ring-accent"
+            />
+
+            <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+              <CatalogBrowser
+                tab={catalogTab}
+                onTabChange={setCatalogTab}
+                history={catalogHistory}
+                onHistoryChange={setCatalogHistory}
+                filterQuery={catalogFilter}
+                onClearFilter={() => setCatalogFilter('')}
+                reloadKey={catalogReloadKey}
+                addingKey={addingKey}
+                onAdd={enqueueFromCatalog}
+                onAddAlbum={enqueueAlbumFromCatalog}
+                canEditMetadata
+                canEnqueueAlbum
+                onEditTrack={setEditingTrack}
+                onCategoriesLoaded={(cats) => setCategorySuggestions(mergeCategorySuggestions(cats))}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      <TrackMetadataModal
+        track={editingTrack}
+        categorySuggestions={categorySuggestions}
+        onClose={() => setEditingTrack(null)}
+        onSaved={(updated) => {
+          toast.show(`Metadados de "${updated.title}" atualizados`);
+          setCatalogReloadKey((k) => k + 1);
+        }}
+      />
 
       {!unlocked && (
         <button
@@ -853,10 +1021,13 @@ type RunFn = <T>(action: () => Promise<T>, ok?: string | ((result: T) => string)
 
 interface HostPanelProps {
   config: AppConfig | null;
+  currentTrack: Track | null;
   defaultView: DefaultStageView;
   onDefaultViewChange: (view: DefaultStageView) => void;
   reactionsEnabled: boolean;
   onToggleReactions: () => void;
+  onEditCurrentTrack: () => void;
+  onOpenCatalog: () => void;
   onClose: () => void;
   onChanged: () => void;
   run: RunFn;
@@ -864,10 +1035,13 @@ interface HostPanelProps {
 
 function HostPanel({
   config,
+  currentTrack,
   defaultView,
   onDefaultViewChange,
   reactionsEnabled,
   onToggleReactions,
+  onEditCurrentTrack,
+  onOpenCatalog,
   onClose,
   onChanged,
   run,
@@ -1066,18 +1240,36 @@ function HostPanel({
         </section>
 
         <section className="glass flex flex-col gap-2 p-4">
-          <h3 className="font-semibold">Acervo local</h3>
+          <h3 className="font-semibold">Acervo local & catálogo</h3>
           <p className="text-sm text-zinc-400">
-            Coloque arquivos de áudio em <code>./data/music</code> (formato sugerido: <code>Artista - Título.mp3</code>) e reescaneie.
+            Coloque arquivos de áudio em <code>./data/music</code> (formato sugerido: <code>Categoria/Artista/Álbum/01 - Título.mp3</code>) ou organize categorias e álbuns pela interface.
           </p>
-          <button
-            onClick={() =>
-              run(api.rescanLibrary, ({ added }) => (added ? `${added} arquivo(s) adicionados ao acervo` : 'Nenhum arquivo novo encontrado'))
-            }
-            className="rounded-lg bg-white/10 px-3 py-2 text-sm hover:bg-white/20"
-          >
-            Reescanear acervo
-          </button>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <button
+              type="button"
+              onClick={onOpenCatalog}
+              className="rounded-lg bg-accent px-3 py-2 text-sm font-semibold text-white hover:brightness-110"
+            >
+              📚 Explorar catálogo
+            </button>
+            <button
+              onClick={() =>
+                run(api.rescanLibrary, ({ added }) => (added ? `${added} arquivo(s) adicionados ao acervo` : 'Nenhum arquivo novo encontrado'))
+              }
+              className="rounded-lg bg-white/10 px-3 py-2 text-sm hover:bg-white/20"
+            >
+              Reescanear acervo
+            </button>
+          </div>
+          {currentTrack && (
+            <button
+              type="button"
+              onClick={onEditCurrentTrack}
+              className="mt-1 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-xs font-medium text-zinc-200 hover:bg-white/15"
+            >
+              ✎ Editar metadados da faixa atual ({currentTrack.title})
+            </button>
+          )}
         </section>
 
         <a href="/remote" target="_blank" rel="noreferrer" className="text-sm text-accent-2 underline">

@@ -1,4 +1,17 @@
-import type { AppConfig, JukeboxState, QueueEntry, SearchResult, SpotifyStatus, TrackLyrics } from './types';
+import type {
+  AppConfig,
+  CatalogAlbum,
+  CatalogArtist,
+  CatalogArtistDetail,
+  CatalogCategory,
+  JukeboxState,
+  QueueEntry,
+  SearchResult,
+  SpotifyStatus,
+  Track,
+  TrackLyrics,
+  TrackMetadataPatch,
+} from './types';
 
 const CLIENT_KEY = 'jkbox.clientId';
 const NAME_KEY = 'jkbox.name';
@@ -56,7 +69,40 @@ export const api = {
       `/api/search?${new URLSearchParams({ q, source })}`,
       { signal },
     ),
-  library: (q = '') => request<{ results: SearchResult[] }>(`/api/library?${new URLSearchParams({ q })}`),
+  library: (q = '', signal?: AbortSignal) =>
+    request<{ results: SearchResult[] }>(`/api/library?${new URLSearchParams({ q })}`, { signal }),
+  catalogCategories: (signal?: AbortSignal) =>
+    request<{ categories: CatalogCategory[] }>('/api/catalog/categories', { signal }),
+  catalogCategoryTracks: (name: string, signal?: AbortSignal) =>
+    request<{ category: string; tracks: SearchResult[] }>(
+      `/api/catalog/categories/${encodeURIComponent(name)}/tracks`,
+      { signal },
+    ),
+  catalogAlbums: (params?: { q?: string; category?: string }, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    if (params?.q?.trim()) query.set('q', params.q.trim());
+    if (params?.category?.trim()) query.set('category', params.category.trim());
+    const qs = query.toString();
+    return request<{ albums: CatalogAlbum[] }>(`/api/catalog/albums${qs ? `?${qs}` : ''}`, { signal });
+  },
+  catalogAlbumTracks: (name: string, artist?: string, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    if (artist?.trim()) query.set('artist', artist.trim());
+    const qs = query.toString();
+    return request<{ album: string; artist: string | null; tracks: SearchResult[] }>(
+      `/api/catalog/albums/${encodeURIComponent(name)}/tracks${qs ? `?${qs}` : ''}`,
+      { signal },
+    );
+  },
+  catalogArtists: (signal?: AbortSignal) =>
+    request<{ artists: CatalogArtist[] }>('/api/catalog/artists', { signal }),
+  catalogArtist: (name: string, signal?: AbortSignal) =>
+    request<CatalogArtistDetail>(`/api/catalog/artists/${encodeURIComponent(name)}`, { signal }),
+  updateTrackMetadata: (trackId: string, patch: TrackMetadataPatch) =>
+    request<Track>(`/api/tracks/${encodeURIComponent(trackId)}/metadata`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
   enqueue: (result: SearchResult) =>
     post<{ duplicate: boolean; cached: boolean }>('/api/queue', { result, clientId: getClientId(), name: getName() }),
   vote: (queueId: number) => post<{ voted: boolean }>(`/api/queue/${queueId}/vote`, { clientId: getClientId() }),
