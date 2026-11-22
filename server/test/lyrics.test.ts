@@ -73,7 +73,7 @@ describe('lyrics service and API', () => {
 
     const db = openDb(config.dbPath);
     const version = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    expect(version).toBe(3);
+    expect(version).toBe(4);
 
     const tracks = new TrackRepository(db);
     expect(tracks.get('t-legacy')?.title).toBe('Never Gonna Give You Up');
@@ -148,7 +148,7 @@ describe('lyrics service and API', () => {
     fs.writeFileSync(audioPath, 'audio');
     fs.writeFileSync(lrcPath, '[ti:Bohemian Rhapsody]\n[00:01.50] Is this the real life?\n[00:04.20] Is this just fantasy?\n');
 
-    const track = jukebox.tracks.insertLocal(audioPath, 'Bohemian Rhapsody', 'Queen');
+    const track = jukebox.tracks.insertLocal(audioPath, { title: 'Bohemian Rhapsody', artist: 'Queen' });
 
     const res = await request(app).get(`/api/tracks/${track.id}/lyrics`).expect(200);
     expect(res.body).toMatchObject({

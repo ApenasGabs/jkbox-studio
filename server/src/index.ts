@@ -18,7 +18,7 @@ async function main() {
     console.warn(`[jkbox] AVISO: yt-dlp indisponível — ${(err as Error).message}`);
   }
 
-  const imported = scanLibrary(jukebox.tracks, config.musicDir);
+  const imported = await scanLibrary(jukebox.tracks, config.musicDir);
   if (imported > 0) console.log(`[jkbox] ${imported} arquivo(s) importado(s) do acervo local`);
   jukebox.downloads.resumeInterrupted();
   jukebox.queue.advanceIfIdle();
