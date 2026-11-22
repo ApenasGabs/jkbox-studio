@@ -50,6 +50,17 @@ const MIGRATIONS: string[] = [
     value TEXT NOT NULL
   );
   `,
+  `
+  CREATE TABLE lyrics (
+    track_id TEXT PRIMARY KEY REFERENCES tracks (id) ON DELETE CASCADE,
+    synced_lrc TEXT,
+    plain_lyrics TEXT,
+    instrumental INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL,
+    offset_ms INTEGER NOT NULL DEFAULT 0,
+    fetched_at INTEGER NOT NULL
+  );
+  `,
 ];
 
 export function openDb(file: string): Db {

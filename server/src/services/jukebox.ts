@@ -2,6 +2,7 @@ import { parseInput } from '../lib/parseInput.js';
 import { sanitizeResult } from '../lib/validate.js';
 import type { SearchResult, Track, TrackSource } from '../types.js';
 import type { DownloadManager } from './downloads.js';
+import type { LyricsService } from './lyrics.js';
 import { QueueError, type QueueService } from './queue.js';
 import { youtubeQueryFor, type SpotifyService } from './spotify.js';
 import type { TrackRepository } from './tracks.js';
@@ -39,6 +40,7 @@ export class Jukebox {
     readonly downloads: DownloadManager,
     readonly media: MediaProvider,
     readonly spotify: SpotifyService,
+    readonly lyrics: LyricsService,
     private readonly log: (msg: string) => void = console.log,
   ) {
     downloads.on('ready', () => queue.advanceIfIdle());

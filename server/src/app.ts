@@ -6,6 +6,7 @@ import { streamFile } from './lib/stream.js';
 import { SPOTIFY_ID_RE } from './lib/validate.js';
 import type { Jukebox, SearchSource } from './services/jukebox.js';
 import { scanLibrary } from './services/library.js';
+import { LyricsError } from './services/lyrics.js';
 import { QueueError } from './services/queue.js';
 import { SpotifyError } from './services/spotify.js';
 
@@ -27,7 +28,7 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
   app.set('trust proxy', true);
   app.use(express.json({ limit: '100kb' }));
 
-  const { tracks, queue, downloads, spotify } = jukebox;
+  const { tracks, queue, downloads, spotify, lyrics } = jukebox;
   const isHost = (req: Request) => !config.hostPin || req.get('x-host-pin') === config.hostPin;
   const requireHost = (req: Request, res: Response, next: NextFunction) => {
     if (isHost(req)) return next();
@@ -155,6 +156,33 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
   api.get('/tracks/:id/stream', stream);
   api.head('/tracks/:id/stream', stream);
 
+  api.get('/tracks/:id/lyrics', async (req, res, next) => {
+    try {
+      const track = tracks.get(req.params.id);
+      if (!track) return void res.status(404).json({ error: 'Faixa não encontrada' });
+      res.json(await lyrics.getForTrack(track));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  api.patch('/tracks/:id/lyrics/offset', requireHost, async (req, res, next) => {
+    try {
+      const track = tracks.get(str(req.params.id));
+      if (!track) return void res.status(404).json({ error: 'Faixa não encontrada' });
+      res.json(await lyrics.updateOffset(track, req.body?.offsetMs));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  api.delete('/tracks/:id/lyrics', requireHost, (req, res) => {
+    const track = tracks.get(str(req.params.id));
+    if (!track) return void res.status(404).json({ error: 'Faixa não encontrada' });
+    lyrics.clear(track.id);
+    res.status(204).end();
+  });
+
   // --- Spotify ------------------------------------------------------------
   api.get('/spotify/status', (_req, res) => {
     res.json(spotify.status());
@@ -235,7 +263,7 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
   }
 
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    if (err instanceof QueueError || err instanceof SpotifyError) {
+    if (err instanceof QueueError || err instanceof SpotifyError || err instanceof LyricsError) {
       return void res.status(err.status).json({ error: err.message });
     }
     console.error(err);
