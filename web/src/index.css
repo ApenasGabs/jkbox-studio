@@ -17,3 +17,44 @@ body {
 .glass {
   @apply rounded-2xl border border-white/10 bg-white/5 backdrop-blur;
 }
+
+@keyframes jkbox-float-reaction {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 16px, 0) scale(0.75);
+  }
+  15% {
+    opacity: 1;
+    transform: translate3d(-4px, -16px, 0) scale(1.08);
+  }
+  65% {
+    opacity: 0.95;
+    transform: translate3d(6px, -120px, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(-4px, -210px, 0) scale(0.92);
+  }
+}
+
+.animate-float-reaction {
+  animation: jkbox-float-reaction 2.8s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  will-change: transform, opacity;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  @keyframes jkbox-float-reaction {
+    0% {
+      opacity: 0;
+    }
+    20% {
+      opacity: 1;
+    }
+    80% {
+      opacity: 1;
+    }
+    100% {
+      opacity: 0;
+    }
+  }
+}

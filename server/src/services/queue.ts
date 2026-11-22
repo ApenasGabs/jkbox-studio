@@ -12,6 +12,7 @@ interface QueueRow {
   added_at: number;
   status: QueueStatus;
   started_at: number | null;
+  finished_at: number | null;
 }
 
 export class QueueError extends Error {
@@ -143,10 +144,11 @@ export class QueueService extends EventEmitter<QueueEvents> {
     return { nowPlaying, queue: this.ordered() };
   }
 
-  history(limit = 20): QueueEntryView[] {
+  history(limit = 30): QueueEntryView[] {
+    const safeLimit = Number.isFinite(limit) ? Math.min(100, Math.max(1, Math.trunc(limit))) : 30;
     const rows = this.db
-      .prepare("SELECT * FROM queue WHERE status = 'played' ORDER BY finished_at DESC LIMIT ?")
-      .all(limit) as unknown as QueueRow[];
+      .prepare("SELECT * FROM queue WHERE status = 'played' ORDER BY finished_at DESC, id DESC LIMIT ?")
+      .all(safeLimit) as unknown as QueueRow[];
     return rows.map((row) => this.view(row));
   }
 
@@ -206,6 +208,7 @@ export class QueueService extends EventEmitter<QueueEvents> {
       requesterId: row.requester_id,
       requesterName: row.requester_name,
       addedAt: row.added_at,
+      ...(row.finished_at != null ? { finishedAt: row.finished_at } : {}),
       status: row.status,
       votes: voters.length,
       voters,

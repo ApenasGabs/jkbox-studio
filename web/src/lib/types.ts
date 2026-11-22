@@ -32,12 +32,16 @@ export interface SearchResult {
   cached?: boolean;
 }
 
+export const REACTION_EMOJIS = ['🔥', '👏', '❤️', '🎤', '🎉'] as const;
+export type ReactionEmoji = (typeof REACTION_EMOJIS)[number];
+
 export interface QueueEntry {
   id: number;
   trackId: string;
   requesterId: string;
   requesterName: string;
   addedAt: number;
+  finishedAt?: number | null;
   votes: number;
   voters: string[];
   track: Track;
@@ -88,4 +92,5 @@ export type ServerMessage =
   | { type: 'state'; state: JukeboxState }
   | { type: 'progress'; positionSec: number; paused: boolean }
   | { type: 'download'; trackId: string; status: TrackStatus; progress: number; error: string | null }
-  | { type: 'lyrics_offset'; trackId: string; offsetMs: number };
+  | { type: 'lyrics_offset'; trackId: string; offsetMs: number }
+  | { type: 'reaction'; emoji: ReactionEmoji; senderName?: string };

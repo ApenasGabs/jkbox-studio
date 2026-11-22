@@ -18,6 +18,7 @@ type DefaultStageView = 'cover' | 'video' | 'video-lyrics' | 'lyrics';
 const STAGE_MODE_KEY = 'jkbox.stageMode';
 const VIDEO_OVERLAY_KEY = 'jkbox.videoLyricsOverlay';
 const DEFAULT_VIEW_KEY = 'jkbox.defaultStageView';
+const REACTIONS_ENABLED_KEY = 'jkbox.reactionsEnabled';
 
 const STAGE_MODES: { id: StageMode; label: string }[] = [
   { id: 'cover', label: 'Capa' },
@@ -54,6 +55,10 @@ function readInitialOverlay(defaultView: DefaultStageView): boolean {
   return defaultView === 'video-lyrics';
 }
 
+function readInitialReactionsEnabled(): boolean {
+  return localStorage.getItem(REACTIONS_ENABLED_KEY) !== 'false';
+}
+
 function youtubeEmbedUrl(youtubeId: string, startSec: number, autoplay: boolean): string {
   const params = new URLSearchParams({
     autoplay: autoplay ? '1' : '0',
@@ -69,7 +74,7 @@ function youtubeEmbedUrl(youtubeId: string, startSec: number, autoplay: boolean)
 }
 
 export function Kiosk() {
-  const { state, downloads, lyricsOffset, connected, send } = useJukebox();
+  const { state, downloads, lyricsOffset, reactions, connected, send } = useJukebox();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [unlocked, setUnlocked] = useState(false);
   const [playing, setPlaying] = useState(false);
@@ -86,6 +91,7 @@ export function Kiosk() {
   const [offsetBusy, setOffsetBusy] = useState(false);
   const [cinemaMode, setCinemaMode] = useState(false);
   const [cinemaIdle, setCinemaIdle] = useState(false);
+  const [reactionsEnabled, setReactionsEnabled] = useState<boolean>(readInitialReactionsEnabled);
   const [isFullscreen, setIsFullscreen] = useState(() =>
     typeof document !== 'undefined' ? Boolean(document.fullscreenElement) : false,
   );
@@ -221,6 +227,10 @@ export function Kiosk() {
   }, [defaultView]);
 
   useEffect(() => {
+    localStorage.setItem(REACTIONS_ENABLED_KEY, String(reactionsEnabled));
+  }, [reactionsEnabled]);
+
+  useEffect(() => {
     pendingOffsetRef.current = null;
   }, [current?.trackId]);
 
@@ -330,6 +340,7 @@ export function Kiosk() {
   const effectiveDuration = time.duration || current?.track.durationSec || 0;
   const progressPct = effectiveDuration > 0 ? Math.min(100, (time.current / effectiveDuration) * 100) : 0;
   const remainingSec = effectiveDuration > 0 ? Math.max(0, effectiveDuration - time.current) : Number.POSITIVE_INFINITY;
+  const queueRemainingSec = current ? (effectiveDuration > 0 ? Math.max(0, effectiveDuration - time.current) : null) : 0;
   const nextUp = state.queue.find((entry) => entry.track.status === 'ready') ?? state.queue[0] ?? null;
   const showUpNextBanner = Boolean(
     current && nextUp && effectiveDuration > 0 && remainingSec <= UP_NEXT_WINDOW_SEC && dismissedUpNextId !== current.id,
@@ -736,6 +747,33 @@ export function Kiosk() {
             </p>
           </div>
         )}
+
+        {reactionsEnabled && reactions.length > 0 && (
+          <div
+            aria-hidden="true"
+            className={`pointer-events-none absolute right-4 z-20 flex h-64 w-36 items-end justify-end overflow-visible sm:right-8 ${
+              cinemaMode ? 'bottom-24' : 'bottom-6'
+            }`}
+          >
+            {reactions.map((reaction) => {
+              const offsetPx = ((reaction.id * 29) % 72) - 36;
+              return (
+                <div
+                  key={reaction.id}
+                  style={{ right: `${36 + offsetPx}px` }}
+                  className="animate-float-reaction absolute bottom-0 flex flex-col items-center gap-0.5"
+                >
+                  <span className="text-3xl drop-shadow-[0_4px_12px_rgba(0,0,0,0.65)] sm:text-4xl">{reaction.emoji}</span>
+                  {reaction.senderName && (
+                    <span className="max-w-28 truncate rounded-full bg-black/60 px-2 py-0.5 text-[11px] font-medium text-zinc-100 backdrop-blur-sm">
+                      {reaction.senderName}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </main>
 
       {/* Sidebar: QR + queue (hidden in Modo Cinema, replaced by discrete corner mini QR) */}
@@ -760,6 +798,7 @@ export function Kiosk() {
               <QueueList
                 queue={state.queue}
                 downloads={downloads}
+                currentRemainingSec={queueRemainingSec}
                 onRemove={remove}
                 onRetry={(entry) => run(() => api.retry(entry.trackId), 'Tentando baixar novamente')}
                 compact
@@ -787,6 +826,8 @@ export function Kiosk() {
           config={config}
           defaultView={defaultView}
           onDefaultViewChange={handleDefaultViewChange}
+          reactionsEnabled={reactionsEnabled}
+          onToggleReactions={() => setReactionsEnabled((v) => !v)}
           onClose={() => setSettingsOpen(false)}
           onChanged={refreshConfig}
           run={run}
@@ -814,12 +855,23 @@ interface HostPanelProps {
   config: AppConfig | null;
   defaultView: DefaultStageView;
   onDefaultViewChange: (view: DefaultStageView) => void;
+  reactionsEnabled: boolean;
+  onToggleReactions: () => void;
   onClose: () => void;
   onChanged: () => void;
   run: RunFn;
 }
 
-function HostPanel({ config, defaultView, onDefaultViewChange, onClose, onChanged, run }: HostPanelProps) {
+function HostPanel({
+  config,
+  defaultView,
+  onDefaultViewChange,
+  reactionsEnabled,
+  onToggleReactions,
+  onClose,
+  onChanged,
+  run,
+}: HostPanelProps) {
   const [pin, setPin] = useState(getHostPin());
   const [playlist, setPlaylist] = useState('');
   const spotify = config?.spotify;
@@ -912,6 +964,31 @@ function HostPanel({ config, defaultView, onDefaultViewChange, onClose, onChange
             <span
               className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${
                 config?.autoDjEnabled ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
+        </section>
+
+        <section className="glass flex items-center justify-between gap-3 p-4">
+          <div className="min-w-0">
+            <h3 className="font-semibold">Reações ao vivo</h3>
+            <p className="text-xs text-zinc-400">
+              Exibe emojis enviados pelos convidados pelo celular flutuando na tela.
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-label="Mostrar reações ao vivo"
+            aria-checked={reactionsEnabled}
+            onClick={onToggleReactions}
+            className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition ${
+              reactionsEnabled ? 'bg-accent' : 'bg-white/20'
+            }`}
+          >
+            <span
+              className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${
+                reactionsEnabled ? 'translate-x-6' : 'translate-x-1'
               }`}
             />
           </button>

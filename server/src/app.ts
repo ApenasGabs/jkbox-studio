@@ -127,8 +127,11 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
     }
   });
 
-  api.get('/history', (_req, res) => {
-    res.json({ history: queue.history() });
+  api.get('/history', (req, res) => {
+    const rawLimit = str(req.query.limit).trim();
+    const parsed = rawLimit === '' ? 30 : Number(rawLimit);
+    const limit = Number.isFinite(parsed) ? Math.min(100, Math.max(1, Math.trunc(parsed))) : 30;
+    res.json({ history: queue.history(limit) });
   });
 
   api.post('/player/skip', requireHost, (_req, res) => {

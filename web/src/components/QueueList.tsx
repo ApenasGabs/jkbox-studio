@@ -1,4 +1,5 @@
 import { getClientId } from '../lib/api';
+import { computeQueueEtas, formatEta } from '../lib/eta';
 import { formatTime } from '../lib/format';
 import type { QueueEntry } from '../lib/types';
 import type { DownloadInfo } from '../lib/useJukebox';
@@ -7,6 +8,7 @@ import { Cover } from './Cover';
 interface Props {
   queue: QueueEntry[];
   downloads: Record<string, DownloadInfo>;
+  currentRemainingSec?: number | null;
   onVote?: (entry: QueueEntry) => void;
   onRemove?: (entry: QueueEntry) => void;
   onRetry?: (entry: QueueEntry) => void;
@@ -31,16 +33,18 @@ function DownloadStatus({ entry, live }: { entry: QueueEntry; live?: DownloadInf
   );
 }
 
-export function QueueList({ queue, downloads, onVote, onRemove, onRetry, canRemove, compact }: Props) {
+export function QueueList({ queue, downloads, currentRemainingSec, onVote, onRemove, onRetry, canRemove, compact }: Props) {
   const me = getClientId();
   if (queue.length === 0) {
     return <p className="py-6 text-center text-sm text-zinc-500">A fila está vazia. Peça uma música! 🎤</p>;
   }
+  const etas = currentRemainingSec !== undefined ? computeQueueEtas(queue, currentRemainingSec) : null;
   return (
     <ol className="flex flex-col gap-2">
       {queue.map((entry, index) => {
         const voted = entry.voters.includes(me);
         const failed = (downloads[entry.trackId]?.status ?? entry.track.status) === 'error';
+        const etaLabel = etas ? formatEta(etas[index]) : null;
         return (
           <li key={entry.id} className="flex items-center gap-3 rounded-xl bg-white/5 p-2">
             <span className="w-5 text-center text-sm text-zinc-500">{index + 1}</span>
@@ -50,7 +54,17 @@ export function QueueList({ queue, downloads, onVote, onRemove, onRetry, canRemo
               className={`${compact ? 'h-10 w-10' : 'h-12 w-12'} shrink-0 rounded-lg`}
             />
             <div className="min-w-0 flex-1">
-              <p className="truncate font-medium">{entry.track.title}</p>
+              <div className="flex items-center gap-2">
+                <p className="min-w-0 flex-1 truncate font-medium">{entry.track.title}</p>
+                {etaLabel && (
+                  <span
+                    className="shrink-0 rounded-full bg-white/10 px-2 py-0.5 text-[11px] font-medium text-zinc-300"
+                    title="Tempo estimado de espera"
+                  >
+                    {etaLabel}
+                  </span>
+                )}
+              </div>
               <p className="truncate text-xs text-zinc-400">
                 {entry.track.artist || '—'} · {formatTime(entry.track.durationSec)} · pedido por {entry.requesterName}
               </p>
