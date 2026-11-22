@@ -1,10 +1,21 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { CatalogBrowser } from '../components/CatalogBrowser';
 import { Cover } from '../components/Cover';
 import { LyricsView } from '../components/LyricsView';
 import { QueueList } from '../components/QueueList';
 import { SourceBadge } from '../components/SourceBadge';
 import { useToast } from '../components/Toast';
-import { api, getClientId, getName, type SearchSource, setName } from '../lib/api';
+import { TrackMetadataModal } from '../components/TrackMetadataModal';
+import { api, getClientId, getHostPin, getName, type SearchSource, setHostPin, setName } from '../lib/api';
+import {
+  type CatalogRoute,
+  type CatalogTab,
+  DEFAULT_CATEGORY_SUGGESTIONS,
+  type EditableTrack,
+  editableFromResult,
+  editableFromTrack,
+  mergeCategorySuggestions,
+} from '../lib/catalog';
 import { formatTime } from '../lib/format';
 import { applyKaraokeFilter } from '../lib/karaoke';
 import { type AppConfig, type QueueEntry, REACTION_EMOJIS, type ReactionEmoji, type SearchResult, type Track } from '../lib/types';
@@ -26,6 +37,9 @@ function trackToSearchResult(track: Track): SearchResult {
     title: track.title,
     artist: track.artist,
     album: track.album,
+    genre: track.genre,
+    year: track.year,
+    trackNumber: track.trackNumber,
     durationSec: track.durationSec,
     thumbnail: track.thumbnail,
     trackId: track.id,
@@ -57,6 +71,17 @@ export function Remote() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [lastReactionEmoji, setLastReactionEmoji] = useState<ReactionEmoji | null>(null);
+  const [catalogTab, setCatalogTab] = useState<CatalogTab>('categories');
+  const [catalogHistory, setCatalogHistory] = useState<CatalogRoute[]>([{ kind: 'root' }]);
+  const [catalogFilter, setCatalogFilter] = useState('');
+  const [catalogReloadKey, setCatalogReloadKey] = useState(0);
+  const [categorySuggestions, setCategorySuggestions] = useState<string[]>([...DEFAULT_CATEGORY_SUGGESTIONS]);
+  const [editingTrack, setEditingTrack] = useState<EditableTrack | null>(null);
+  const [hostVerified, setHostVerified] = useState(false);
+  const [hostPinOpen, setHostPinOpen] = useState(false);
+  const [pinInput, setPinInput] = useState('');
+  const [pinBusy, setPinBusy] = useState(false);
+  const [pinError, setPinError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const reactionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toast = useToast();
@@ -69,10 +94,27 @@ export function Remote() {
     current?.trackId,
     lyricsOffset,
   );
+  const canEditMetadata = Boolean(config && (!config.hostPinRequired || hostVerified));
 
   useEffect(() => {
-    api.config().then(setConfig).catch(() => {});
+    api
+      .config()
+      .then((cfg) => {
+        setConfig(cfg);
+        if (cfg.hostPinRequired && getHostPin()) {
+          api
+            .verifyPin()
+            .then(({ ok }) => setHostVerified(ok))
+            .catch(() => setHostVerified(false));
+        }
+      })
+      .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setCatalogFilter(query), 250);
+    return () => clearTimeout(timer);
+  }, [query]);
 
   useEffect(() => {
     return () => {
@@ -127,14 +169,14 @@ export function Remote() {
     }
   };
 
-  // The local library can be browsed without typing anything.
-  useEffect(() => {
-    if (source === 'local') void runSearch(applyKaraokeFilter(query, karaoke), 'local');
-  }, [source]);
-
+  // The local catalog handles its own fetching via CatalogBrowser.
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (query.trim() || source === 'local') void runSearch(applyKaraokeFilter(query, karaoke), source);
+    if (source === 'local') {
+      setCatalogFilter(query);
+      return;
+    }
+    if (query.trim()) void runSearch(applyKaraokeFilter(query, karaoke), source);
   };
 
   const toggleKaraoke = () => {
@@ -142,7 +184,7 @@ export function Remote() {
     const nextSource: SearchSource = nextKaraoke && (source === 'spotify' || source === 'local') ? 'youtube' : source;
     setKaraoke(nextKaraoke);
     if (nextSource !== source) setSource(nextSource);
-    if (query.trim()) void runSearch(applyKaraokeFilter(query, nextKaraoke), nextSource);
+    if (nextSource !== 'local' && query.trim()) void runSearch(applyKaraokeFilter(query, nextKaraoke), nextSource);
   };
 
   const add = async (result: SearchResult) => {
@@ -164,19 +206,105 @@ export function Remote() {
     }
   };
 
+  const addAlbum = async (items: SearchResult[], albumName: string) => {
+    let addedCount = 0;
+    let votedCount = 0;
+    try {
+      for (const item of items) {
+        const outcome = await api.enqueue(item);
+        if (outcome.duplicate) votedCount += 1;
+        else addedCount += 1;
+      }
+      if (addedCount > 0) {
+        toast.show(
+          `${addedCount} música${addedCount === 1 ? '' : 's'} de "${albumName}" adicionada${addedCount === 1 ? '' : 's'} à fila ⚡`,
+        );
+      } else if (votedCount > 0) {
+        toast.show(`As faixas de "${albumName}" já estavam na fila — votos registrados 👍`);
+      }
+    } catch (err) {
+      toast.show((err as Error).message, true);
+    }
+  };
+
+  const handleMetadataSaved = (updated: Track) => {
+    toast.show(`Metadados de "${updated.title}" atualizados`);
+    setCatalogReloadKey((k) => k + 1);
+    setResults((prev) =>
+      prev.map((item) => (item.trackId === updated.id ? { ...item, ...trackToSearchResult(updated) } : item)),
+    );
+    if (view === 'history') void loadHistory();
+  };
+
+  const submitHostPin = async (e: FormEvent) => {
+    e.preventDefault();
+    const trimmed = pinInput.trim();
+    if (!trimmed) {
+      setPinError('Digite o PIN do host.');
+      return;
+    }
+    setPinBusy(true);
+    setPinError(null);
+    const previous = getHostPin();
+    try {
+      setHostPin(trimmed);
+      const { ok } = await api.verifyPin();
+      if (!ok) {
+        setHostPin(previous);
+        setPinError('PIN incorreto.');
+        return;
+      }
+      setHostVerified(true);
+      setHostPinOpen(false);
+      setPinInput('');
+      toast.show('Modo host ativado para organizar o catálogo');
+    } catch (err) {
+      setHostPin(previous);
+      setPinError((err as Error).message);
+    } finally {
+      setPinBusy(false);
+    }
+  };
+
   const vote = (entry: QueueEntry) => api.vote(entry.id).catch((err) => toast.show(err.message, true));
   const remove = (entry: QueueEntry) => api.remove(entry.id).catch((err) => toast.show(err.message, true));
 
   const tabs = TABS.filter((t) => t.id !== 'spotify' || config?.spotify.configured);
 
   return (
-    <div className="mx-auto flex min-h-full max-w-xl flex-col pb-24">
+    <div className="mx-auto flex min-h-full max-w-3xl flex-col pb-24 lg:max-w-4xl">
       <header className="sticky top-0 z-20 flex flex-col gap-3 bg-ink/90 p-4 backdrop-blur">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <span className="text-xl font-black tracking-tight">
             jkbox<span className="text-accent">studio</span>
           </span>
-          <span className={`text-xs ${connected ? 'text-emerald-400' : 'text-red-400'}`}>{connected ? '● ao vivo' : '● reconectando'}</span>
+          <div className="flex items-center gap-2">
+            {config?.hostPinRequired && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (hostVerified) {
+                    setHostPin('');
+                    setHostVerified(false);
+                    toast.show('Modo host bloqueado');
+                  } else {
+                    setPinInput('');
+                    setPinError(null);
+                    setHostPinOpen(true);
+                  }
+                }}
+                title={hostVerified ? 'Modo host ativo (clique para bloquear)' : 'Entrar no modo host para editar metadados'}
+                className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition ${
+                  hostVerified
+                    ? 'border-accent/50 bg-accent/20 text-purple-100 hover:bg-accent/30'
+                    : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/15 hover:text-white'
+                }`}
+              >
+                {hostVerified ? '🔓 Host' : '🔒 Host'}
+              </button>
+            )}
+            <span className={`text-xs ${connected ? 'text-emerald-400' : 'text-red-400'}`}>{connected ? '● ao vivo' : '● reconectando'}</span>
+          </div>
         </div>
 
         {current && (
@@ -266,12 +394,16 @@ export function Remote() {
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Nome da música ou link do YouTube/Spotify"
+              placeholder={
+                source === 'local'
+                  ? 'Filtrar categorias, álbuns, artistas ou músicas…'
+                  : 'Nome da música ou link do YouTube/Spotify'
+              }
               enterKeyHint="search"
               className="min-w-0 flex-1 rounded-xl bg-white/10 px-4 py-3 outline-none focus:ring-2 focus:ring-accent"
             />
-            <button type="submit" className="rounded-xl bg-accent px-4 font-semibold disabled:opacity-50" disabled={loading}>
-              {loading ? '…' : 'Buscar'}
+            <button type="submit" className="rounded-xl bg-accent px-4 font-semibold disabled:opacity-50" disabled={loading && source !== 'local'}>
+              {loading && source !== 'local' ? '…' : 'Buscar'}
             </button>
           </form>
 
@@ -301,45 +433,98 @@ export function Remote() {
             </button>
           </div>
 
-          {Object.entries(errors).map(([src, message]) => (
-            <p key={src} className="rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-300">
-              {src}: {message}
-            </p>
-          ))}
+          {source === 'local' ? (
+            <CatalogBrowser
+              tab={catalogTab}
+              onTabChange={setCatalogTab}
+              history={catalogHistory}
+              onHistoryChange={setCatalogHistory}
+              filterQuery={catalogFilter}
+              onClearFilter={() => {
+                setQuery('');
+                setCatalogFilter('');
+              }}
+              karaoke={karaoke}
+              reloadKey={catalogReloadKey}
+              addingKey={adding}
+              onAdd={add}
+              onAddAlbum={addAlbum}
+              canEditMetadata={canEditMetadata}
+              canEnqueueAlbum={canEditMetadata}
+              onEditTrack={setEditingTrack}
+              onCategoriesLoaded={(cats) => setCategorySuggestions(mergeCategorySuggestions(cats))}
+            />
+          ) : (
+            <>
+              {Object.entries(errors).map(([src, message]) => (
+                <p key={src} className="rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-300">
+                  {src}: {message}
+                </p>
+              ))}
 
-          {loading && results.length === 0 && <p className="py-8 text-center text-sm text-zinc-500">Buscando…</p>}
-          {!loading && results.length === 0 && (
-            <p className="py-8 text-center text-sm text-zinc-500">
-              Busque por nome ou cole um link do YouTube{config?.spotify.configured ? ' ou Spotify' : ''}.
-            </p>
-          )}
-
-          <ul className="flex flex-col gap-2">
-            {results.map((result) => {
-              const key = `${result.source}:${result.sourceId}`;
-              return (
-                <li key={key} className="flex items-center gap-3 rounded-xl bg-white/5 p-2">
-                  <Cover src={result.thumbnail} alt={result.title} className="h-14 w-14 shrink-0 rounded-lg" />
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate font-medium">{result.title}</p>
-                    <p className="truncate text-xs text-zinc-400">
-                      {result.artist || '—'} · {formatTime(result.durationSec)}
-                    </p>
-                    <div className="mt-1">
-                      <SourceBadge source={result.source} cached={result.cached} />
-                    </div>
-                  </div>
+              {loading && results.length === 0 && <p className="py-8 text-center text-sm text-zinc-500">Buscando…</p>}
+              {!loading && results.length === 0 && (
+                <div className="flex flex-col items-center gap-3 py-8 text-center">
+                  <p className="text-sm text-zinc-500">
+                    Busque por nome ou cole um link do YouTube{config?.spotify.configured ? ' ou Spotify' : ''}.
+                  </p>
                   <button
-                    onClick={() => add(result)}
-                    disabled={adding === key}
-                    className="rounded-xl bg-white px-3 py-2 text-sm font-semibold text-zinc-900 disabled:opacity-50"
+                    type="button"
+                    onClick={() => setSource('local')}
+                    className="rounded-full border border-white/15 bg-white/5 px-4 py-1.5 text-xs font-semibold text-zinc-200 transition hover:bg-white/15 hover:text-white"
                   >
-                    {adding === key ? '…' : '+ Fila'}
+                    📚 Explorar Acervo por Categorias, Álbuns e Artistas
                   </button>
-                </li>
-              );
-            })}
-          </ul>
+                </div>
+              )}
+
+              <ul className="flex flex-col gap-2">
+                {results.map((result) => {
+                  const key = `${result.source}:${result.sourceId}`;
+                  const editable = canEditMetadata ? editableFromResult(result) : null;
+                  return (
+                    <li key={key} className="flex items-center gap-3 rounded-xl bg-white/5 p-2">
+                      <Cover src={result.thumbnail} alt={result.title} className="h-14 w-14 shrink-0 rounded-lg" />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate font-medium">{result.title}</p>
+                        <p className="truncate text-xs text-zinc-400">
+                          {result.artist || '—'} · {formatTime(result.durationSec)}
+                        </p>
+                        <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                          <SourceBadge source={result.source} cached={result.cached} />
+                          {result.genre && (
+                            <span className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-medium text-zinc-300">
+                              {result.genre}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        {editable && (
+                          <button
+                            type="button"
+                            onClick={() => setEditingTrack(editable)}
+                            aria-label={`Editar metadados de ${result.title}`}
+                            title="Editar categoria, álbum ou metadados"
+                            className="rounded-xl border border-white/10 bg-white/5 px-2.5 py-2 text-xs font-semibold text-zinc-300 transition hover:bg-white/15 hover:text-white"
+                          >
+                            ✎
+                          </button>
+                        )}
+                        <button
+                          onClick={() => add(result)}
+                          disabled={adding === key}
+                          className="rounded-xl bg-white px-3 py-2 text-sm font-semibold text-zinc-900 disabled:opacity-50"
+                        >
+                          {adding === key ? '…' : '+ Fila'}
+                        </button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </>
+          )}
         </section>
       ) : view === 'queue' ? (
         <section className="px-4">
@@ -421,14 +606,27 @@ export function Remote() {
                         <SourceBadge source={entry.track.source} cached={entry.track.status === 'ready'} />
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => void add(trackToSearchResult(entry.track))}
-                      disabled={adding === key}
-                      className="shrink-0 rounded-xl bg-white px-3 py-2 text-sm font-semibold text-zinc-900 disabled:opacity-50"
-                    >
-                      {adding === key ? '…' : '+ Fila'}
-                    </button>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      {canEditMetadata && entry.track.status === 'ready' && (
+                        <button
+                          type="button"
+                          onClick={() => setEditingTrack(editableFromTrack(entry.track))}
+                          aria-label={`Editar metadados de ${entry.track.title}`}
+                          title="Editar categoria, álbum ou metadados"
+                          className="rounded-xl border border-white/10 bg-white/5 px-2.5 py-2 text-xs font-semibold text-zinc-300 transition hover:bg-white/15 hover:text-white"
+                        >
+                          ✎
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => void add(trackToSearchResult(entry.track))}
+                        disabled={adding === key}
+                        className="shrink-0 rounded-xl bg-white px-3 py-2 text-sm font-semibold text-zinc-900 disabled:opacity-50"
+                      >
+                        {adding === key ? '…' : '+ Fila'}
+                      </button>
+                    </div>
                   </li>
                 );
               })}
@@ -436,6 +634,72 @@ export function Remote() {
           )}
         </section>
       )}
+      {hostPinOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+          onClick={() => !pinBusy && setHostPinOpen(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="host-pin-title"
+            onClick={(e) => e.stopPropagation()}
+            className="flex w-full max-w-sm flex-col gap-3 rounded-3xl border border-white/15 bg-panel p-5 shadow-2xl"
+          >
+            <div className="flex items-center justify-between">
+              <h2 id="host-pin-title" className="text-base font-bold">
+                Modo host
+              </h2>
+              <button
+                type="button"
+                onClick={() => setHostPinOpen(false)}
+                disabled={pinBusy}
+                className="rounded-lg px-2 py-1 text-zinc-400 hover:bg-white/10 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+            <p className="text-xs text-zinc-400">
+              Informe o PIN do host para editar categorias, álbuns e metadados das músicas.
+            </p>
+            <form onSubmit={submitHostPin} className="flex flex-col gap-3">
+              <input
+                value={pinInput}
+                onChange={(e) => setPinInput(e.target.value)}
+                type="password"
+                inputMode="numeric"
+                autoFocus
+                placeholder="PIN do host"
+                className="rounded-xl bg-white/10 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-accent"
+              />
+              {pinError && <p className="rounded-lg bg-red-500/15 px-3 py-1.5 text-xs text-red-200">{pinError}</p>}
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setHostPinOpen(false)}
+                  disabled={pinBusy}
+                  className="rounded-xl bg-white/10 px-3 py-2 text-xs font-semibold hover:bg-white/20"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={pinBusy}
+                  className="rounded-xl bg-accent px-4 py-2 text-xs font-semibold text-white hover:brightness-110 disabled:opacity-50"
+                >
+                  {pinBusy ? 'Verificando…' : 'Desbloquear'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+      <TrackMetadataModal
+        track={editingTrack}
+        categorySuggestions={categorySuggestions}
+        onClose={() => setEditingTrack(null)}
+        onSaved={handleMetadataSaved}
+      />
       {toast.node}
     </div>
   );
