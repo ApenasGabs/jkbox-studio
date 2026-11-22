@@ -44,9 +44,9 @@ describe('Jukebox Auto-DJ integration', () => {
     fs.writeFileSync(path.join(config.musicDir, 'Artist 2 - Song 2.mp3'), Buffer.alloc(128, 2));
     fs.writeFileSync(path.join(config.musicDir, 'Artist 3 - Song 3.mp3'), Buffer.alloc(128, 3));
 
-    const t1 = jukebox.tracks.insertLocal(path.join(config.musicDir, 'Artist 1 - Song 1.mp3'), 'Song 1', 'Artist 1');
-    const t2 = jukebox.tracks.insertLocal(path.join(config.musicDir, 'Artist 2 - Song 2.mp3'), 'Song 2', 'Artist 2');
-    const t3 = jukebox.tracks.insertLocal(path.join(config.musicDir, 'Artist 3 - Song 3.mp3'), 'Song 3', 'Artist 3');
+    const t1 = jukebox.tracks.insertLocal(path.join(config.musicDir, 'Artist 1 - Song 1.mp3'), { title: 'Song 1', artist: 'Artist 1' });
+    const t2 = jukebox.tracks.insertLocal(path.join(config.musicDir, 'Artist 2 - Song 2.mp3'), { title: 'Song 2', artist: 'Artist 2' });
+    const t3 = jukebox.tracks.insertLocal(path.join(config.musicDir, 'Artist 3 - Song 3.mp3'), { title: 'Song 3', artist: 'Artist 3' });
 
     jukebox.setAutoDjEnabled(true);
     jukebox.queue.enqueue(t1.id, 'guest-1', 'Ana');
@@ -77,7 +77,7 @@ describe('Jukebox Auto-DJ integration', () => {
   it('does not trigger Auto-DJ while a requested track is still downloading in queue', async () => {
     const { config, jukebox, media } = setup();
     fs.writeFileSync(path.join(config.musicDir, 'Local - Cached.mp3'), Buffer.alloc(128, 1));
-    const local = jukebox.tracks.insertLocal(path.join(config.musicDir, 'Local - Cached.mp3'), 'Cached', 'Local');
+    const local = jukebox.tracks.insertLocal(path.join(config.musicDir, 'Local - Cached.mp3'), { title: 'Cached', artist: 'Local' });
 
     jukebox.setAutoDjEnabled(true);
     jukebox.queue.enqueue(local.id, 'guest-1', 'Ana');

@@ -93,9 +93,19 @@ Com o Spotify configurado:
 | `POST` | `/api/player/ended` | `{ queueId }` — chamado pela tela ao terminar a faixa. |
 | `GET` | `/api/tracks/:id/stream` | Áudio com suporte a `Range`. |
 | `GET` | `/api/downloads` | Downloads em andamento. |
+| `GET` | `/api/catalog/categories` | Categorias/gêneros do acervo (contagem de faixas, álbuns, artistas e capa). |
+| `GET` | `/api/catalog/categories/:name/tracks` | Faixas de uma categoria. |
+| `GET` | `/api/catalog/albums?q=&category=` | Álbuns agrupados (contagem de faixas e duração total). |
+| `GET` | `/api/catalog/albums/:name/tracks?artist=` | Faixas do álbum ordenadas pelo número da faixa. |
+| `GET` | `/api/catalog/artists` · `/api/catalog/artists/:name` | Artistas agrupados e detalhe (álbuns + faixas). |
+| `PATCH` | `/api/tracks/:id/metadata` | `{ title, artist, album, genre, year, trackNumber }` — edita metadados (host). |
 | `GET` | `/api/spotify/auth` · `/api/spotify/callback` | Fluxo OAuth. |
 | `POST` | `/api/spotify/sync` · `/api/spotify/import` · `/api/spotify/playlist` | Sincronizar fila, importar playlist, vincular playlist existente (`{ playlist }`). |
 | `WS` | `/ws` | Eventos `state`, `progress` e `download`; a tela envia `progress`. |
+
+### Metadados do acervo local
+
+Ao importar arquivos de `/data/music`, o servidor lê as tags via `ffprobe` (título, artista, álbum, gênero, ano, nº da faixa e duração). Sem tags, usa a estrutura de pastas `<Categoria>/<Artista>/<Álbum>/01 - Música.mp3` (ou `<Artista>/<Álbum>/…`, `<Categoria>/…`) e, por fim, o nome do arquivo (`Artista - Título`). O gênero funciona como categoria e pode ser ajustado pelo host.
 
 ## Desenvolvimento
 

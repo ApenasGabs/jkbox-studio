@@ -8,6 +8,10 @@ export interface Track {
   title: string;
   artist: string;
   album: string | null;
+  /** Genre / Host-managed category. */
+  genre: string | null;
+  year: number | null;
+  trackNumber: number | null;
   durationSec: number | null;
   thumbnail: string | null;
   /** YouTube video id used to fetch the audio (equal to sourceId for YouTube tracks). */
@@ -28,12 +32,55 @@ export interface SearchResult {
   title: string;
   artist: string;
   album?: string | null;
+  genre?: string | null;
+  year?: number | null;
+  trackNumber?: number | null;
   durationSec?: number | null;
   thumbnail?: string | null;
   spotifyUri?: string | null;
   /** Id of an already-stored track (local library / cached). */
   trackId?: string;
   cached?: boolean;
+}
+
+/** Editable catalog metadata of a track (PATCH /api/tracks/:id/metadata). */
+export interface TrackMetadataPatch {
+  title?: string;
+  artist?: string;
+  album?: string | null;
+  genre?: string | null;
+  year?: number | null;
+  trackNumber?: number | null;
+}
+
+export interface CatalogCategory {
+  name: string;
+  trackCount: number;
+  albumCount: number;
+  artistCount: number;
+  cover: string | null;
+}
+
+export interface CatalogAlbum {
+  name: string;
+  artist: string;
+  genre: string | null;
+  year: number | null;
+  trackCount: number;
+  totalDurationSec: number;
+  cover: string | null;
+}
+
+export interface CatalogArtist {
+  name: string;
+  albumCount: number;
+  trackCount: number;
+  cover: string | null;
+}
+
+export interface CatalogArtistDetail extends CatalogArtist {
+  albums: CatalogAlbum[];
+  tracks: Track[];
 }
 
 export type QueueStatus = 'queued' | 'playing' | 'played' | 'removed';

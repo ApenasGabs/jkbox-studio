@@ -1,7 +1,44 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import type { Db } from '../db.js';
-import type { SearchResult, Track, TrackSource, TrackStatus } from '../types.js';
+import type {
+  CatalogAlbum,
+  CatalogArtist,
+  CatalogArtistDetail,
+  CatalogCategory,
+  SearchResult,
+  Track,
+  TrackMetadataPatch,
+  TrackSource,
+  TrackStatus,
+} from '../types.js';
+
+/** Metadata extracted for a file dropped into the local library. */
+export interface LocalTrackMeta {
+  title: string;
+  artist: string;
+  album?: string | null;
+  genre?: string | null;
+  year?: number | null;
+  trackNumber?: number | null;
+  durationSec?: number | null;
+}
+
+export interface AlbumFilter {
+  q?: string;
+  category?: string;
+  artist?: string;
+}
+
+/** Escapes a user string for a `LIKE ... ESCAPE '\\'` pattern. */
+function likePattern(query: string): string {
+  return `%${query.trim().replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+}
+
+/** Catalog views only expose playable tracks. */
+const READY = "status = 'ready'";
+/** Album tracks: numbered tracks first (in order), then the rest alphabetically. */
+const TRACK_ORDER = 'track_number IS NULL, track_number ASC, title COLLATE NOCASE ASC';
 
 interface TrackRow {
   id: string;
@@ -10,6 +47,9 @@ interface TrackRow {
   title: string;
   artist: string;
   album: string | null;
+  genre: string | null;
+  year: number | null;
+  track_number: number | null;
   duration_sec: number | null;
   thumbnail: string | null;
   youtube_id: string | null;
@@ -30,6 +70,9 @@ function toTrack(row: TrackRow): Track {
     title: row.title,
     artist: row.artist,
     album: row.album,
+    genre: row.genre ?? null,
+    year: row.year ?? null,
+    trackNumber: row.track_number ?? null,
     durationSec: row.duration_sec,
     thumbnail: row.thumbnail,
     youtubeId: row.youtube_id,
@@ -100,20 +143,36 @@ export class TrackRepository {
     return this.get(id)!;
   }
 
-  insertLocal(filePath: string, title: string, artist: string): Track {
+  insertLocal(filePath: string, meta: LocalTrackMeta): Track {
     const id = randomUUID();
     this.db
       .prepare(
-        `INSERT INTO tracks (id, source, source_id, title, artist, file_path, status, progress, created_at)
-         VALUES (?, 'local', ?, ?, ?, ?, 'ready', 1, ?)`,
+        `INSERT INTO tracks (id, source, source_id, title, artist, album, genre, year, track_number, duration_sec,
+          file_path, status, progress, created_at)
+         VALUES (?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', 1, ?)`,
       )
-      .run(id, filePath, title, artist, filePath, Date.now());
+      .run(
+        id,
+        filePath,
+        meta.title,
+        meta.artist,
+        meta.album ?? null,
+        meta.genre ?? null,
+        meta.year ?? null,
+        meta.trackNumber ?? null,
+        meta.durationSec ?? null,
+        filePath,
+        Date.now(),
+      );
     return this.get(id)!;
   }
 
   update(
     id: string,
-    patch: Partial<Pick<Track, 'status' | 'progress' | 'error' | 'filePath' | 'videoPath' | 'youtubeId' | 'durationSec' | 'thumbnail'>>,
+    patch: Partial<
+      Pick<Track, 'status' | 'progress' | 'error' | 'filePath' | 'videoPath' | 'youtubeId' | 'durationSec' | 'thumbnail'>
+    > &
+      TrackMetadataPatch,
   ): void {
     const columns: Record<string, string> = {
       status: 'status',
@@ -124,8 +183,14 @@ export class TrackRepository {
       youtubeId: 'youtube_id',
       durationSec: 'duration_sec',
       thumbnail: 'thumbnail',
+      title: 'title',
+      artist: 'artist',
+      album: 'album',
+      genre: 'genre',
+      year: 'year',
+      trackNumber: 'track_number',
     };
-    const entries = Object.entries(patch).filter(([key]) => key in columns);
+    const entries = Object.entries(patch).filter(([key, value]) => key in columns && value !== undefined);
     if (entries.length === 0) return;
     const sql = `UPDATE tracks SET ${entries.map(([key]) => `${columns[key]} = ?`).join(', ')} WHERE id = ?`;
     this.db.prepare(sql).run(...entries.map(([, value]) => (value ?? null) as string | number | null), id);
@@ -174,5 +239,113 @@ export class TrackRepository {
       .prepare("SELECT * FROM tracks WHERE status = 'ready' AND file_path IS NOT NULL ORDER BY created_at DESC")
       .all() as unknown as TrackRow[];
     return rows.map(toTrack).filter((track) => this.isCached(track));
+  }
+
+  // --- Catalog (#10) --------------------------------------------------------
+
+  /** Genres/categories of playable tracks with counts and a representative cover. */
+  listCategories(): CatalogCategory[] {
+    const rows = this.db
+      .prepare(
+        `SELECT MIN(TRIM(genre)) AS name, COUNT(*) AS trackCount,
+                COUNT(DISTINCT LOWER(NULLIF(TRIM(album), ''))) AS albumCount,
+                COUNT(DISTINCT LOWER(NULLIF(TRIM(artist), ''))) AS artistCount,
+                MAX(thumbnail) AS cover
+           FROM tracks
+          WHERE ${READY} AND genre IS NOT NULL AND TRIM(genre) <> ''
+          GROUP BY LOWER(TRIM(genre))
+          ORDER BY name COLLATE NOCASE`,
+      )
+      .all() as unknown as CatalogCategory[];
+    return rows.map((r) => ({ ...r, cover: r.cover ?? null }));
+  }
+
+  tracksByCategory(name: string): Track[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM tracks WHERE ${READY} AND LOWER(TRIM(genre)) = LOWER(TRIM(?))
+          ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, ${TRACK_ORDER}`,
+      )
+      .all(name) as unknown as TrackRow[];
+    return rows.map(toTrack);
+  }
+
+  /** Albums grouped by (album, artist), optionally filtered by text, category or artist. */
+  listAlbums(filter: AlbumFilter = {}): CatalogAlbum[] {
+    const where = [READY, "album IS NOT NULL AND TRIM(album) <> ''"];
+    const params: string[] = [];
+    if (filter.q?.trim()) {
+      where.push("(album LIKE ? ESCAPE '\\' OR artist LIKE ? ESCAPE '\\')");
+      const q = likePattern(filter.q);
+      params.push(q, q);
+    }
+    if (filter.category?.trim()) {
+      where.push('LOWER(TRIM(genre)) = LOWER(TRIM(?))');
+      params.push(filter.category);
+    }
+    if (filter.artist?.trim()) {
+      where.push('LOWER(TRIM(artist)) = LOWER(TRIM(?))');
+      params.push(filter.artist);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT MIN(TRIM(album)) AS name, MIN(TRIM(artist)) AS artist, MIN(NULLIF(TRIM(genre), '')) AS genre,
+                MAX(year) AS year, COUNT(*) AS trackCount, COALESCE(SUM(duration_sec), 0) AS totalDurationSec,
+                MAX(thumbnail) AS cover
+           FROM tracks
+          WHERE ${where.join(' AND ')}
+          GROUP BY LOWER(TRIM(album)), LOWER(TRIM(artist))
+          ORDER BY name COLLATE NOCASE, artist COLLATE NOCASE`,
+      )
+      .all(...params) as unknown as CatalogAlbum[];
+    return rows.map((r) => ({ ...r, genre: r.genre ?? null, year: r.year ?? null, cover: r.cover ?? null }));
+  }
+
+  albumTracks(name: string, artist?: string): Track[] {
+    const params = [name];
+    let artistFilter = '';
+    if (artist?.trim()) {
+      artistFilter = 'AND LOWER(TRIM(artist)) = LOWER(TRIM(?))';
+      params.push(artist);
+    }
+    const rows = this.db
+      .prepare(`SELECT * FROM tracks WHERE ${READY} AND LOWER(TRIM(album)) = LOWER(TRIM(?)) ${artistFilter} ORDER BY ${TRACK_ORDER}`)
+      .all(...params) as unknown as TrackRow[];
+    return rows.map(toTrack);
+  }
+
+  listArtists(): CatalogArtist[] {
+    const rows = this.db
+      .prepare(
+        `SELECT MIN(TRIM(artist)) AS name, COUNT(DISTINCT LOWER(NULLIF(TRIM(album), ''))) AS albumCount,
+                COUNT(*) AS trackCount, MAX(thumbnail) AS cover
+           FROM tracks
+          WHERE ${READY} AND TRIM(artist) <> ''
+          GROUP BY LOWER(TRIM(artist))
+          ORDER BY name COLLATE NOCASE`,
+      )
+      .all() as unknown as CatalogArtist[];
+    return rows.map((r) => ({ ...r, cover: r.cover ?? null }));
+  }
+
+  /** Artist summary plus their albums and tracks; null when the artist has no playable track. */
+  getArtist(name: string): CatalogArtistDetail | null {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM tracks WHERE ${READY} AND TRIM(artist) <> '' AND LOWER(TRIM(artist)) = LOWER(TRIM(?))
+          ORDER BY album COLLATE NOCASE, ${TRACK_ORDER}`,
+      )
+      .all(name) as unknown as TrackRow[];
+    if (rows.length === 0) return null;
+    const tracks = rows.map(toTrack);
+    const albums = this.listAlbums({ artist: name });
+    return {
+      name: tracks[0].artist.trim(),
+      albumCount: albums.length,
+      trackCount: tracks.length,
+      cover: tracks.map((t) => t.thumbnail).filter((t): t is string => !!t).sort().at(-1) ?? null,
+      albums,
+      tracks,
+    };
   }
 }

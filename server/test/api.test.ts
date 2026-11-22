@@ -228,7 +228,7 @@ describe('HTTP API', () => {
     media.release();
     await jukebox.downloads.idle();
 
-    const localTrack = jukebox.tracks.insertLocal('/tmp/local.mp3', 'Local Song', 'Local Artist');
+    const localTrack = jukebox.tracks.insertLocal('/tmp/local.mp3', { title: 'Local Song', artist: 'Local Artist' });
     await request(app).get(`/api/tracks/${localTrack.id}/video`).expect(404);
   });
 

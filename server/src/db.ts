@@ -64,6 +64,15 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE tracks ADD COLUMN video_path TEXT;
   `,
+  // v4 — catalog metadata (#10). The genre doubles as the Host-managed category.
+  `
+  ALTER TABLE tracks ADD COLUMN genre TEXT;
+  ALTER TABLE tracks ADD COLUMN year INTEGER;
+  ALTER TABLE tracks ADD COLUMN track_number INTEGER;
+  CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks (album COLLATE NOCASE);
+  CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks (artist COLLATE NOCASE);
+  CREATE INDEX IF NOT EXISTS idx_tracks_genre ON tracks (genre COLLATE NOCASE);
+  `,
 ];
 
 export function openDb(file: string): Db {

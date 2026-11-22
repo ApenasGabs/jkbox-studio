@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { Config } from './config.js';
+import { parseMetadataPatch } from './lib/metadata.js';
 import { streamFile } from './lib/stream.js';
 import { SPOTIFY_ID_RE } from './lib/validate.js';
 import type { Jukebox, SearchSource } from './services/jukebox.js';
@@ -9,6 +10,7 @@ import { scanLibrary } from './services/library.js';
 import { LyricsError } from './services/lyrics.js';
 import { QueueError } from './services/queue.js';
 import { SpotifyError } from './services/spotify.js';
+import type { Track } from './types.js';
 
 const SEARCH_SOURCES = new Set<SearchSource>(['all', 'youtube', 'spotify', 'local']);
 
@@ -90,8 +92,55 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
     res.json({ results: tracks.searchLibrary(str(req.query.q), 200).map((t) => jukebox.trackToResult(t)) });
   });
 
-  api.post('/library/rescan', requireHost, (_req, res) => {
-    res.json({ added: scanLibrary(tracks, config.musicDir) });
+  api.post('/library/rescan', requireHost, async (_req, res, next) => {
+    try {
+      res.json({ added: await scanLibrary(tracks, config.musicDir) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Catalog (#10) ------------------------------------------------------
+  const toResults = (list: Track[]) => list.map((t) => jukebox.trackToResult(t));
+
+  api.get('/catalog/categories', (_req, res) => {
+    res.json({ categories: tracks.listCategories() });
+  });
+
+  api.get('/catalog/categories/:name/tracks', (req, res) => {
+    const name = str(req.params.name);
+    res.json({ category: name, tracks: toResults(tracks.tracksByCategory(name)) });
+  });
+
+  api.get('/catalog/albums', (req, res) => {
+    res.json({ albums: tracks.listAlbums({ q: str(req.query.q), category: str(req.query.category) }) });
+  });
+
+  api.get('/catalog/albums/:name/tracks', (req, res) => {
+    const name = str(req.params.name);
+    const artist = str(req.query.artist);
+    res.json({ album: name, artist: artist || null, tracks: toResults(tracks.albumTracks(name, artist)) });
+  });
+
+  api.get('/catalog/artists', (_req, res) => {
+    res.json({ artists: tracks.listArtists() });
+  });
+
+  api.get('/catalog/artists/:name', (req, res) => {
+    const artist = tracks.getArtist(str(req.params.name));
+    if (!artist) return void res.status(404).json({ error: 'Artista não encontrado' });
+    res.json({ ...artist, tracks: toResults(artist.tracks) });
+  });
+
+  api.patch('/tracks/:id/metadata', requireHost, (req, res) => {
+    const track = tracks.get(str(req.params.id));
+    if (!track) return void res.status(404).json({ error: 'Faixa não encontrada' });
+    const parsed = parseMetadataPatch(req.body);
+    if (!parsed.ok) return void res.status(400).json({ error: parsed.error });
+    tracks.update(track.id, parsed.patch);
+    // Queue/now-playing views embed the track: push the new metadata to connected clients.
+    queue.emit('change');
+    res.json(tracks.get(track.id));
   });
 
   api.get('/downloads', (_req, res) => {
