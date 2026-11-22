@@ -231,4 +231,47 @@ describe('HTTP API', () => {
     const localTrack = jukebox.tracks.insertLocal('/tmp/local.mp3', 'Local Song', 'Local Artist');
     await request(app).get(`/api/tracks/${localTrack.id}/video`).expect(404);
   });
+
+  it('persists autoDjEnabled via host settings and auto-enqueues cached tracks on queue end', async () => {
+    const { app, jukebox } = makeApp({ HOST_PIN: '1234' });
+    const initialCfg = await request(app).get('/api/config').expect(200);
+    expect(initialCfg.body.autoDjEnabled).toBe(false);
+
+    await request(app).patch('/api/host/settings').send({ autoDjEnabled: true }).expect(403);
+    await request(app)
+      .patch('/api/host/settings')
+      .set('x-host-pin', '1234')
+      .send({ autoDjEnabled: 'yes' })
+      .expect(400);
+
+    const updated = await request(app)
+      .patch('/api/host/settings')
+      .set('x-host-pin', '1234')
+      .send({ autoDjEnabled: true })
+      .expect(200);
+    expect(updated.body).toEqual({ autoDjEnabled: true });
+
+    const cfgAfter = await request(app).get('/api/config').expect(200);
+    expect(cfgAfter.body.autoDjEnabled).toBe(true);
+
+    await request(app).post('/api/queue').send({ result: ytResult('aaaaaaaaaaa'), clientId: 'a', name: 'Ana' }).expect(201);
+    await request(app).post('/api/queue').send({ result: ytResult('bbbbbbbbbbb'), clientId: 'b', name: 'Bia' }).expect(201);
+    await jukebox.downloads.idle();
+
+    const first = jukebox.queue.state().nowPlaying!;
+    expect(first.item.track.sourceId).toBe('aaaaaaaaaaa');
+
+    // End first -> advances to user-queued second track
+    const afterFirst = await request(app).post('/api/player/ended').send({ queueId: first.item.id }).expect(200);
+    expect(afterFirst.body.nowPlaying.item.track.sourceId).toBe('bbbbbbbbbbb');
+
+    // End second (queue is now empty) -> Auto-DJ picks cached track 'aaaaaaaaaaa' without immediately repeating 'bbbbbbbbbbb'
+    const afterSecond = await request(app)
+      .post('/api/player/ended')
+      .send({ queueId: afterFirst.body.nowPlaying.item.id })
+      .expect(200);
+    expect(afterSecond.body.nowPlaying.item.requesterId).toBe('auto-dj');
+    expect(afterSecond.body.nowPlaying.item.requesterName).toBe('Auto-DJ');
+    expect(afterSecond.body.nowPlaying.item.track.sourceId).toBe('aaaaaaaaaaa');
+  });
 });

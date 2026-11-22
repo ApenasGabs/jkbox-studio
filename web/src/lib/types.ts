@@ -68,6 +68,7 @@ export interface AppConfig {
   hostPinRequired: boolean;
   audioFormat: string;
   videoMode: VideoMode;
+  autoDjEnabled: boolean;
   spotify: SpotifyStatus;
 }
 

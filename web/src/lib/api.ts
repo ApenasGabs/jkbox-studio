@@ -73,6 +73,11 @@ export const api = {
       body: JSON.stringify({ offsetMs }),
     }),
   verifyPin: () => post<{ ok: boolean }>('/api/host/verify'),
+  updateHostSettings: (settings: { autoDjEnabled: boolean }) =>
+    request<{ autoDjEnabled: boolean }>('/api/host/settings', {
+      method: 'PATCH',
+      body: JSON.stringify(settings),
+    }),
   rescanLibrary: () => post<{ added: number }>('/api/library/rescan'),
   spotifySync: () => post<SpotifyStatus & { synced: number }>('/api/spotify/sync'),
   spotifyLinkPlaylist: (playlist: string) => post<SpotifyStatus>('/api/spotify/playlist', { playlist }),
