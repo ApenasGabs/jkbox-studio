@@ -1,6 +1,7 @@
 import { QRCodeSVG } from 'qrcode.react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Cover } from '../components/Cover';
+import { LyricsView } from '../components/LyricsView';
 import { QueueList } from '../components/QueueList';
 import { SourceBadge } from '../components/SourceBadge';
 import { useToast } from '../components/Toast';
@@ -8,25 +9,44 @@ import { api, getHostPin, setHostPin } from '../lib/api';
 import { cssImageUrl, formatTime, isLoopback, remoteUrl } from '../lib/format';
 import type { AppConfig, QueueEntry } from '../lib/types';
 import { useJukebox } from '../lib/useJukebox';
+import { useTrackLyrics } from '../lib/useTrackLyrics';
+
+type StageMode = 'cover' | 'lyrics';
+
+const STAGE_MODE_KEY = 'jkbox.stageMode';
+const STAGE_MODES: { id: StageMode; label: string }[] = [
+  { id: 'cover', label: 'Capa' },
+  { id: 'lyrics', label: 'Letra' },
+];
+const MAX_OFFSET_MS = 300_000;
 
 export function Kiosk() {
-  const { state, downloads, connected, send } = useJukebox();
+  const { state, downloads, lyricsOffset, connected, send } = useJukebox();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [unlocked, setUnlocked] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [time, setTime] = useState({ current: 0, duration: 0 });
   const [volume, setVolume] = useState(() => Number(localStorage.getItem('jkbox.volume') ?? 1));
+  const [stageMode, setStageMode] = useState<StageMode>(() =>
+    localStorage.getItem(STAGE_MODE_KEY) === 'lyrics' ? 'lyrics' : 'cover',
+  );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [offsetBusy, setOffsetBusy] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
   const lastSent = useRef(0);
   const loadedFor = useRef<number | null>(null);
   const firstLoad = useRef(true);
   /** Position to restore after a reload; applied on `loadedmetadata` (setting it earlier is ignored). */
   const pendingSeek = useRef<number | null>(null);
+  const pendingOffsetRef = useRef<number | null>(null);
   const toast = useToast();
 
   const nowPlaying = state.nowPlaying;
   const current = nowPlaying?.item;
+  const { lyrics, setLyrics, loading: lyricsLoading, error: lyricsError, reload: reloadLyrics } = useTrackLyrics(
+    current?.trackId,
+    lyricsOffset,
+  );
 
   const refreshConfig = useCallback(() => api.config().then(setConfig).catch(() => {}), []);
 
@@ -70,6 +90,28 @@ export function Kiosk() {
     localStorage.setItem('jkbox.volume', String(volume));
   }, [volume]);
 
+  useEffect(() => {
+    localStorage.setItem(STAGE_MODE_KEY, stageMode);
+  }, [stageMode]);
+
+  useEffect(() => {
+    pendingOffsetRef.current = null;
+  }, [current?.trackId]);
+
+  useEffect(() => {
+    if (!playing) return;
+    const id = window.setInterval(() => {
+      const audio = audioRef.current;
+      if (audio && !audio.paused) {
+        setTime((prev) => ({
+          current: audio.currentTime,
+          duration: Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : prev.duration,
+        }));
+      }
+    }, 100);
+    return () => window.clearInterval(id);
+  }, [playing]);
+
   const reportProgress = (force = false) => {
     const audio = audioRef.current;
     if (!audio || !current) return;
@@ -102,6 +144,38 @@ export function Kiosk() {
   };
 
   const remove = (entry: QueueEntry) => run(() => api.remove(entry.id));
+
+  const persistLyricsOffset = async (nextOffset: number) => {
+    if (!current || !lyrics) return;
+    const clamped = Math.max(-MAX_OFFSET_MS, Math.min(MAX_OFFSET_MS, Math.round(nextOffset)));
+    const previous = lyrics.offsetMs;
+    pendingOffsetRef.current = clamped;
+    setLyrics((prev) => (prev && prev.trackId === current.trackId ? { ...prev, offsetMs: clamped } : prev));
+    setOffsetBusy(true);
+    try {
+      const updated = await api.updateLyricsOffset(current.trackId, clamped);
+      if (pendingOffsetRef.current === clamped) pendingOffsetRef.current = null;
+      setLyrics((prev) => (prev && prev.trackId === updated.trackId ? updated : prev));
+    } catch (err) {
+      pendingOffsetRef.current = null;
+      setLyrics((prev) => (prev && prev.trackId === current.trackId ? { ...prev, offsetMs: previous } : prev));
+      toast.show((err as Error).message, true);
+    } finally {
+      setOffsetBusy(false);
+    }
+  };
+
+  const adjustLyricsOffset = (deltaMs: number) => {
+    if (!lyrics) return;
+    const base = pendingOffsetRef.current ?? lyrics.offsetMs;
+    void persistLyricsOffset(base + deltaMs);
+  };
+
+  const resetLyricsOffset = () => {
+    if (!lyrics || lyrics.offsetMs === 0) return;
+    void persistLyricsOffset(0);
+  };
+
   const url = remoteUrl(config?.publicUrl ?? null);
   const progressPct = time.duration > 0 ? (time.current / time.duration) * 100 : 0;
   const backdrop = cssImageUrl(current?.track.thumbnail);
@@ -149,7 +223,7 @@ export function Kiosk() {
       />
 
       {/* Now playing */}
-      <main className="relative z-10 flex flex-1 flex-col items-center justify-center gap-6 px-5 pb-8 pt-4 sm:px-8 lg:p-8 lg:pt-20">
+      <main className="relative z-10 flex min-h-0 flex-1 flex-col items-center justify-center gap-4 px-5 pb-8 pt-4 sm:px-8 lg:gap-5 lg:p-8 lg:pt-20">
         {/* In the flow on mobile/tablet (never overlaps the cover); pinned to the corners on desktop. */}
         <div className="flex w-full items-center justify-between gap-3 lg:absolute lg:inset-x-8 lg:top-6 lg:w-auto">
           <header className="flex items-center gap-3">
@@ -165,16 +239,72 @@ export function Kiosk() {
 
         {current ? (
           <>
-            <Cover src={current.track.thumbnail} alt={current.track.title} className="aspect-square w-[min(50vh,80vw)] rounded-3xl shadow-2xl shadow-black/60 lg:w-[min(60vh,80vw)]" />
-            <div className="max-w-3xl text-center">
-              <h1 className="text-3xl font-bold leading-tight [overflow-wrap:anywhere] sm:text-4xl lg:text-5xl">{current.track.title}</h1>
-              <p className="mt-2 text-xl text-zinc-300">{current.track.artist}</p>
-              <div className="mt-3 flex items-center justify-center gap-2 text-sm text-zinc-400">
-                <SourceBadge source={current.track.source} />
-                <span>pedido por {current.requesterName}</span>
-              </div>
+            <div
+              role="tablist"
+              aria-label="Modo de visualização do palco"
+              className="inline-flex shrink-0 items-center gap-1 rounded-full border border-white/10 bg-white/5 p-1 backdrop-blur"
+            >
+              {STAGE_MODES.map((mode) => (
+                <button
+                  key={mode.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={stageMode === mode.id}
+                  onClick={() => setStageMode(mode.id)}
+                  className={`rounded-full px-4 py-1 text-xs font-semibold transition sm:text-sm ${
+                    stageMode === mode.id ? 'bg-white text-zinc-900 shadow' : 'text-zinc-300 hover:text-white'
+                  }`}
+                >
+                  {mode.label}
+                </button>
+              ))}
             </div>
-            <div className="w-full max-w-2xl">
+
+            {stageMode === 'cover' ? (
+              <>
+                <Cover
+                  src={current.track.thumbnail}
+                  alt={current.track.title}
+                  className="aspect-square w-[min(48vh,78vw)] rounded-3xl shadow-2xl shadow-black/60 lg:w-[min(52vh,80vw)]"
+                />
+                <div className="max-w-3xl text-center">
+                  <h1 className="text-3xl font-bold leading-tight [overflow-wrap:anywhere] sm:text-4xl lg:text-5xl">{current.track.title}</h1>
+                  <p className="mt-2 text-xl text-zinc-300">{current.track.artist}</p>
+                  <div className="mt-3 flex items-center justify-center gap-2 text-sm text-zinc-400">
+                    <SourceBadge source={current.track.source} />
+                    <span>pedido por {current.requesterName}</span>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex w-full max-w-3xl shrink-0 items-center gap-3 px-1">
+                  <Cover src={current.track.thumbnail} alt={current.track.title} className="h-12 w-12 shrink-0 rounded-xl sm:h-14 sm:w-14" />
+                  <div className="min-w-0 flex-1">
+                    <h1 className="truncate text-lg font-bold leading-tight sm:text-2xl">{current.track.title}</h1>
+                    <p className="truncate text-sm text-zinc-300">{current.track.artist}</p>
+                  </div>
+                  <div className="hidden shrink-0 items-center gap-2 text-xs text-zinc-400 sm:flex">
+                    <SourceBadge source={current.track.source} />
+                    <span>pedido por {current.requesterName}</span>
+                  </div>
+                </div>
+                <LyricsView
+                  variant="kiosk"
+                  lyrics={lyrics}
+                  loading={lyricsLoading}
+                  error={lyricsError}
+                  currentTimeSec={time.current}
+                  onRetry={reloadLyrics}
+                  onAdjustOffset={adjustLyricsOffset}
+                  onResetOffset={resetLyricsOffset}
+                  offsetBusy={offsetBusy}
+                  className="h-[52vh] min-h-[280px] max-h-[500px] w-full max-w-3xl lg:h-auto lg:max-h-none lg:min-h-0 lg:flex-1"
+                />
+              </>
+            )}
+
+            <div className="w-full max-w-2xl shrink-0">
               <div className="h-2 overflow-hidden rounded-full bg-white/10">
                 <div className="h-full bg-gradient-to-r from-accent to-accent-2 transition-[width] duration-300" style={{ width: `${progressPct}%` }} />
               </div>
@@ -183,7 +313,7 @@ export function Kiosk() {
                 <span>{formatTime(time.duration || current.track.durationSec)}</span>
               </div>
             </div>
-            <div className="flex items-center gap-4">
+            <div className="flex shrink-0 items-center gap-4">
               <button onClick={togglePlay} className="h-14 w-14 rounded-full bg-white text-2xl text-zinc-900 hover:scale-105" aria-label={playing ? 'Pausar' : 'Tocar'}>
                 {playing ? '❚❚' : '▶'}
               </button>

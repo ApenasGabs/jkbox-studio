@@ -67,7 +67,20 @@ export interface AppConfig {
   spotify: SpotifyStatus;
 }
 
+export type LyricsSource = 'lrclib' | 'local' | 'none';
+
+export interface TrackLyrics {
+  trackId: string;
+  syncedLrc: string | null;
+  plainLyrics: string | null;
+  instrumental: boolean;
+  source: LyricsSource;
+  offsetMs: number;
+  fetchedAt: number;
+}
+
 export type ServerMessage =
   | { type: 'state'; state: JukeboxState }
   | { type: 'progress'; positionSec: number; paused: boolean }
-  | { type: 'download'; trackId: string; status: TrackStatus; progress: number; error: string | null };
+  | { type: 'download'; trackId: string; status: TrackStatus; progress: number; error: string | null }
+  | { type: 'lyrics_offset'; trackId: string; offsetMs: number };

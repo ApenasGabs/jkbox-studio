@@ -7,13 +7,21 @@ export interface DownloadInfo {
   error: string | null;
 }
 
+export interface LyricsOffsetEvent {
+  trackId: string;
+  offsetMs: number;
+  seq: number;
+}
+
 /** Live jukebox state over WebSocket with automatic reconnection. */
 export function useJukebox() {
   const [state, setState] = useState<JukeboxState>({ nowPlaying: null, queue: [] });
   const [position, setPosition] = useState({ positionSec: 0, paused: false });
   const [downloads, setDownloads] = useState<Record<string, DownloadInfo>>({});
+  const [lyricsOffset, setLyricsOffset] = useState<LyricsOffsetEvent | null>(null);
   const [connected, setConnected] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
+  const offsetSeqRef = useRef(0);
 
   useEffect(() => {
     let closed = false;
@@ -42,6 +50,9 @@ export function useJukebox() {
           setPosition({ positionSec: msg.positionSec, paused: msg.paused });
         } else if (msg.type === 'download') {
           setDownloads((prev) => ({ ...prev, [msg.trackId]: { status: msg.status, progress: msg.progress, error: msg.error } }));
+        } else if (msg.type === 'lyrics_offset') {
+          offsetSeqRef.current += 1;
+          setLyricsOffset({ trackId: msg.trackId, offsetMs: msg.offsetMs, seq: offsetSeqRef.current });
         }
       };
       ws.onclose = () => {
@@ -64,5 +75,5 @@ export function useJukebox() {
     if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
   }, []);
 
-  return { state, position, downloads, connected, send };
+  return { state, position, downloads, lyricsOffset, connected, send };
 }

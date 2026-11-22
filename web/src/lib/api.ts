@@ -1,4 +1,4 @@
-import type { AppConfig, JukeboxState, SearchResult, SpotifyStatus } from './types';
+import type { AppConfig, JukeboxState, SearchResult, SpotifyStatus, TrackLyrics } from './types';
 
 const CLIENT_KEY = 'jkbox.clientId';
 const NAME_KEY = 'jkbox.name';
@@ -65,6 +65,13 @@ export const api = {
   skip: () => post<JukeboxState>('/api/player/skip'),
   ended: (queueId: number) => post<JukeboxState>('/api/player/ended', { queueId }),
   retry: (trackId: string) => post<{ cached: boolean }>(`/api/tracks/${trackId}/retry`),
+  lyrics: (trackId: string, signal?: AbortSignal) =>
+    request<TrackLyrics>(`/api/tracks/${encodeURIComponent(trackId)}/lyrics`, { signal }),
+  updateLyricsOffset: (trackId: string, offsetMs: number) =>
+    request<TrackLyrics>(`/api/tracks/${encodeURIComponent(trackId)}/lyrics/offset`, {
+      method: 'PATCH',
+      body: JSON.stringify({ offsetMs }),
+    }),
   verifyPin: () => post<{ ok: boolean }>('/api/host/verify'),
   rescanLibrary: () => post<{ added: number }>('/api/library/rescan'),
   spotifySync: () => post<SpotifyStatus & { synced: number }>('/api/spotify/sync'),
