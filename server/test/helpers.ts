@@ -14,8 +14,11 @@ export function ytResult(id: string, title = `Song ${id}`, artist = 'Artist'): S
 /** In-memory MediaProvider that "downloads" by writing a small fake audio file. */
 export class FakeMedia implements MediaProvider {
   downloads: string[] = [];
+  videoDownloads: string[] = [];
+  lastMaxHeight: number | null = null;
   searches: string[] = [];
   failIds = new Set<string>();
+  failVideoIds = new Set<string>();
   /** When set, downloads wait until release() is called. */
   gate: Promise<void> | null = null;
   private releaseGate: (() => void) | null = null;
@@ -46,6 +49,16 @@ export class FakeMedia implements MediaProvider {
     onProgress(1);
     const filePath = `${outputBase}.m4a`;
     fs.writeFileSync(filePath, Buffer.alloc(1000, 7));
+    return { filePath };
+  }
+  async downloadVideo(videoId: string, outputBase: string, maxHeight: number, onProgress: (f: number) => void) {
+    this.videoDownloads.push(videoId);
+    this.lastMaxHeight = maxHeight;
+    if (this.failVideoIds.has(videoId)) throw new Error('video boom');
+    onProgress(0.5);
+    onProgress(1);
+    const filePath = `${outputBase}.mp4`;
+    fs.writeFileSync(filePath, Buffer.alloc(2000, 9));
     return { filePath };
   }
   async version() {

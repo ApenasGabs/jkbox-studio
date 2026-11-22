@@ -5,20 +5,66 @@ import { LyricsView } from '../components/LyricsView';
 import { QueueList } from '../components/QueueList';
 import { SourceBadge } from '../components/SourceBadge';
 import { useToast } from '../components/Toast';
+import { VideoLyricsOverlay } from '../components/VideoLyricsOverlay';
 import { api, getHostPin, setHostPin } from '../lib/api';
 import { cssImageUrl, formatTime, isLoopback, remoteUrl } from '../lib/format';
 import type { AppConfig, QueueEntry } from '../lib/types';
 import { useJukebox } from '../lib/useJukebox';
 import { useTrackLyrics } from '../lib/useTrackLyrics';
 
-type StageMode = 'cover' | 'lyrics';
+type StageMode = 'cover' | 'lyrics' | 'video';
+type DefaultStageView = 'cover' | 'video' | 'video-lyrics' | 'lyrics';
 
 const STAGE_MODE_KEY = 'jkbox.stageMode';
+const VIDEO_OVERLAY_KEY = 'jkbox.videoLyricsOverlay';
+const DEFAULT_VIEW_KEY = 'jkbox.defaultStageView';
+
 const STAGE_MODES: { id: StageMode; label: string }[] = [
   { id: 'cover', label: 'Capa' },
   { id: 'lyrics', label: 'Letra' },
+  { id: 'video', label: 'Clipe' },
 ];
+
+const DEFAULT_VIEW_OPTIONS: { id: DefaultStageView; label: string }[] = [
+  { id: 'cover', label: 'Capa' },
+  { id: 'video', label: 'Clipe' },
+  { id: 'video-lyrics', label: 'Clipe + Letra' },
+  { id: 'lyrics', label: 'Letra' },
+];
+
 const MAX_OFFSET_MS = 300_000;
+
+function readInitialDefaultView(): DefaultStageView {
+  const saved = localStorage.getItem(DEFAULT_VIEW_KEY);
+  if (saved === 'cover' || saved === 'video' || saved === 'video-lyrics' || saved === 'lyrics') return saved;
+  return localStorage.getItem(STAGE_MODE_KEY) === 'lyrics' ? 'lyrics' : 'cover';
+}
+
+function readInitialStageMode(defaultView: DefaultStageView): StageMode {
+  const saved = localStorage.getItem(STAGE_MODE_KEY);
+  if (saved === 'cover' || saved === 'lyrics' || saved === 'video') return saved;
+  return defaultView === 'video-lyrics' ? 'video' : defaultView;
+}
+
+function readInitialOverlay(defaultView: DefaultStageView): boolean {
+  const saved = localStorage.getItem(VIDEO_OVERLAY_KEY);
+  if (saved === 'true' || saved === 'false') return saved === 'true';
+  return defaultView === 'video-lyrics';
+}
+
+function youtubeEmbedUrl(youtubeId: string, startSec: number, autoplay: boolean): string {
+  const params = new URLSearchParams({
+    autoplay: autoplay ? '1' : '0',
+    mute: '1',
+    controls: '0',
+    rel: '0',
+    modestbranding: '1',
+    playsinline: '1',
+    enablejsapi: '1',
+    start: String(Math.max(0, Math.floor(startSec))),
+  });
+  return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(youtubeId)}?${params}`;
+}
 
 export function Kiosk() {
   const { state, downloads, lyricsOffset, connected, send } = useJukebox();
@@ -27,22 +73,42 @@ export function Kiosk() {
   const [playing, setPlaying] = useState(false);
   const [time, setTime] = useState({ current: 0, duration: 0 });
   const [volume, setVolume] = useState(() => Number(localStorage.getItem('jkbox.volume') ?? 1));
-  const [stageMode, setStageMode] = useState<StageMode>(() =>
-    localStorage.getItem(STAGE_MODE_KEY) === 'lyrics' ? 'lyrics' : 'cover',
+  const [defaultView, setDefaultView] = useState<DefaultStageView>(readInitialDefaultView);
+  const [stageMode, setStageMode] = useState<StageMode>(() => readInitialStageMode(readInitialDefaultView()));
+  const [videoLyricsOverlay, setVideoLyricsOverlay] = useState<boolean>(() =>
+    readInitialOverlay(readInitialDefaultView()),
   );
+  const [videoFailedQueueId, setVideoFailedQueueId] = useState<number | null>(null);
+  const [embedSrc, setEmbedSrc] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [offsetBusy, setOffsetBusy] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const embedIframeRef = useRef<HTMLIFrameElement>(null);
   const lastSent = useRef(0);
-  const loadedFor = useRef<number | null>(null);
+  const loadedTarget = useRef<{ queueId: number; kind: 'audio' | 'video' } | null>(null);
   const firstLoad = useRef(true);
-  /** Position to restore after a reload; applied on `loadedmetadata` (setting it earlier is ignored). */
+  /** Position to restore after a reload or video->audio fallback; applied on `loadedmetadata`. */
   const pendingSeek = useRef<number | null>(null);
+  const resumePlayRef = useRef(false);
   const pendingOffsetRef = useRef<number | null>(null);
   const toast = useToast();
 
   const nowPlaying = state.nowPlaying;
   const current = nowPlaying?.item;
+  const videoAvailableInCache =
+    config?.videoMode === 'cache' && Boolean(current?.track.videoPath) && videoFailedQueueId !== current?.id;
+  const videoAvailableInEmbed = config?.videoMode === 'embed' && Boolean(current?.track.youtubeId);
+  const hasVideoAvailable = Boolean(current) && (videoAvailableInCache || videoAvailableInEmbed);
+  const effectiveStageMode: StageMode =
+    stageMode === 'video' && !hasVideoAvailable ? (videoLyricsOverlay ? 'lyrics' : 'cover') : stageMode;
+  const activeMediaKind: 'audio' | 'video' = videoAvailableInCache ? 'video' : 'audio';
+
+  const getActiveMedia = useCallback(
+    (): HTMLMediaElement | null => (activeMediaKind === 'video' ? videoRef.current : audioRef.current),
+    [activeMediaKind],
+  );
+
   const { lyrics, setLyrics, loading: lyricsLoading, error: lyricsError, reload: reloadLyrics } = useTrackLyrics(
     current?.trackId,
     lyricsOffset,
@@ -57,36 +123,79 @@ export function Kiosk() {
     if (pin) setHostPin(pin);
     const spotify = params.get('spotify');
     if (spotify) {
-      toast.show(spotify === 'connected' ? 'Spotify conectado! Playlist compartilhada pronta.' : `Spotify: ${params.get('message') ?? 'erro'}`, spotify !== 'connected');
+      toast.show(
+        spotify === 'connected' ? 'Spotify conectado! Playlist compartilhada pronta.' : `Spotify: ${params.get('message') ?? 'erro'}`,
+        spotify !== 'connected',
+      );
       window.history.replaceState(null, '', '/');
     }
   }, [refreshConfig, toast.show]);
 
-  // Load the current queue item into the <audio> element whenever it changes
-  // (keyed by queue item, so the same song requested twice in a row still restarts).
+  useEffect(() => {
+    setVideoFailedQueueId(null);
+  }, [current?.id]);
+
+  // Load the current queue item into <video> (when cached MP4 is available & VIDEO_MODE=cache)
+  // or <audio>. Switching between Capa / Letra / Clipe keeps the active element untouched so
+  // currentTime and play/pause state never reset.
   useEffect(() => {
     const audio = audioRef.current;
+    const video = videoRef.current;
     if (!audio) return;
+
+    const clearEl = (el: HTMLMediaElement | null) => {
+      if (!el || !el.getAttribute('src')) return;
+      el.pause();
+      el.removeAttribute('src');
+      el.load();
+    };
+
     if (!current) {
-      if (loadedFor.current !== null) {
-        audio.removeAttribute('src');
-        audio.load();
+      if (loadedTarget.current !== null) {
+        clearEl(audio);
+        clearEl(video);
         setTime({ current: 0, duration: 0 });
       }
-      loadedFor.current = null;
+      loadedTarget.current = null;
       return;
     }
-    if (loadedFor.current === current.id) return;
-    loadedFor.current = current.id;
-    audio.src = api.streamUrl(current.trackId);
-    // Resume where we were after a page reload.
-    pendingSeek.current = firstLoad.current && nowPlaying && nowPlaying.positionSec > 0 ? nowPlaying.positionSec : null;
+
+    if (!config) return;
+    if (activeMediaKind === 'video' && !video) return;
+
+    const prev = loadedTarget.current;
+    if (prev && prev.queueId === current.id && prev.kind === activeMediaKind) return;
+
+    // Seamless handoff if switching media element on the same queue item (e.g. video error fallback).
+    if (prev && prev.queueId === current.id && prev.kind !== activeMediaKind) {
+      const prevEl = prev.kind === 'video' ? video : audio;
+      if (prevEl) {
+        if (prevEl.currentTime > 0) pendingSeek.current = prevEl.currentTime;
+        resumePlayRef.current = !prevEl.paused || unlocked;
+      }
+    } else {
+      pendingSeek.current = firstLoad.current && nowPlaying && nowPlaying.positionSec > 0 ? nowPlaying.positionSec : null;
+      resumePlayRef.current = unlocked;
+    }
+
     firstLoad.current = false;
-    if (unlocked) audio.play().catch(() => setPlaying(false));
-  }, [current, nowPlaying, unlocked]);
+    loadedTarget.current = { queueId: current.id, kind: activeMediaKind };
+
+    const targetEl = activeMediaKind === 'video' ? video! : audio;
+    const inactiveEl = activeMediaKind === 'video' ? audio : video;
+    clearEl(inactiveEl);
+
+    targetEl.volume = volume;
+    targetEl.src = activeMediaKind === 'video' ? api.videoUrl(current.trackId) : api.streamUrl(current.trackId);
+    if (unlocked || resumePlayRef.current) {
+      resumePlayRef.current = false;
+      targetEl.play().catch(() => setPlaying(false));
+    }
+  }, [current, nowPlaying, config, activeMediaKind, unlocked]);
 
   useEffect(() => {
     if (audioRef.current) audioRef.current.volume = volume;
+    if (videoRef.current) videoRef.current.volume = volume;
     localStorage.setItem('jkbox.volume', String(volume));
   }, [volume]);
 
@@ -95,42 +204,74 @@ export function Kiosk() {
   }, [stageMode]);
 
   useEffect(() => {
+    localStorage.setItem(VIDEO_OVERLAY_KEY, String(videoLyricsOverlay));
+  }, [videoLyricsOverlay]);
+
+  useEffect(() => {
+    localStorage.setItem(DEFAULT_VIEW_KEY, defaultView);
+  }, [defaultView]);
+
+  useEffect(() => {
     pendingOffsetRef.current = null;
   }, [current?.trackId]);
+
+  // Manage YouTube embed URL only when entering/leaving Clipe mode in embed mode (never on time ticks).
+  useEffect(() => {
+    if (effectiveStageMode === 'video' && !videoAvailableInCache && videoAvailableInEmbed && current?.track.youtubeId) {
+      const startSec = audioRef.current?.currentTime ?? 0;
+      const isPlaying = audioRef.current ? !audioRef.current.paused : playing;
+      setEmbedSrc(youtubeEmbedUrl(current.track.youtubeId, startSec, isPlaying));
+    } else {
+      setEmbedSrc(null);
+    }
+  }, [effectiveStageMode, videoAvailableInCache, videoAvailableInEmbed, current?.id, current?.track.youtubeId]);
+
+  // Keep muted embed iframe play/pause synced with authoritative <audio> playback.
+  useEffect(() => {
+    if (!embedSrc || !embedIframeRef.current?.contentWindow) return;
+    const func = playing ? 'playVideo' : 'pauseVideo';
+    embedIframeRef.current.contentWindow.postMessage(JSON.stringify({ event: 'command', func, args: [] }), '*');
+  }, [playing, embedSrc]);
 
   useEffect(() => {
     if (!playing) return;
     const id = window.setInterval(() => {
-      const audio = audioRef.current;
-      if (audio && !audio.paused) {
+      const media = getActiveMedia();
+      if (media && !media.paused) {
         setTime((prev) => ({
-          current: audio.currentTime,
-          duration: Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : prev.duration,
+          current: media.currentTime,
+          duration: Number.isFinite(media.duration) && media.duration > 0 ? media.duration : prev.duration,
         }));
       }
     }, 100);
     return () => window.clearInterval(id);
-  }, [playing]);
+  }, [playing, getActiveMedia]);
 
-  const reportProgress = (force = false) => {
-    const audio = audioRef.current;
-    if (!audio || !current) return;
+  const reportProgress = (force = false, mediaOverride?: HTMLMediaElement | null) => {
+    const media = mediaOverride ?? getActiveMedia();
+    if (!media || !current) return;
     const now = Date.now();
     if (!force && now - lastSent.current < 1000) return;
     lastSent.current = now;
-    send({ type: 'progress', queueId: current.id, positionSec: audio.currentTime, paused: audio.paused });
+    send({ type: 'progress', queueId: current.id, positionSec: media.currentTime, paused: media.paused });
   };
 
   const unlock = () => {
     setUnlocked(true);
-    audioRef.current?.play().catch(() => {});
+    getActiveMedia()?.play().catch(() => {});
   };
 
   const togglePlay = () => {
-    const audio = audioRef.current;
-    if (!audio || !current) return;
-    if (audio.paused) audio.play().catch(() => {});
-    else audio.pause();
+    const media = getActiveMedia();
+    if (!media || !current) return;
+    if (media.paused) media.play().catch(() => {});
+    else media.pause();
+  };
+
+  const handleDefaultViewChange = (next: DefaultStageView) => {
+    setDefaultView(next);
+    setStageMode(next === 'video-lyrics' ? 'video' : next);
+    setVideoLyricsOverlay(next === 'video-lyrics');
   };
 
   const run: RunFn = async (action, ok) => {
@@ -180,6 +321,38 @@ export function Kiosk() {
   const progressPct = time.duration > 0 ? (time.current / time.duration) * 100 : 0;
   const backdrop = cssImageUrl(current?.track.thumbnail);
 
+  const handleMediaPlay = (kind: 'audio' | 'video', el: HTMLMediaElement) => {
+    if (activeMediaKind !== kind) return;
+    setPlaying(true);
+    reportProgress(true, el);
+  };
+
+  const handleMediaPause = (kind: 'audio' | 'video', el: HTMLMediaElement) => {
+    if (activeMediaKind !== kind) return;
+    setPlaying(false);
+    reportProgress(true, el);
+  };
+
+  const handleLoadedMetadata = (kind: 'audio' | 'video', el: HTMLMediaElement) => {
+    if (activeMediaKind !== kind) return;
+    const seek = pendingSeek.current;
+    pendingSeek.current = null;
+    if (seek !== null && Number.isFinite(el.duration) && seek < el.duration) {
+      el.currentTime = seek;
+    }
+  };
+
+  const handleTimeUpdate = (kind: 'audio' | 'video', el: HTMLMediaElement) => {
+    if (activeMediaKind !== kind) return;
+    setTime({ current: el.currentTime, duration: el.duration || current?.track.durationSec || 0 });
+    reportProgress(false, el);
+  };
+
+  const handleMediaEnded = (kind: 'audio' | 'video') => {
+    if (activeMediaKind !== kind || !current) return;
+    api.ended(current.id).catch(() => {});
+  };
+
   return (
     // Mobile/tablet: natural page scroll so the QR code and queue stay reachable.
     // Desktop (lg+): fixed full-height split layout.
@@ -194,28 +367,13 @@ export function Kiosk() {
       <audio
         ref={audioRef}
         preload="auto"
-        onPlay={() => {
-          setPlaying(true);
-          reportProgress(true);
-        }}
-        onPause={() => {
-          setPlaying(false);
-          reportProgress(true);
-        }}
-        onLoadedMetadata={(e) => {
-          const seek = pendingSeek.current;
-          pendingSeek.current = null;
-          if (seek !== null && Number.isFinite(e.currentTarget.duration) && seek < e.currentTarget.duration) {
-            e.currentTarget.currentTime = seek;
-          }
-        }}
-        onTimeUpdate={(e) => {
-          setTime({ current: e.currentTarget.currentTime, duration: e.currentTarget.duration || current?.track.durationSec || 0 });
-          reportProgress();
-        }}
-        onEnded={() => current && api.ended(current.id).catch(() => {})}
+        onPlay={(e) => handleMediaPlay('audio', e.currentTarget)}
+        onPause={(e) => handleMediaPause('audio', e.currentTarget)}
+        onLoadedMetadata={(e) => handleLoadedMetadata('audio', e.currentTarget)}
+        onTimeUpdate={(e) => handleTimeUpdate('audio', e.currentTarget)}
+        onEnded={() => handleMediaEnded('audio')}
         onError={() => {
-          if (!current || !audioRef.current?.src) return;
+          if (activeMediaKind !== 'audio' || !current || !audioRef.current?.src) return;
           toast.show(`Não foi possível tocar "${current.track.title}". Pulando…`, true);
           const id = current.id;
           window.setTimeout(() => api.ended(id).catch(() => {}), 2000);
@@ -239,28 +397,60 @@ export function Kiosk() {
 
         {current ? (
           <>
-            <div
-              role="tablist"
-              aria-label="Modo de visualização do palco"
-              className="inline-flex shrink-0 items-center gap-1 rounded-full border border-white/10 bg-white/5 p-1 backdrop-blur"
-            >
-              {STAGE_MODES.map((mode) => (
+            <div className="flex shrink-0 flex-wrap items-center justify-center gap-2">
+              <div
+                role="tablist"
+                aria-label="Modo de visualização do palco"
+                className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 p-1 backdrop-blur"
+              >
+                {STAGE_MODES.map((mode) => {
+                  const disabled = mode.id === 'video' && !hasVideoAvailable;
+                  return (
+                    <button
+                      key={mode.id}
+                      type="button"
+                      role="tab"
+                      disabled={disabled}
+                      aria-selected={effectiveStageMode === mode.id}
+                      title={
+                        disabled
+                          ? config?.videoMode === 'off'
+                            ? 'Modo videoclipe desativado (VIDEO_MODE=off)'
+                            : 'Videoclipe indisponível para esta faixa'
+                          : undefined
+                      }
+                      onClick={() => !disabled && setStageMode(mode.id)}
+                      className={`rounded-full px-4 py-1 text-xs font-semibold transition sm:text-sm ${
+                        effectiveStageMode === mode.id
+                          ? 'bg-white text-zinc-900 shadow'
+                          : disabled
+                            ? 'cursor-not-allowed text-zinc-500'
+                            : 'text-zinc-300 hover:text-white'
+                      }`}
+                    >
+                      {mode.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {effectiveStageMode === 'video' && (
                 <button
-                  key={mode.id}
                   type="button"
-                  role="tab"
-                  aria-selected={stageMode === mode.id}
-                  onClick={() => setStageMode(mode.id)}
-                  className={`rounded-full px-4 py-1 text-xs font-semibold transition sm:text-sm ${
-                    stageMode === mode.id ? 'bg-white text-zinc-900 shadow' : 'text-zinc-300 hover:text-white'
+                  aria-pressed={videoLyricsOverlay}
+                  onClick={() => setVideoLyricsOverlay((v) => !v)}
+                  className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition sm:text-sm ${
+                    videoLyricsOverlay
+                      ? 'border-accent/60 bg-accent/25 text-white shadow'
+                      : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white'
                   }`}
                 >
-                  {mode.label}
+                  🎤 Legenda {videoLyricsOverlay ? 'ON' : 'OFF'}
                 </button>
-              ))}
+              )}
             </div>
 
-            {stageMode === 'cover' ? (
+            {effectiveStageMode === 'cover' ? (
               <>
                 <Cover
                   src={current.track.thumbnail}
@@ -276,7 +466,7 @@ export function Kiosk() {
                   </div>
                 </div>
               </>
-            ) : (
+            ) : effectiveStageMode === 'lyrics' ? (
               <>
                 <div className="flex w-full max-w-3xl shrink-0 items-center gap-3 px-1">
                   <Cover src={current.track.thumbnail} alt={current.track.title} className="h-12 w-12 shrink-0 rounded-xl sm:h-14 sm:w-14" />
@@ -302,7 +492,58 @@ export function Kiosk() {
                   className="h-[52vh] min-h-[280px] max-h-[500px] w-full max-w-3xl lg:h-auto lg:max-h-none lg:min-h-0 lg:flex-1"
                 />
               </>
+            ) : (
+              <div className="flex w-full max-w-4xl shrink-0 items-center gap-3 px-1">
+                <Cover src={current.track.thumbnail} alt={current.track.title} className="h-12 w-12 shrink-0 rounded-xl sm:h-14 sm:w-14" />
+                <div className="min-w-0 flex-1">
+                  <h1 className="truncate text-lg font-bold leading-tight sm:text-2xl">{current.track.title}</h1>
+                  <p className="truncate text-sm text-zinc-300">{current.track.artist}</p>
+                </div>
+                <div className="hidden shrink-0 items-center gap-2 text-xs text-zinc-400 sm:flex">
+                  <SourceBadge source={current.track.source} />
+                  <span>pedido por {current.requesterName}</span>
+                </div>
+              </div>
             )}
+
+            {/* Persistent <video> stage wrapper: stays mounted across Capa/Letra/Clipe toggles so playback never resets */}
+            <div
+              className={
+                effectiveStageMode === 'video'
+                  ? 'relative flex aspect-video max-h-[48vh] w-full max-w-4xl items-center justify-center overflow-hidden rounded-3xl border border-white/10 bg-black shadow-2xl shadow-black/60 lg:max-h-[52vh]'
+                  : 'pointer-events-none fixed left-0 top-0 h-px w-px overflow-hidden opacity-0'
+              }
+              aria-hidden={effectiveStageMode !== 'video'}
+            >
+              <video
+                ref={videoRef}
+                playsInline
+                preload="auto"
+                className={videoAvailableInCache ? 'h-full w-full object-contain' : 'hidden'}
+                onPlay={(e) => handleMediaPlay('video', e.currentTarget)}
+                onPause={(e) => handleMediaPause('video', e.currentTarget)}
+                onLoadedMetadata={(e) => handleLoadedMetadata('video', e.currentTarget)}
+                onTimeUpdate={(e) => handleTimeUpdate('video', e.currentTarget)}
+                onEnded={() => handleMediaEnded('video')}
+                onError={() => {
+                  if (activeMediaKind !== 'video' || !current || !videoRef.current?.src) return;
+                  setVideoFailedQueueId(current.id);
+                  toast.show('Videoclipe indisponível — reproduzindo áudio.', true);
+                }}
+              />
+              {effectiveStageMode === 'video' && !videoAvailableInCache && embedSrc && (
+                <iframe
+                  ref={embedIframeRef}
+                  title={`Videoclipe de ${current.track.title}`}
+                  src={embedSrc}
+                  allow="autoplay; encrypted-media; picture-in-picture"
+                  className="h-full w-full border-0"
+                />
+              )}
+              {effectiveStageMode === 'video' && videoLyricsOverlay && (
+                <VideoLyricsOverlay lyrics={lyrics} loading={lyricsLoading} currentTimeSec={time.current} />
+              )}
+            </div>
 
             <div className="w-full max-w-2xl shrink-0">
               <div className="h-2 overflow-hidden rounded-full bg-white/10">
@@ -375,6 +616,8 @@ export function Kiosk() {
       {settingsOpen && (
         <HostPanel
           config={config}
+          defaultView={defaultView}
+          onDefaultViewChange={handleDefaultViewChange}
           onClose={() => setSettingsOpen(false)}
           onChanged={refreshConfig}
           run={run}
@@ -400,12 +643,14 @@ type RunFn = <T>(action: () => Promise<T>, ok?: string | ((result: T) => string)
 
 interface HostPanelProps {
   config: AppConfig | null;
+  defaultView: DefaultStageView;
+  onDefaultViewChange: (view: DefaultStageView) => void;
   onClose: () => void;
   onChanged: () => void;
   run: RunFn;
 }
 
-function HostPanel({ config, onClose, onChanged, run }: HostPanelProps) {
+function HostPanel({ config, defaultView, onDefaultViewChange, onClose, onChanged, run }: HostPanelProps) {
   const [pin, setPin] = useState(getHostPin());
   const [playlist, setPlaylist] = useState('');
   const spotify = config?.spotify;
@@ -445,6 +690,30 @@ function HostPanel({ config, onClose, onChanged, run }: HostPanelProps) {
             </div>
           </section>
         )}
+
+        <section className="glass flex flex-col gap-3 p-4">
+          <h3 className="font-semibold">Visualização padrão do palco</h3>
+          <div className="grid grid-cols-2 gap-2">
+            {DEFAULT_VIEW_OPTIONS.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                aria-pressed={defaultView === option.id}
+                onClick={() => onDefaultViewChange(option.id)}
+                className={`rounded-lg px-3 py-2 text-sm font-semibold transition ${
+                  defaultView === option.id ? 'bg-accent text-white' : 'bg-white/10 text-zinc-200 hover:bg-white/20'
+                }`}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          {config?.videoMode === 'off' && (
+            <p className="text-xs text-zinc-400">
+              <code>VIDEO_MODE=off</code> no servidor — opções de Clipe usam fallback automático para Capa/Letra.
+            </p>
+          )}
+        </section>
 
         <section className="glass flex flex-col gap-3 p-4">
           <h3 className="font-semibold">Spotify</h3>

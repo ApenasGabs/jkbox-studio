@@ -1,6 +1,7 @@
 import path from 'node:path';
 
 export type AudioFormat = 'm4a' | 'mp3' | 'opus';
+export type VideoMode = 'off' | 'cache' | 'embed';
 
 export interface Config {
   port: number;
@@ -10,6 +11,8 @@ export interface Config {
   dbPath: string;
   webDir: string;
   audioFormat: AudioFormat;
+  videoMode: VideoMode;
+  videoMaxHeight: number;
   downloadConcurrency: number;
   hostPin: string;
   ytdlpPath: string;
@@ -41,6 +44,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const dataDir = path.resolve(env.DATA_DIR || './data');
   const format = (env.AUDIO_FORMAT || 'm4a').toLowerCase();
   const audioFormat: AudioFormat = format === 'mp3' || format === 'opus' ? format : 'm4a';
+  const rawVideoMode = (env.VIDEO_MODE || 'cache').trim().toLowerCase();
+  const videoMode: VideoMode = rawVideoMode === 'off' || rawVideoMode === 'embed' ? rawVideoMode : 'cache';
+  const rawMaxHeight = int(env.VIDEO_MAX_HEIGHT, 720);
+  const videoMaxHeight = rawMaxHeight > 0 ? rawMaxHeight : 720;
   const callbackBase = publicUrl || `http://127.0.0.1:${port}`;
 
   return {
@@ -51,6 +58,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dbPath: path.resolve(env.DB_PATH || path.join(dataDir, 'jkbox.db')),
     webDir: path.resolve(env.WEB_DIR || path.join(import.meta.dirname, '..', '..', 'web', 'dist')),
     audioFormat,
+    videoMode,
+    videoMaxHeight,
     downloadConcurrency: Math.max(1, int(env.DOWNLOAD_CONCURRENCY, 2)),
     hostPin: env.HOST_PIN ?? '',
     ytdlpPath: env.YTDLP_PATH || 'yt-dlp',

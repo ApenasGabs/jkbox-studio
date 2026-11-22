@@ -148,4 +148,87 @@ describe('HTTP API', () => {
     await request(app).post('/api/queue').send({ clientId: 'a' }).expect(400);
     await request(app).post('/api/queue').send({ result: ytResult('aaaaaaaaaaa') }).expect(400);
   });
+
+  it('exposes videoMode in config and streams cached MP4 video with HTTP Range support', async () => {
+    const { app, jukebox, media } = makeApp({ VIDEO_MAX_HEIGHT: '480' });
+    const cfg = await request(app).get('/api/config').expect(200);
+    expect(cfg.body.videoMode).toBe('cache');
+
+    const queued = await request(app)
+      .post('/api/queue')
+      .send({ result: ytResult('dQw4w9WgXcQ'), clientId: 'phone-1', name: 'Ana' })
+      .expect(201);
+    const trackId = queued.body.item.trackId as string;
+
+    await jukebox.downloads.idle();
+    expect(media.videoDownloads).toEqual(['dQw4w9WgXcQ']);
+    expect(media.lastMaxHeight).toBe(480);
+
+    const track = jukebox.tracks.get(trackId)!;
+    expect(track.videoPath).toBeTruthy();
+    expect(fs.existsSync(track.videoPath!)).toBe(true);
+
+    const head = await request(app).head(`/api/tracks/${trackId}/video`).expect(200);
+    expect(head.headers['content-type']).toBe('video/mp4');
+    expect(head.headers['accept-ranges']).toBe('bytes');
+    expect(Number(head.headers['content-length'])).toBe(2000);
+
+    const full = await request(app).get(`/api/tracks/${trackId}/video`).expect(200);
+    expect(full.headers['content-type']).toBe('video/mp4');
+    expect(Number(full.headers['content-length'])).toBe(2000);
+
+    const partial = await request(app).get(`/api/tracks/${trackId}/video`).set('Range', 'bytes=200-399').expect(206);
+    expect(partial.headers['content-range']).toBe('bytes 200-399/2000');
+    expect(Number(partial.headers['content-length'])).toBe(200);
+
+    await request(app).get(`/api/tracks/${trackId}/video`).set('Range', 'bytes=9000-').expect(416);
+  });
+
+  it('falls back safely to audio-only when video download fails or VIDEO_MODE=off', async () => {
+    const offCtx = makeApp({ VIDEO_MODE: 'off' });
+    const offCfg = await request(offCtx.app).get('/api/config').expect(200);
+    expect(offCfg.body.videoMode).toBe('off');
+
+    const offQueued = await request(offCtx.app)
+      .post('/api/queue')
+      .send({ result: ytResult('dQw4w9WgXcQ'), clientId: 'a' })
+      .expect(201);
+    await offCtx.jukebox.downloads.idle();
+    expect(offCtx.media.downloads).toEqual(['dQw4w9WgXcQ']);
+    expect(offCtx.media.videoDownloads).toEqual([]);
+    const offTrack = offCtx.jukebox.tracks.get(offQueued.body.item.trackId)!;
+    expect(offTrack.status).toBe('ready');
+    expect(offTrack.videoPath).toBeNull();
+    await request(offCtx.app).get(`/api/tracks/${offTrack.id}/video`).expect(404);
+    await request(offCtx.app).get(`/api/tracks/${offTrack.id}/stream`).expect(200);
+
+    const failCtx = makeApp({ VIDEO_MODE: 'cache' });
+    failCtx.media.failVideoIds.add('eeeeeeeeeee');
+    const failQueued = await request(failCtx.app)
+      .post('/api/queue')
+      .send({ result: ytResult('eeeeeeeeeee'), clientId: 'b' })
+      .expect(201);
+    await failCtx.jukebox.downloads.idle();
+    const failTrack = failCtx.jukebox.tracks.get(failQueued.body.item.trackId)!;
+    expect(failTrack.status).toBe('ready');
+    expect(fs.existsSync(failTrack.filePath!)).toBe(true);
+    expect(failTrack.videoPath).toBeNull();
+    await request(failCtx.app).get(`/api/tracks/${failTrack.id}/video`).expect(404);
+    await request(failCtx.app).get(`/api/tracks/${failTrack.id}/stream`).expect(200);
+  });
+
+  it('returns 409 for pending track video and 404 for local audio-only tracks', async () => {
+    const { app, jukebox, media } = makeApp();
+    media.hold();
+    const pending = await request(app)
+      .post('/api/queue')
+      .send({ result: ytResult('aaaaaaaaaaa'), clientId: 'a' })
+      .expect(201);
+    await request(app).get(`/api/tracks/${pending.body.item.trackId}/video`).expect(409);
+    media.release();
+    await jukebox.downloads.idle();
+
+    const localTrack = jukebox.tracks.insertLocal('/tmp/local.mp3', 'Local Song', 'Local Artist');
+    await request(app).get(`/api/tracks/${localTrack.id}/video`).expect(404);
+  });
 });
