@@ -1,3 +1,5 @@
+import type { Settings } from '../db.js';
+import { DEFAULT_AUTO_DJ_RECENT_WINDOW, pickAutoDjTrack } from '../lib/autoDj.js';
 import { parseInput } from '../lib/parseInput.js';
 import { sanitizeResult } from '../lib/validate.js';
 import type { SearchResult, Track, TrackSource } from '../types.js';
@@ -33,6 +35,7 @@ function errorMessage(err: unknown): string {
 /** Orchestrates search, cache, downloads, queue and the Spotify shared playlist. */
 export class Jukebox {
   private importTimer: NodeJS.Timeout | null = null;
+  private _autoDjEnabled: boolean;
 
   constructor(
     readonly tracks: TrackRepository,
@@ -42,8 +45,49 @@ export class Jukebox {
     readonly spotify: SpotifyService,
     readonly lyrics: LyricsService,
     private readonly log: (msg: string) => void = console.log,
+    private readonly settings?: Settings,
   ) {
+    this._autoDjEnabled = this.settings?.get<boolean>('autoDjEnabled') ?? false;
     downloads.on('ready', () => queue.advanceIfIdle());
+    queue.on('drained', () => {
+      this.maybeEnqueueAutoDj();
+    });
+  }
+
+  get autoDjEnabled(): boolean {
+    return this._autoDjEnabled;
+  }
+
+  setAutoDjEnabled(enabled: boolean): boolean {
+    this._autoDjEnabled = enabled;
+    this.settings?.set('autoDjEnabled', enabled);
+    return this._autoDjEnabled;
+  }
+
+  /** Enqueues a random cached track when Auto-DJ is enabled and playback just drained the queue. */
+  maybeEnqueueAutoDj(random?: () => number): Track | null {
+    if (!this._autoDjEnabled) return null;
+    const { nowPlaying, queue: queued } = this.queue.state();
+    if (nowPlaying || queued.length > 0) return null;
+
+    const cached = this.tracks.listCached();
+    if (cached.length === 0) return null;
+
+    const recentIds = this.queue.recentTrackIds(DEFAULT_AUTO_DJ_RECENT_WINDOW * 3);
+    const picked = pickAutoDjTrack(cached, recentIds, {
+      recentWindow: DEFAULT_AUTO_DJ_RECENT_WINDOW,
+      random,
+    });
+    if (!picked) return null;
+
+    try {
+      this.queue.enqueue(picked.id, 'auto-dj', 'Auto-DJ');
+      this.log(`[auto-dj] enfileirada: ${picked.title}${picked.artist ? ` — ${picked.artist}` : ''}`);
+      return picked;
+    } catch (err) {
+      this.log(`[auto-dj] falha ao enfileirar faixa: ${errorMessage(err)}`);
+      return null;
+    }
   }
 
   /** Marks results that are already in the local library so the UI can flag them as instant. */

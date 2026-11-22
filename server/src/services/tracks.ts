@@ -167,4 +167,12 @@ export class TrackRepository {
       .all() as unknown as { file_path: string }[];
     return new Set(rows.map((r) => r.file_path));
   }
+
+  /** Returns all ready tracks whose audio file currently exists on disk. */
+  listCached(): Track[] {
+    const rows = this.db
+      .prepare("SELECT * FROM tracks WHERE status = 'ready' AND file_path IS NOT NULL ORDER BY created_at DESC")
+      .all() as unknown as TrackRow[];
+    return rows.map(toTrack).filter((track) => this.isCached(track));
+  }
 }

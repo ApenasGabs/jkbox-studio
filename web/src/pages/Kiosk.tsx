@@ -33,6 +33,8 @@ const DEFAULT_VIEW_OPTIONS: { id: DefaultStageView; label: string }[] = [
 ];
 
 const MAX_OFFSET_MS = 300_000;
+const CINEMA_IDLE_MS = 5000;
+const UP_NEXT_WINDOW_SEC = 15;
 
 function readInitialDefaultView(): DefaultStageView {
   const saved = localStorage.getItem(DEFAULT_VIEW_KEY);
@@ -82,6 +84,13 @@ export function Kiosk() {
   const [embedSrc, setEmbedSrc] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [offsetBusy, setOffsetBusy] = useState(false);
+  const [cinemaMode, setCinemaMode] = useState(false);
+  const [cinemaIdle, setCinemaIdle] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(() =>
+    typeof document !== 'undefined' ? Boolean(document.fullscreenElement) : false,
+  );
+  const [dismissedUpNextId, setDismissedUpNextId] = useState<number | null>(null);
+  const kioskRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const embedIframeRef = useRef<HTMLIFrameElement>(null);
@@ -318,8 +327,69 @@ export function Kiosk() {
   };
 
   const url = remoteUrl(config?.publicUrl ?? null);
-  const progressPct = time.duration > 0 ? (time.current / time.duration) * 100 : 0;
+  const effectiveDuration = time.duration || current?.track.durationSec || 0;
+  const progressPct = effectiveDuration > 0 ? Math.min(100, (time.current / effectiveDuration) * 100) : 0;
+  const remainingSec = effectiveDuration > 0 ? Math.max(0, effectiveDuration - time.current) : Number.POSITIVE_INFINITY;
+  const nextUp = state.queue.find((entry) => entry.track.status === 'ready') ?? state.queue[0] ?? null;
+  const showUpNextBanner = Boolean(
+    current && nextUp && effectiveDuration > 0 && remainingSec <= UP_NEXT_WINDOW_SEC && dismissedUpNextId !== current.id,
+  );
+  const controlsHidden = cinemaMode && cinemaIdle && !settingsOpen && unlocked;
   const backdrop = cssImageUrl(current?.track.thumbnail);
+
+  useEffect(() => {
+    const onFullscreenChange = () => setIsFullscreen(Boolean(document.fullscreenElement));
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+  }, []);
+
+  useEffect(() => {
+    if (!cinemaMode || settingsOpen || !unlocked) {
+      setCinemaIdle(false);
+      return;
+    }
+    let timer = window.setTimeout(() => setCinemaIdle(true), CINEMA_IDLE_MS);
+    const resetIdle = () => {
+      setCinemaIdle(false);
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setCinemaIdle(true), CINEMA_IDLE_MS);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !document.fullscreenElement) {
+        setCinemaMode(false);
+        return;
+      }
+      resetIdle();
+    };
+    window.addEventListener('mousemove', resetIdle);
+    window.addEventListener('mousedown', resetIdle);
+    window.addEventListener('touchstart', resetIdle, { passive: true });
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener('mousemove', resetIdle);
+      window.removeEventListener('mousedown', resetIdle);
+      window.removeEventListener('touchstart', resetIdle);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [cinemaMode, settingsOpen, unlocked]);
+
+  const toggleFullscreen = useCallback(async () => {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        const target = kioskRef.current ?? document.documentElement;
+        if (!target.requestFullscreen) {
+          toast.show('Tela cheia não suportada neste navegador', true);
+          return;
+        }
+        await target.requestFullscreen();
+      }
+    } catch {
+      toast.show('Não foi possível alternar a tela cheia', true);
+    }
+  }, [toast.show]);
 
   const handleMediaPlay = (kind: 'audio' | 'video', el: HTMLMediaElement) => {
     if (activeMediaKind !== kind) return;
@@ -356,7 +426,12 @@ export function Kiosk() {
   return (
     // Mobile/tablet: natural page scroll so the QR code and queue stay reachable.
     // Desktop (lg+): fixed full-height split layout.
-    <div className="relative flex min-h-full flex-col overflow-x-hidden lg:h-full lg:flex-row lg:overflow-hidden">
+    <div
+      ref={kioskRef}
+      className={`relative flex min-h-full flex-col overflow-x-hidden bg-ink lg:h-full lg:flex-row lg:overflow-hidden ${
+        controlsHidden ? 'cursor-none' : ''
+      }`}
+    >
       {/* Blurred backdrop from the album art */}
       {backdrop && (
         <div className="pointer-events-none absolute inset-0 overflow-hidden">
@@ -381,23 +456,90 @@ export function Kiosk() {
       />
 
       {/* Now playing */}
-      <main className="relative z-10 flex min-h-0 flex-1 flex-col items-center justify-center gap-4 px-5 pb-8 pt-4 sm:px-8 lg:gap-5 lg:p-8 lg:pt-20">
+      <main
+        className={`relative z-10 flex min-h-0 flex-1 flex-col items-center justify-center gap-4 px-5 pt-4 sm:px-8 lg:gap-5 lg:p-8 lg:pt-20 ${
+          cinemaMode ? 'pb-24 sm:pb-8' : 'pb-8'
+        }`}
+      >
         {/* In the flow on mobile/tablet (never overlaps the cover); pinned to the corners on desktop. */}
-        <div className="flex w-full items-center justify-between gap-3 lg:absolute lg:inset-x-8 lg:top-6 lg:w-auto">
+        <div
+          className={`flex w-full flex-wrap items-center justify-between gap-2 transition-opacity duration-300 lg:absolute lg:inset-x-8 lg:top-6 lg:w-auto ${
+            controlsHidden ? 'pointer-events-none opacity-0' : 'opacity-100'
+          }`}
+        >
           <header className="flex items-center gap-3">
             <span className="text-2xl font-black tracking-tight">
               jkbox<span className="text-accent">studio</span>
             </span>
             <span className={`h-2 w-2 rounded-full ${connected ? 'bg-emerald-400' : 'bg-red-500'}`} title={connected ? 'online' : 'reconectando'} />
           </header>
-          <button onClick={() => setSettingsOpen((v) => !v)} className="rounded-full bg-white/10 px-3 py-1 text-sm hover:bg-white/20">
-            ⚙︎ Host
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              aria-pressed={cinemaMode}
+              onClick={() => setCinemaMode((v) => !v)}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition sm:text-sm ${
+                cinemaMode ? 'bg-accent text-white shadow' : 'bg-white/10 hover:bg-white/20'
+              }`}
+              title={cinemaMode ? 'Sair do Modo Cinema (Esc)' : 'Ocultar fila e controles após inatividade'}
+            >
+              {cinemaMode ? '🎬 Cinema ON' : '🎬 Cinema'}
+            </button>
+            <button
+              type="button"
+              aria-pressed={isFullscreen}
+              onClick={() => void toggleFullscreen()}
+              className="rounded-full bg-white/10 px-3 py-1 text-xs font-medium transition hover:bg-white/20 sm:text-sm"
+              title={isFullscreen ? 'Sair da tela cheia' : 'Tela cheia'}
+            >
+              {isFullscreen ? '🗗 Sair' : '⛶ Tela cheia'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setSettingsOpen((v) => !v)}
+              className="rounded-full bg-white/10 px-3 py-1 text-xs font-medium transition hover:bg-white/20 sm:text-sm"
+            >
+              ⚙︎ Host
+            </button>
+          </div>
         </div>
+
+        {showUpNextBanner && nextUp && current && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="glass absolute inset-x-3 top-16 z-20 flex items-center gap-3 border-accent/40 bg-panel/90 p-3 shadow-2xl shadow-black/60 backdrop-blur-md sm:inset-x-auto sm:right-6 sm:top-20 sm:w-80"
+          >
+            <Cover src={nextUp.track.thumbnail} alt={nextUp.track.title} className="h-12 w-12 shrink-0 rounded-xl" />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-accent-2">
+                  A seguir · {Math.max(1, Math.ceil(remainingSec))}s
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setDismissedUpNextId(current.id)}
+                  aria-label="Dispensar aviso A seguir"
+                  className="rounded px-1 text-xs text-zinc-400 hover:bg-white/10 hover:text-white"
+                >
+                  ✕
+                </button>
+              </div>
+              <p className="truncate text-sm font-semibold text-white">{nextUp.track.title}</p>
+              <p className="truncate text-xs text-zinc-300">
+                {nextUp.track.artist || '—'} · pedido por {nextUp.requesterName}
+              </p>
+            </div>
+          </div>
+        )}
 
         {current ? (
           <>
-            <div className="flex shrink-0 flex-wrap items-center justify-center gap-2">
+            <div
+              className={`flex shrink-0 flex-wrap items-center justify-center gap-2 transition-opacity duration-300 ${
+                controlsHidden ? 'pointer-events-none opacity-0' : 'opacity-100'
+              }`}
+            >
               <div
                 role="tablist"
                 aria-label="Modo de visualização do palco"
@@ -455,7 +597,9 @@ export function Kiosk() {
                 <Cover
                   src={current.track.thumbnail}
                   alt={current.track.title}
-                  className="aspect-square w-[min(48vh,78vw)] rounded-3xl shadow-2xl shadow-black/60 lg:w-[min(52vh,80vw)]"
+                  className={`aspect-square rounded-3xl shadow-2xl shadow-black/60 ${
+                    cinemaMode ? 'w-[min(56vh,84vw)] lg:w-[min(62vh,84vw)]' : 'w-[min(48vh,78vw)] lg:w-[min(52vh,80vw)]'
+                  }`}
                 />
                 <div className="max-w-3xl text-center">
                   <h1 className="text-3xl font-bold leading-tight [overflow-wrap:anywhere] sm:text-4xl lg:text-5xl">{current.track.title}</h1>
@@ -510,7 +654,9 @@ export function Kiosk() {
             <div
               className={
                 effectiveStageMode === 'video'
-                  ? 'relative flex aspect-video max-h-[48vh] w-full max-w-4xl items-center justify-center overflow-hidden rounded-3xl border border-white/10 bg-black shadow-2xl shadow-black/60 lg:max-h-[52vh]'
+                  ? `relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-3xl border border-white/10 bg-black shadow-2xl shadow-black/60 ${
+                      cinemaMode ? 'max-h-[62vh] max-w-6xl lg:max-h-[68vh]' : 'max-h-[48vh] max-w-4xl lg:max-h-[52vh]'
+                    }`
                   : 'pointer-events-none fixed left-0 top-0 h-px w-px overflow-hidden opacity-0'
               }
               aria-hidden={effectiveStageMode !== 'video'}
@@ -545,7 +691,11 @@ export function Kiosk() {
               )}
             </div>
 
-            <div className="w-full max-w-2xl shrink-0">
+            <div
+              className={`w-full max-w-2xl shrink-0 transition-opacity duration-300 ${
+                controlsHidden ? 'pointer-events-none opacity-0' : 'opacity-100'
+              }`}
+            >
               <div className="h-2 overflow-hidden rounded-full bg-white/10">
                 <div className="h-full bg-gradient-to-r from-accent to-accent-2 transition-[width] duration-300" style={{ width: `${progressPct}%` }} />
               </div>
@@ -554,7 +704,11 @@ export function Kiosk() {
                 <span>{formatTime(time.duration || current.track.durationSec)}</span>
               </div>
             </div>
-            <div className="flex shrink-0 items-center gap-4">
+            <div
+              className={`flex shrink-0 items-center gap-4 transition-opacity duration-300 ${
+                controlsHidden ? 'pointer-events-none opacity-0' : 'opacity-100'
+              }`}
+            >
               <button onClick={togglePlay} className="h-14 w-14 rounded-full bg-white text-2xl text-zinc-900 hover:scale-105" aria-label={playing ? 'Pausar' : 'Tocar'}>
                 {playing ? '❚❚' : '▶'}
               </button>
@@ -584,34 +738,49 @@ export function Kiosk() {
         )}
       </main>
 
-      {/* Sidebar: QR + queue */}
-      <aside className="relative z-10 flex w-full flex-col gap-4 border-t border-white/10 bg-black/30 p-5 sm:p-6 lg:w-[420px] lg:border-l lg:border-t-0">
-        <div className="glass flex items-center gap-4 p-4">
-          <div className="rounded-xl bg-white p-2">
-            <QRCodeSVG value={url} size={112} />
+      {/* Sidebar: QR + queue (hidden in Modo Cinema, replaced by discrete corner mini QR) */}
+      {!cinemaMode ? (
+        <aside className="relative z-10 flex w-full flex-col gap-4 border-t border-white/10 bg-black/30 p-5 sm:p-6 lg:w-[420px] lg:border-l lg:border-t-0">
+          <div className="glass flex items-center gap-4 p-4">
+            <div className="rounded-xl bg-white p-2">
+              <QRCodeSVG value={url} size={112} />
+            </div>
+            <div className="min-w-0">
+              <p className="font-semibold">Peça sua música 📱</p>
+              <p className="text-sm text-accent-2 [overflow-wrap:anywhere]">{url}</p>
+              {isLoopback(url) && (
+                <p className="mt-1 text-xs text-amber-300">Defina PUBLIC_URL com o IP da rede para os celulares acessarem.</p>
+              )}
+            </div>
           </div>
-          <div className="min-w-0">
-            <p className="font-semibold">Peça sua música 📱</p>
-            <p className="text-sm text-accent-2 [overflow-wrap:anywhere]">{url}</p>
-            {isLoopback(url) && (
-              <p className="mt-1 text-xs text-amber-300">Defina PUBLIC_URL com o IP da rede para os celulares acessarem.</p>
-            )}
-          </div>
-        </div>
 
-        <div className="flex min-h-0 flex-1 flex-col">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-zinc-400">Próximas ({state.queue.length})</h2>
-          <div className="pr-1 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
-            <QueueList
-              queue={state.queue}
-              downloads={downloads}
-              onRemove={remove}
-              onRetry={(entry) => run(() => api.retry(entry.trackId), 'Tentando baixar novamente')}
-              compact
-            />
+          <div className="flex min-h-0 flex-1 flex-col">
+            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-zinc-400">Próximas ({state.queue.length})</h2>
+            <div className="pr-1 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
+              <QueueList
+                queue={state.queue}
+                downloads={downloads}
+                onRemove={remove}
+                onRetry={(entry) => run(() => api.retry(entry.trackId), 'Tentando baixar novamente')}
+                compact
+              />
+            </div>
+          </div>
+        </aside>
+      ) : (
+        <div
+          aria-label="QR Code para pedir música"
+          className="glass fixed bottom-3 right-3 z-20 flex items-center gap-2.5 border-white/15 bg-black/60 p-2 opacity-80 shadow-xl backdrop-blur-md transition-opacity hover:opacity-100 sm:bottom-5 sm:right-5 sm:p-2.5"
+        >
+          <div className="rounded-lg bg-white p-1">
+            <QRCodeSVG value={url} size={56} />
+          </div>
+          <div className="hidden max-w-[140px] pr-1 sm:block">
+            <p className="text-xs font-semibold text-white">Peça sua música</p>
+            <p className="truncate text-[11px] text-accent-2">{url}</p>
           </div>
         </div>
-      </aside>
+      )}
 
       {settingsOpen && (
         <HostPanel
@@ -713,6 +882,39 @@ function HostPanel({ config, defaultView, onDefaultViewChange, onClose, onChange
               <code>VIDEO_MODE=off</code> no servidor — opções de Clipe usam fallback automático para Capa/Letra.
             </p>
           )}
+        </section>
+
+        <section className="glass flex items-center justify-between gap-3 p-4">
+          <div className="min-w-0">
+            <h3 className="font-semibold">Auto-DJ</h3>
+            <p className="text-xs text-zinc-400">
+              Quando a fila esvaziar, toca automaticamente uma faixa aleatória do acervo em cache sem repetir as últimas tocadas.
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-label="Ativar Auto-DJ"
+            aria-checked={Boolean(config?.autoDjEnabled)}
+            disabled={!config}
+            onClick={() => {
+              if (!config) return;
+              const next = !config.autoDjEnabled;
+              void run(
+                () => api.updateHostSettings({ autoDjEnabled: next }),
+                next ? 'Auto-DJ ativado' : 'Auto-DJ desativado',
+              ).then(onChanged);
+            }}
+            className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition ${
+              config?.autoDjEnabled ? 'bg-accent' : 'bg-white/20'
+            } disabled:opacity-50`}
+          >
+            <span
+              className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${
+                config?.autoDjEnabled ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
         </section>
 
         <section className="glass flex flex-col gap-3 p-4">

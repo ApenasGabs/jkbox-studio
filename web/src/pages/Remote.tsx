@@ -6,6 +6,7 @@ import { SourceBadge } from '../components/SourceBadge';
 import { useToast } from '../components/Toast';
 import { api, getClientId, getName, type SearchSource, setName } from '../lib/api';
 import { formatTime } from '../lib/format';
+import { applyKaraokeFilter } from '../lib/karaoke';
 import type { AppConfig, QueueEntry, SearchResult } from '../lib/types';
 import { useInterpolatedTime } from '../lib/useInterpolatedTime';
 import { useJukebox } from '../lib/useJukebox';
@@ -25,6 +26,7 @@ export function Remote() {
   const [name, setNameState] = useState(getName());
   const [query, setQuery] = useState('');
   const [source, setSource] = useState<SearchSource>('all');
+  const [karaoke, setKaraoke] = useState(false);
   const [results, setResults] = useState<SearchResult[]>([]);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
@@ -62,12 +64,20 @@ export function Remote() {
 
   // The local library can be browsed without typing anything.
   useEffect(() => {
-    if (source === 'local') void runSearch(query, 'local');
+    if (source === 'local') void runSearch(applyKaraokeFilter(query, karaoke), 'local');
   }, [source]);
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (query.trim() || source === 'local') void runSearch(query, source);
+    if (query.trim() || source === 'local') void runSearch(applyKaraokeFilter(query, karaoke), source);
+  };
+
+  const toggleKaraoke = () => {
+    const nextKaraoke = !karaoke;
+    const nextSource: SearchSource = nextKaraoke && (source === 'spotify' || source === 'local') ? 'youtube' : source;
+    setKaraoke(nextKaraoke);
+    if (nextSource !== source) setSource(nextSource);
+    if (query.trim()) void runSearch(applyKaraokeFilter(query, nextKaraoke), nextSource);
   };
 
   const add = async (result: SearchResult) => {
@@ -178,16 +188,30 @@ export function Remote() {
             </button>
           </form>
 
-          <div className="flex gap-2 overflow-x-auto">
+          <div className="flex flex-wrap items-center gap-2">
             {tabs.map((tab) => (
               <button
                 key={tab.id}
+                type="button"
                 onClick={() => setSource(tab.id)}
                 className={`rounded-full px-3 py-1 text-sm ${source === tab.id ? 'bg-accent text-white' : 'bg-white/10 text-zinc-300'}`}
               >
                 {tab.label}
               </button>
             ))}
+            <button
+              type="button"
+              aria-pressed={karaoke}
+              onClick={toggleKaraoke}
+              title="Adicionar filtro karaokê na busca do YouTube"
+              className={`rounded-full border px-3 py-1 text-sm font-medium transition ${
+                karaoke
+                  ? 'border-accent bg-accent/25 text-white shadow-sm'
+                  : 'border-white/10 bg-white/10 text-zinc-300 hover:bg-white/15 hover:text-white'
+              }`}
+            >
+              🎤 Karaokê
+            </button>
           </div>
 
           {Object.entries(errors).map(([src, message]) => (

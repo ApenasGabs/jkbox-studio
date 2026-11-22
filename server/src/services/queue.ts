@@ -26,6 +26,7 @@ export class QueueError extends Error {
 export interface QueueEvents {
   change: [];
   progress: [positionSec: number, paused: boolean];
+  drained: [];
 }
 
 export interface EnqueueResult {
@@ -86,18 +87,21 @@ export class QueueService extends EventEmitter<QueueEvents> {
     }
     if (row.status === 'playing') {
       this.finishCurrent('removed');
-      this.advanceIfIdle();
+      const advanced = this.advanceIfIdle();
+      this.emit('change');
+      if (!advanced && this.ordered().length === 0) this.emit('drained');
     } else {
       this.setStatus(queueId, 'removed');
+      this.emit('change');
     }
-    this.emit('change');
   }
 
   skip(): void {
     if (!this.currentRow()) return;
     this.finishCurrent('played');
-    this.advanceIfIdle();
+    const advanced = this.advanceIfIdle();
     this.emit('change');
+    if (!advanced && this.ordered().length === 0) this.emit('drained');
   }
 
   /** Called by the kiosk when the audio element fires "ended" (idempotent per item). */
@@ -144,6 +148,19 @@ export class QueueService extends EventEmitter<QueueEvents> {
       .prepare("SELECT * FROM queue WHERE status = 'played' ORDER BY finished_at DESC LIMIT ?")
       .all(limit) as unknown as QueueRow[];
     return rows.map((row) => this.view(row));
+  }
+
+  /** Returns recently played/started-and-removed track IDs (most recent first) for Auto-DJ deduplication. */
+  recentTrackIds(limit = 30): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT track_id FROM queue
+         WHERE status = 'played' OR (status = 'removed' AND started_at IS NOT NULL)
+         ORDER BY finished_at DESC, id DESC
+         LIMIT ?`,
+      )
+      .all(limit) as unknown as { track_id: string }[];
+    return rows.map((r) => r.track_id);
   }
 
   private ordered(): QueueEntryView[] {

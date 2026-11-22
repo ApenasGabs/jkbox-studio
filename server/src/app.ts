@@ -51,12 +51,22 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
       hostPinRequired: !!config.hostPin,
       audioFormat: config.audioFormat,
       videoMode: config.videoMode,
+      autoDjEnabled: jukebox.autoDjEnabled,
       spotify: spotify.status(),
     });
   });
 
   api.post('/host/verify', (req, res) => {
     res.json({ ok: isHost(req) });
+  });
+
+  api.patch('/host/settings', requireHost, (req, res) => {
+    const { autoDjEnabled } = req.body ?? {};
+    if (typeof autoDjEnabled !== 'boolean') {
+      return void res.status(400).json({ error: 'autoDjEnabled deve ser booleano' });
+    }
+    jukebox.setAutoDjEnabled(autoDjEnabled);
+    res.json({ autoDjEnabled: jukebox.autoDjEnabled });
   });
 
   api.get('/state', (_req, res) => {

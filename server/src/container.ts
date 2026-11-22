@@ -17,9 +17,10 @@ export interface ContainerOverrides {
 /** Wires all services together (overridable for tests). */
 export function createJukebox(config: Config, overrides: ContainerOverrides = {}): Jukebox {
   const db = openDb(config.dbPath);
+  const settings = new Settings(db);
   const tracks = new TrackRepository(db);
   const media = overrides.media ?? new YtDlp(config.ytdlpPath, config.audioFormat, config.ytdlpExtraArgs);
-  const spotify = new SpotifyService(config.spotify, new Settings(db), overrides.fetchFn);
+  const spotify = new SpotifyService(config.spotify, settings, overrides.fetchFn);
   const lyrics = new LyricsService(db, config.musicDir, overrides.fetchFn, overrides.log);
   const queue = new QueueService(db, tracks);
   let jukebox: Jukebox | null = null;
@@ -35,6 +36,6 @@ export function createJukebox(config: Config, overrides: ContainerOverrides = {}
       log: overrides.log,
     },
   );
-  jukebox = new Jukebox(tracks, queue, downloads, media, spotify, lyrics, overrides.log);
+  jukebox = new Jukebox(tracks, queue, downloads, media, spotify, lyrics, overrides.log, settings);
   return jukebox;
 }
