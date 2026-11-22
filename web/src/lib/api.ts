@@ -78,7 +78,8 @@ export const api = {
   spotifyLinkPlaylist: (playlist: string) => post<SpotifyStatus>('/api/spotify/playlist', { playlist }),
   spotifyImport: () => post<{ imported: number }>('/api/spotify/import'),
   spotifyDisconnect: () => post<SpotifyStatus>('/api/spotify/disconnect'),
-  streamUrl: (trackId: string) => `/api/tracks/${trackId}/stream`,
+  streamUrl: (trackId: string) => `/api/tracks/${encodeURIComponent(trackId)}/stream`,
+  videoUrl: (trackId: string) => `/api/tracks/${encodeURIComponent(trackId)}/video`,
   spotifyAuthUrl: () => {
     const pin = getHostPin();
     return `/api/spotify/auth${pin ? `?${new URLSearchParams({ pin })}` : ''}`;

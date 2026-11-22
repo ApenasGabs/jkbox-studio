@@ -16,8 +16,10 @@ describe('parseRange', () => {
     expect(parseRange('bytes=-', 1000)).toBeNull();
   });
 
-  it('maps audio mime types', () => {
+  it('maps audio and video mime types', () => {
     expect(mimeFor('/x/a.m4a')).toBe('audio/mp4');
     expect(mimeFor('/x/a.MP3')).toBe('audio/mpeg');
+    expect(mimeFor('/x/a.mp4')).toBe('video/mp4');
+    expect(mimeFor('/x/a.m4v')).toBe('video/mp4');
   });
 });

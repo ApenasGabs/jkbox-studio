@@ -23,8 +23,17 @@ export function createJukebox(config: Config, overrides: ContainerOverrides = {}
   const lyrics = new LyricsService(db, config.musicDir, overrides.fetchFn, overrides.log);
   const queue = new QueueService(db, tracks);
   let jukebox: Jukebox | null = null;
-  const downloads = new DownloadManager(tracks, media, config.musicDir, config.downloadConcurrency, (track) =>
-    jukebox!.resolveYoutubeId(track),
+  const downloads = new DownloadManager(
+    tracks,
+    media,
+    config.musicDir,
+    config.downloadConcurrency,
+    (track) => jukebox!.resolveYoutubeId(track),
+    {
+      videoMode: config.videoMode,
+      videoMaxHeight: config.videoMaxHeight,
+      log: overrides.log,
+    },
   );
   jukebox = new Jukebox(tracks, queue, downloads, media, spotify, lyrics, overrides.log);
   return jukebox;

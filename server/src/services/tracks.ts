@@ -15,6 +15,7 @@ interface TrackRow {
   youtube_id: string | null;
   spotify_uri: string | null;
   file_path: string | null;
+  video_path: string | null;
   status: TrackStatus;
   progress: number;
   error: string | null;
@@ -34,6 +35,7 @@ function toTrack(row: TrackRow): Track {
     youtubeId: row.youtube_id,
     spotifyUri: row.spotify_uri,
     filePath: row.file_path,
+    videoPath: row.video_path,
     status: row.status,
     progress: row.progress,
     error: row.error,
@@ -56,10 +58,10 @@ export class TrackRepository {
     return row ? toTrack(row) : null;
   }
 
-  /** Finds a ready track that already has the audio for this YouTube video on disk. */
+  /** Finds a ready track that already has the audio (and ideally video) for this YouTube video on disk. */
   findReadyByYoutubeId(youtubeId: string): Track | null {
     const row = this.db
-      .prepare("SELECT * FROM tracks WHERE youtube_id = ? AND status = 'ready' LIMIT 1")
+      .prepare("SELECT * FROM tracks WHERE youtube_id = ? AND status = 'ready' ORDER BY (video_path IS NOT NULL) DESC LIMIT 1")
       .get(youtubeId) as TrackRow | undefined;
     return row ? toTrack(row) : null;
   }
@@ -111,13 +113,14 @@ export class TrackRepository {
 
   update(
     id: string,
-    patch: Partial<Pick<Track, 'status' | 'progress' | 'error' | 'filePath' | 'youtubeId' | 'durationSec' | 'thumbnail'>>,
+    patch: Partial<Pick<Track, 'status' | 'progress' | 'error' | 'filePath' | 'videoPath' | 'youtubeId' | 'durationSec' | 'thumbnail'>>,
   ): void {
     const columns: Record<string, string> = {
       status: 'status',
       progress: 'progress',
       error: 'error',
       filePath: 'file_path',
+      videoPath: 'video_path',
       youtubeId: 'youtube_id',
       durationSec: 'duration_sec',
       thumbnail: 'thumbnail',
@@ -131,6 +134,11 @@ export class TrackRepository {
   /** True when the track's audio file is available on disk. */
   isCached(track: Track): boolean {
     return track.status === 'ready' && !!track.filePath && fs.existsSync(track.filePath);
+  }
+
+  /** True when the track's MP4 video file is available on disk. */
+  isVideoCached(track: Track): boolean {
+    return track.status === 'ready' && !!track.videoPath && fs.existsSync(track.videoPath);
   }
 
   /** Searches downloaded/local tracks (the "Acervo Local"). */

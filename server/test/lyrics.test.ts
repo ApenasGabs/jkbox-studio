@@ -73,10 +73,11 @@ describe('lyrics service and API', () => {
 
     const db = openDb(config.dbPath);
     const version = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    expect(version).toBe(2);
+    expect(version).toBe(3);
 
     const tracks = new TrackRepository(db);
     expect(tracks.get('t-legacy')?.title).toBe('Never Gonna Give You Up');
+    expect(tracks.get('t-legacy')?.videoPath).toBeNull();
     const cols = db.prepare('PRAGMA table_info(lyrics)').all() as { name: string }[];
     expect(cols.map((c) => c.name)).toEqual([
       'track_id',

@@ -13,6 +13,12 @@ export interface MediaProvider {
   getVideo(videoId: string): Promise<SearchResult>;
   getPlaylist(url: string, limit?: number): Promise<SearchResult[]>;
   download(videoId: string, outputBase: string, onProgress: (fraction: number) => void): Promise<DownloadResult>;
+  downloadVideo?(
+    videoId: string,
+    outputBase: string,
+    maxHeight: number,
+    onProgress: (fraction: number) => void,
+  ): Promise<DownloadResult>;
   version(): Promise<string>;
 }
 
@@ -60,6 +66,12 @@ export function parseProgressLine(line: string): number | null {
   const size = Number.isFinite(total) && total > 0 ? total : estimate;
   if (!Number.isFinite(downloaded) || !Number.isFinite(size) || size <= 0) return null;
   return Math.min(1, Math.max(0, downloaded / size));
+}
+
+/** Builds the yt-dlp format selector for lightweight MP4 clips up to `maxHeight`. */
+export function buildVideoFormatSelector(maxHeight: number): string {
+  const height = Math.max(144, Math.round(maxHeight));
+  return `bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${height}][ext=mp4]/best`;
 }
 
 /** Defense in depth: never interpolate anything but a canonical video id into a yt-dlp URL. */
@@ -129,24 +141,20 @@ export class YtDlp implements MediaProvider {
     return (data.entries ?? []).filter((e) => e?.id).map(entryToResult);
   }
 
-  async download(videoId: string, outputBase: string, onProgress: (fraction: number) => void): Promise<DownloadResult> {
+  private async runDownload(
+    videoId: string,
+    outputBase: string,
+    fallbackExt: string,
+    formatArgs: string[],
+    onProgress: (fraction: number) => void,
+  ): Promise<DownloadResult> {
     assertVideoId(videoId);
     let filePath = '';
     await this.run(
       [
         `https://www.youtube.com/watch?v=${videoId}`,
         '--no-playlist',
-        '-f',
-        'bestaudio/best',
-        '-x',
-        '--audio-format',
-        this.audioFormat,
-        '--audio-quality',
-        '0',
-        '--embed-metadata',
-        '--embed-thumbnail',
-        '--convert-thumbnails',
-        'jpg',
+        ...formatArgs,
         '--progress',
         '--newline',
         '--progress-template',
@@ -162,7 +170,44 @@ export class YtDlp implements MediaProvider {
         else if (line.startsWith('/') || /^[A-Za-z]:\\/.test(line)) filePath = line.trim();
       },
     );
-    if (!filePath) filePath = `${outputBase}.${this.audioFormat}`;
+    if (!filePath) filePath = `${outputBase}.${fallbackExt}`;
     return { filePath };
+  }
+
+  async download(videoId: string, outputBase: string, onProgress: (fraction: number) => void): Promise<DownloadResult> {
+    return this.runDownload(
+      videoId,
+      outputBase,
+      this.audioFormat,
+      [
+        '-f',
+        'bestaudio/best',
+        '-x',
+        '--audio-format',
+        this.audioFormat,
+        '--audio-quality',
+        '0',
+        '--embed-metadata',
+        '--embed-thumbnail',
+        '--convert-thumbnails',
+        'jpg',
+      ],
+      onProgress,
+    );
+  }
+
+  async downloadVideo(
+    videoId: string,
+    outputBase: string,
+    maxHeight: number,
+    onProgress: (fraction: number) => void,
+  ): Promise<DownloadResult> {
+    return this.runDownload(
+      videoId,
+      outputBase,
+      'mp4',
+      ['-f', buildVideoFormatSelector(maxHeight), '--merge-output-format', 'mp4'],
+      onProgress,
+    );
   }
 }

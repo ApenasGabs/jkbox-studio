@@ -14,6 +14,7 @@ export interface Track {
   youtubeId: string | null;
   spotifyUri: string | null;
   filePath: string | null;
+  videoPath: string | null;
   status: TrackStatus;
   progress: number;
   error: string | null;

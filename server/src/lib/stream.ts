@@ -12,6 +12,8 @@ const MIME: Record<string, string> = {
   '.webm': 'audio/webm',
   '.wav': 'audio/wav',
   '.flac': 'audio/flac',
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/mp4',
 };
 
 export function mimeFor(file: string): string {
@@ -38,18 +40,18 @@ export function parseRange(header: string, size: number): { start: number; end: 
   return { start, end };
 }
 
-/** Streams an audio file with HTTP Range support so <audio> can seek. */
-export function streamFile(req: Request, res: Response, file: string): void {
+/** Streams a media file with HTTP Range support so <audio> and <video> can seek. */
+export function streamFile(req: Request, res: Response, file: string, contentType?: string): void {
   let stat: fs.Stats;
   try {
     stat = fs.statSync(file);
   } catch {
-    res.status(404).json({ error: 'Arquivo de áudio não encontrado' });
+    res.status(404).json({ error: 'Arquivo de mídia não encontrado' });
     return;
   }
   const size = stat.size;
   res.setHeader('Accept-Ranges', 'bytes');
-  res.setHeader('Content-Type', mimeFor(file));
+  res.setHeader('Content-Type', contentType ?? mimeFor(file));
   res.setHeader('Cache-Control', 'public, max-age=86400');
 
   const header = req.headers.range;

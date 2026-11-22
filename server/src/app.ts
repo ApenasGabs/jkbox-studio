@@ -50,6 +50,7 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
       publicUrl: config.publicUrl || null,
       hostPinRequired: !!config.hostPin,
       audioFormat: config.audioFormat,
+      videoMode: config.videoMode,
       spotify: spotify.status(),
     });
   });
@@ -155,6 +156,22 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
   };
   api.get('/tracks/:id/stream', stream);
   api.head('/tracks/:id/stream', stream);
+
+  const streamVideo = (req: Request<{ id: string }>, res: Response) => {
+    const track = tracks.get(req.params.id);
+    if (!track) return void res.status(404).json({ error: 'Faixa não encontrada' });
+    if (track.status !== 'ready') {
+      return void res.status(409).json({ error: 'Faixa ainda não está pronta', status: track.status });
+    }
+    if (!track.videoPath) {
+      return void res.status(404).json({ error: 'Vídeo não disponível para esta faixa' });
+    }
+    const ext = path.extname(track.videoPath).toLowerCase();
+    const contentType = ext === '.webm' ? 'video/webm' : 'video/mp4';
+    streamFile(req, res, track.videoPath, contentType);
+  };
+  api.get('/tracks/:id/video', streamVideo);
+  api.head('/tracks/:id/video', streamVideo);
 
   api.get('/tracks/:id/lyrics', async (req, res, next) => {
     try {

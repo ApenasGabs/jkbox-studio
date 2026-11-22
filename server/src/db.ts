@@ -61,6 +61,9 @@ const MIGRATIONS: string[] = [
     fetched_at INTEGER NOT NULL
   );
   `,
+  `
+  ALTER TABLE tracks ADD COLUMN video_path TEXT;
+  `,
 ];
 
 export function openDb(file: string): Db {

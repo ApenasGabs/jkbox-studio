@@ -1,6 +1,7 @@
 // Mirrors server/src/types.ts (kept minimal on purpose).
 export type TrackSource = 'youtube' | 'spotify' | 'local';
 export type TrackStatus = 'pending' | 'downloading' | 'ready' | 'error';
+export type VideoMode = 'off' | 'cache' | 'embed';
 
 export interface Track {
   id: string;
@@ -11,6 +12,8 @@ export interface Track {
   album: string | null;
   durationSec: number | null;
   thumbnail: string | null;
+  youtubeId?: string | null;
+  videoPath?: string | null;
   status: TrackStatus;
   progress: number;
   error: string | null;
@@ -64,6 +67,7 @@ export interface AppConfig {
   publicUrl: string | null;
   hostPinRequired: boolean;
   audioFormat: string;
+  videoMode: VideoMode;
   spotify: SpotifyStatus;
 }
 
