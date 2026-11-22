@@ -1,4 +1,4 @@
-import type { AppConfig, JukeboxState, SearchResult, SpotifyStatus, TrackLyrics } from './types';
+import type { AppConfig, JukeboxState, QueueEntry, SearchResult, SpotifyStatus, TrackLyrics } from './types';
 
 const CLIENT_KEY = 'jkbox.clientId';
 const NAME_KEY = 'jkbox.name';
@@ -62,6 +62,8 @@ export const api = {
   vote: (queueId: number) => post<{ voted: boolean }>(`/api/queue/${queueId}/vote`, { clientId: getClientId() }),
   remove: (queueId: number) =>
     request<void>(`/api/queue/${queueId}`, { method: 'DELETE', body: JSON.stringify({ clientId: getClientId() }) }),
+  history: (limit = 30) =>
+    request<{ history: QueueEntry[] }>(`/api/history?${new URLSearchParams({ limit: String(limit) })}`),
   skip: () => post<JukeboxState>('/api/player/skip'),
   ended: (queueId: number) => post<JukeboxState>('/api/player/ended', { queueId }),
   retry: (trackId: string) => post<{ cached: boolean }>(`/api/tracks/${trackId}/retry`),

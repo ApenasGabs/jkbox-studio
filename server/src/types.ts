@@ -38,12 +38,16 @@ export interface SearchResult {
 
 export type QueueStatus = 'queued' | 'playing' | 'played' | 'removed';
 
+export const REACTION_EMOJIS = ['🔥', '👏', '❤️', '🎤', '🎉'] as const;
+export type ReactionEmoji = (typeof REACTION_EMOJIS)[number];
+
 export interface QueueItem {
   id: number;
   trackId: string;
   requesterId: string;
   requesterName: string;
   addedAt: number;
+  finishedAt?: number | null;
   status: QueueStatus;
   votes: number;
   voters: string[];

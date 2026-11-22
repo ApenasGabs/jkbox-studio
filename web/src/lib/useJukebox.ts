@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { JukeboxState, ServerMessage, TrackStatus } from './types';
+import type { JukeboxState, ReactionEmoji, ServerMessage, TrackStatus } from './types';
 
 export interface DownloadInfo {
   status: TrackStatus;
@@ -13,15 +13,27 @@ export interface LyricsOffsetEvent {
   seq: number;
 }
 
+export interface LiveReaction {
+  id: number;
+  emoji: ReactionEmoji;
+  senderName?: string;
+}
+
+const REACTION_TTL_MS = 3000;
+const MAX_ACTIVE_REACTIONS = 24;
+
 /** Live jukebox state over WebSocket with automatic reconnection. */
 export function useJukebox() {
   const [state, setState] = useState<JukeboxState>({ nowPlaying: null, queue: [] });
   const [position, setPosition] = useState({ positionSec: 0, paused: false });
   const [downloads, setDownloads] = useState<Record<string, DownloadInfo>>({});
   const [lyricsOffset, setLyricsOffset] = useState<LyricsOffsetEvent | null>(null);
+  const [reactions, setReactions] = useState<LiveReaction[]>([]);
   const [connected, setConnected] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
   const offsetSeqRef = useRef(0);
+  const reactionSeqRef = useRef(0);
+  const reactionTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
 
   useEffect(() => {
     let closed = false;
@@ -53,6 +65,14 @@ export function useJukebox() {
         } else if (msg.type === 'lyrics_offset') {
           offsetSeqRef.current += 1;
           setLyricsOffset({ trackId: msg.trackId, offsetMs: msg.offsetMs, seq: offsetSeqRef.current });
+        } else if (msg.type === 'reaction') {
+          const id = ++reactionSeqRef.current;
+          setReactions((prev) => [...prev.slice(-(MAX_ACTIVE_REACTIONS - 1)), { id, emoji: msg.emoji, senderName: msg.senderName }]);
+          const expireTimer = setTimeout(() => {
+            reactionTimersRef.current.delete(expireTimer);
+            setReactions((prev) => prev.filter((item) => item.id !== id));
+          }, REACTION_TTL_MS);
+          reactionTimersRef.current.add(expireTimer);
         }
       };
       ws.onclose = () => {
@@ -66,6 +86,8 @@ export function useJukebox() {
     return () => {
       closed = true;
       clearTimeout(timer);
+      for (const expireTimer of reactionTimersRef.current) clearTimeout(expireTimer);
+      reactionTimersRef.current.clear();
       socketRef.current?.close();
     };
   }, []);
@@ -75,5 +97,5 @@ export function useJukebox() {
     if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
   }, []);
 
-  return { state, position, downloads, lyricsOffset, connected, send };
+  return { state, position, downloads, lyricsOffset, reactions, connected, send };
 }

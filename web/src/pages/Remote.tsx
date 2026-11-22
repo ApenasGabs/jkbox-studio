@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useRef, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { Cover } from '../components/Cover';
 import { LyricsView } from '../components/LyricsView';
 import { QueueList } from '../components/QueueList';
@@ -7,7 +7,7 @@ import { useToast } from '../components/Toast';
 import { api, getClientId, getName, type SearchSource, setName } from '../lib/api';
 import { formatTime } from '../lib/format';
 import { applyKaraokeFilter } from '../lib/karaoke';
-import type { AppConfig, QueueEntry, SearchResult } from '../lib/types';
+import { type AppConfig, type QueueEntry, REACTION_EMOJIS, type ReactionEmoji, type SearchResult, type Track } from '../lib/types';
 import { useInterpolatedTime } from '../lib/useInterpolatedTime';
 import { useJukebox } from '../lib/useJukebox';
 import { useTrackLyrics } from '../lib/useTrackLyrics';
@@ -19,10 +19,32 @@ const TABS: { id: SearchSource; label: string }[] = [
   { id: 'local', label: 'Acervo' },
 ];
 
+function trackToSearchResult(track: Track): SearchResult {
+  return {
+    source: track.source,
+    sourceId: track.sourceId,
+    title: track.title,
+    artist: track.artist,
+    album: track.album,
+    durationSec: track.durationSec,
+    thumbnail: track.thumbnail,
+    trackId: track.id,
+    cached: track.status === 'ready',
+  };
+}
+
+function formatPlayedAt(finishedAt: number | null | undefined): string | null {
+  if (finishedAt == null || !Number.isFinite(finishedAt)) return null;
+  const diffMin = Math.floor(Math.max(0, Date.now() - finishedAt) / 60_000);
+  if (diffMin < 1) return 'agora';
+  if (diffMin < 60) return `há ${diffMin} min`;
+  return new Date(finishedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
 export function Remote() {
-  const { state, position, downloads, lyricsOffset, connected } = useJukebox();
+  const { state, position, downloads, lyricsOffset, connected, send } = useJukebox();
   const [config, setConfig] = useState<AppConfig | null>(null);
-  const [view, setView] = useState<'search' | 'queue' | 'lyrics'>('search');
+  const [view, setView] = useState<'search' | 'queue' | 'lyrics' | 'history'>('search');
   const [name, setNameState] = useState(getName());
   const [query, setQuery] = useState('');
   const [source, setSource] = useState<SearchSource>('all');
@@ -31,12 +53,18 @@ export function Remote() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [adding, setAdding] = useState<string | null>(null);
+  const [history, setHistory] = useState<QueueEntry[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [lastReactionEmoji, setLastReactionEmoji] = useState<ReactionEmoji | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const reactionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toast = useToast();
   const me = getClientId();
   const current = state.nowPlaying?.item;
   const duration = current?.track.durationSec ?? 0;
   const livePositionSec = useInterpolatedTime(position, Boolean(current), connected, current?.track.durationSec);
+  const queueRemainingSec = current ? (duration > 0 ? Math.max(0, duration - livePositionSec) : null) : 0;
   const { lyrics, loading: lyricsLoading, error: lyricsError, reload: reloadLyrics } = useTrackLyrics(
     current?.trackId,
     lyricsOffset,
@@ -45,6 +73,43 @@ export function Remote() {
   useEffect(() => {
     api.config().then(setConfig).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    return () => {
+      if (reactionTimerRef.current) clearTimeout(reactionTimerRef.current);
+    };
+  }, []);
+
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const res = await api.history(30);
+      setHistory(res.history);
+    } catch (err) {
+      setHistoryError((err as Error).message);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (view === 'history') void loadHistory();
+  }, [view, current?.id, loadHistory]);
+
+  const sendReaction = (emoji: ReactionEmoji) => {
+    if (!connected) return;
+    const senderName = name.trim();
+    send({
+      type: 'reaction',
+      emoji,
+      ...(senderName ? { senderName } : {}),
+      clientId: me,
+    });
+    setLastReactionEmoji(emoji);
+    if (reactionTimerRef.current) clearTimeout(reactionTimerRef.current);
+    reactionTimerRef.current = setTimeout(() => setLastReactionEmoji(null), 220);
+  };
 
   const runSearch = async (q: string, src: SearchSource) => {
     abortRef.current?.abort();
@@ -115,24 +180,45 @@ export function Remote() {
         </div>
 
         {current && (
-          <button
-            type="button"
-            onClick={() => setView('lyrics')}
-            title="Abrir letra sincronizada"
-            className="glass flex w-full items-center gap-3 p-2 text-left transition hover:bg-white/10"
-          >
-            <Cover src={current.track.thumbnail} alt={current.track.title} className="h-12 w-12 shrink-0 rounded-lg" />
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-semibold">
-                {position.paused ? '⏸' : '▶'} {current.track.title}
-              </p>
-              <p className="truncate text-xs text-zinc-400">{current.track.artist}</p>
-              <div className="mt-1 h-1 overflow-hidden rounded-full bg-white/10">
-                <div className="h-full bg-accent" style={{ width: `${duration ? Math.min(100, (livePositionSec / duration) * 100) : 0}%` }} />
+          <div className="glass flex flex-col gap-2 p-2">
+            <button
+              type="button"
+              onClick={() => setView('lyrics')}
+              title="Abrir letra sincronizada"
+              className="flex w-full items-center gap-3 rounded-xl p-0.5 text-left transition hover:bg-white/5"
+            >
+              <Cover src={current.track.thumbnail} alt={current.track.title} className="h-12 w-12 shrink-0 rounded-lg" />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-semibold">
+                  {position.paused ? '⏸' : '▶'} {current.track.title}
+                </p>
+                <p className="truncate text-xs text-zinc-400">{current.track.artist}</p>
+                <div className="mt-1 h-1 overflow-hidden rounded-full bg-white/10">
+                  <div className="h-full bg-accent" style={{ width: `${duration ? Math.min(100, (livePositionSec / duration) * 100) : 0}%` }} />
+                </div>
+              </div>
+              <span className="shrink-0 text-xs text-zinc-400">{formatTime(livePositionSec)}</span>
+            </button>
+            <div className="flex items-center justify-between gap-2 border-t border-white/10 pt-1.5">
+              <span className="pl-1 text-[11px] text-zinc-400">Reagir na TV</span>
+              <div className="flex items-center gap-1" role="group" aria-label="Reações ao vivo">
+                {REACTION_EMOJIS.map((emoji) => (
+                  <button
+                    key={emoji}
+                    type="button"
+                    disabled={!connected}
+                    aria-label={`Enviar reação ${emoji}`}
+                    onClick={() => sendReaction(emoji)}
+                    className={`rounded-lg px-2 py-1 text-base transition active:scale-90 disabled:opacity-40 ${
+                      lastReactionEmoji === emoji ? 'scale-110 bg-accent/30' : 'bg-white/10 hover:bg-white/20'
+                    }`}
+                  >
+                    {emoji}
+                  </button>
+                ))}
               </div>
             </div>
-            <span className="shrink-0 text-xs text-zinc-400">{formatTime(livePositionSec)}</span>
-          </button>
+          </div>
         )}
 
         <label className="flex items-center gap-2 text-sm">
@@ -149,12 +235,13 @@ export function Remote() {
           />
         </label>
 
-        <div className="grid grid-cols-3 gap-1 rounded-xl bg-white/5 p-1 text-xs sm:text-sm" role="tablist" aria-label="Abas do controle remoto">
+        <div className="grid grid-cols-4 gap-1 rounded-xl bg-white/5 p-1 text-[11px] sm:text-sm" role="tablist" aria-label="Abas do controle remoto">
           {(
             [
               { id: 'search', label: '🔎 Buscar' },
               { id: 'queue', label: `🎶 Fila (${state.queue.length})` },
               { id: 'lyrics', label: '🎤 Letra' },
+              { id: 'history', label: '🕘 Histórico' },
             ] as const
           ).map((tab) => (
             <button
@@ -163,7 +250,7 @@ export function Remote() {
               role="tab"
               aria-selected={view === tab.id}
               onClick={() => setView(tab.id)}
-              className={`truncate rounded-lg px-2 py-2 font-semibold transition ${
+              className={`truncate rounded-lg px-1.5 py-2 font-semibold transition sm:px-2 ${
                 view === tab.id ? 'bg-white text-zinc-900' : 'text-zinc-300 hover:text-white'
               }`}
             >
@@ -256,9 +343,16 @@ export function Remote() {
         </section>
       ) : view === 'queue' ? (
         <section className="px-4">
-          <QueueList queue={state.queue} downloads={downloads} onVote={vote} onRemove={remove} canRemove={(e) => e.requesterId === me} />
+          <QueueList
+            queue={state.queue}
+            downloads={downloads}
+            currentRemainingSec={queueRemainingSec}
+            onVote={vote}
+            onRemove={remove}
+            canRemove={(e) => e.requesterId === me}
+          />
         </section>
-      ) : (
+      ) : view === 'lyrics' ? (
         <section className="px-4">
           {current ? (
             <LyricsView
@@ -283,6 +377,62 @@ export function Remote() {
                 🔎 Buscar música
               </button>
             </div>
+          )}
+        </section>
+      ) : (
+        <section className="flex flex-col gap-3 px-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">Já tocou</h2>
+            <button
+              type="button"
+              onClick={() => void loadHistory()}
+              disabled={historyLoading}
+              className="rounded-lg bg-white/10 px-2.5 py-1 text-xs font-medium text-zinc-200 hover:bg-white/20 disabled:opacity-50"
+            >
+              {historyLoading ? 'Atualizando…' : 'Atualizar'}
+            </button>
+          </div>
+          {historyError && (
+            <p className="rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-300">{historyError}</p>
+          )}
+          {historyLoading && history.length === 0 ? (
+            <p className="py-8 text-center text-sm text-zinc-500">Carregando histórico…</p>
+          ) : history.length === 0 ? (
+            <div className="glass flex flex-col items-center gap-3 px-6 py-12 text-center">
+              <span className="text-4xl">🕘</span>
+              <p className="font-semibold">Nenhuma música tocou ainda</p>
+              <p className="text-sm text-zinc-400">As músicas finalizadas aparecem aqui para você pedir de novo com 1 toque.</p>
+            </div>
+          ) : (
+            <ul className="flex flex-col gap-2">
+              {history.map((entry) => {
+                const key = `${entry.track.source}:${entry.track.sourceId}`;
+                const playedAt = formatPlayedAt(entry.finishedAt);
+                return (
+                  <li key={entry.id} className="flex items-center gap-3 rounded-xl bg-white/5 p-2">
+                    <Cover src={entry.track.thumbnail} alt={entry.track.title} className="h-12 w-12 shrink-0 rounded-lg" />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate font-medium">{entry.track.title}</p>
+                      <p className="truncate text-xs text-zinc-400">
+                        {entry.track.artist || '—'} · {formatTime(entry.track.durationSec)} · por {entry.requesterName}
+                        {playedAt ? ` · ${playedAt}` : ''}
+                      </p>
+                      <div className="mt-1">
+                        <SourceBadge source={entry.track.source} cached={entry.track.status === 'ready'} />
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void add(trackToSearchResult(entry.track))}
+                      disabled={adding === key}
+                      className="shrink-0 rounded-xl bg-white px-3 py-2 text-sm font-semibold text-zinc-900 disabled:opacity-50"
+                    >
+                      {adding === key ? '…' : '+ Fila'}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
           )}
         </section>
       )}

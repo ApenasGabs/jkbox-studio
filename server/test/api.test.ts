@@ -274,4 +274,37 @@ describe('HTTP API', () => {
     expect(afterSecond.body.nowPlaying.item.requesterName).toBe('Auto-DJ');
     expect(afterSecond.body.nowPlaying.item.track.sourceId).toBe('aaaaaaaaaaa');
   });
+
+  it('returns played history ordered by finished_at DESC with clamped ?limit', async () => {
+    const { app, jukebox } = makeApp();
+    await request(app).post('/api/queue').send({ result: ytResult('aaaaaaaaaaa'), clientId: 'a', name: 'Ana' }).expect(201);
+    await request(app).post('/api/queue').send({ result: ytResult('bbbbbbbbbbb'), clientId: 'b', name: 'Bia' }).expect(201);
+    await request(app).post('/api/queue').send({ result: ytResult('ccccccccccc'), clientId: 'c', name: 'Caio' }).expect(201);
+    await jukebox.downloads.idle();
+
+    // Play & finish aaaaaaaaaaa, then bbbbbbbbbbb; remove ccccccccccc (must not appear in history)
+    await request(app).post('/api/player/skip').expect(200);
+    await request(app).post('/api/player/skip').expect(200);
+    const remaining = jukebox.queue.state().nowPlaying!;
+    expect(remaining.item.track.sourceId).toBe('ccccccccccc');
+    await request(app).delete(`/api/queue/${remaining.item.id}`).send({ clientId: 'c' }).expect(204);
+
+    const all = await request(app).get('/api/history').query({ limit: 30 }).expect(200);
+    expect(all.body.history).toHaveLength(2);
+    expect(all.body.history.map((item: { track: { sourceId: string } }) => item.track.sourceId)).toEqual([
+      'bbbbbbbbbbb',
+      'aaaaaaaaaaa',
+    ]);
+    expect(all.body.history[0].finishedAt).toEqual(expect.any(Number));
+
+    const limited = await request(app).get('/api/history').query({ limit: 1 }).expect(200);
+    expect(limited.body.history).toHaveLength(1);
+    expect(limited.body.history[0].track.sourceId).toBe('bbbbbbbbbbb');
+
+    const minClamped = await request(app).get('/api/history').query({ limit: 0 }).expect(200);
+    expect(minClamped.body.history).toHaveLength(1);
+
+    const maxClamped = await request(app).get('/api/history').query({ limit: 999 }).expect(200);
+    expect(maxClamped.body.history).toHaveLength(2);
+  });
 });

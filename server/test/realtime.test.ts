@@ -51,4 +51,60 @@ describe('WebSocket realtime sync', () => {
     phone.close();
     wss.close();
   });
+
+  it('validates reaction emoji whitelist and enforces rate-limit per connection/clientId', async () => {
+    const { config, jukebox } = setup();
+    let fakeNow = 10_000;
+    server = http.createServer(createApp({ config, jukebox }));
+    const wss = attachRealtime(server, jukebox, {
+      reactionRateLimit: { maxCount: 2, windowMs: 5000, now: () => fakeNow },
+    });
+    await new Promise<void>((r) => server!.listen(0, r));
+    const url = `ws://127.0.0.1:${(server.address() as AddressInfo).port}/ws`;
+
+    const kiosk = new WebSocket(url);
+    const phone1 = new WebSocket(url);
+    const phone2 = new WebSocket(url);
+    await Promise.all([
+      nextMessage(kiosk, (m) => m.type === 'state'),
+      nextMessage(phone1, (m) => m.type === 'state'),
+      nextMessage(phone2, (m) => m.type === 'state'),
+    ]);
+
+    const received: any[] = [];
+    kiosk.on('message', (raw) => {
+      const msg = JSON.parse(String(raw));
+      if (msg.type === 'reaction') received.push(msg);
+    });
+
+    // Invalid emoji must be rejected; valid reactions up to maxCount (2) must broadcast
+    phone1.send(JSON.stringify({ type: 'reaction', emoji: '💩', senderName: 'Troll', clientId: 'guest-1' }));
+    phone1.send(JSON.stringify({ type: 'reaction', emoji: '🔥', senderName: '  Ana  ', clientId: 'guest-1' }));
+    phone1.send(JSON.stringify({ type: 'reaction', emoji: '👏', senderName: '', clientId: 'guest-1' }));
+    // 3rd reaction in window from same socket/clientId must be rate-limited
+    phone1.send(JSON.stringify({ type: 'reaction', emoji: '🎉', senderName: 'Ana', clientId: 'guest-1' }));
+    // Another connection using the same clientId must also be rate-limited
+    phone2.send(JSON.stringify({ type: 'reaction', emoji: '❤️', senderName: 'Ana', clientId: 'guest-1' }));
+
+    await new Promise((r) => setTimeout(r, 80));
+    expect(received).toEqual([
+      { type: 'reaction', emoji: '🔥', senderName: 'Ana' },
+      { type: 'reaction', emoji: '👏' },
+    ]);
+
+    // Advancing past the window allows reactions again
+    fakeNow += 5001;
+    phone2.send(JSON.stringify({ type: 'reaction', emoji: '🎤', senderName: 'Ana', clientId: 'guest-1' }));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(received).toEqual([
+      { type: 'reaction', emoji: '🔥', senderName: 'Ana' },
+      { type: 'reaction', emoji: '👏' },
+      { type: 'reaction', emoji: '🎤', senderName: 'Ana' },
+    ]);
+
+    kiosk.close();
+    phone1.close();
+    phone2.close();
+    wss.close();
+  });
 });
