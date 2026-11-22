@@ -56,7 +56,7 @@ export function streamFile(req: Request, res: Response, file: string): void {
   if (!header) {
     res.setHeader('Content-Length', size);
     if (req.method === 'HEAD') return void res.end();
-    fs.createReadStream(file).pipe(res);
+    pipeFile(res, fs.createReadStream(file));
     return;
   }
   const range = parseRange(header, size);
@@ -68,5 +68,16 @@ export function streamFile(req: Request, res: Response, file: string): void {
   res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${size}`);
   res.setHeader('Content-Length', range.end - range.start + 1);
   if (req.method === 'HEAD') return void res.end();
-  fs.createReadStream(file, range).pipe(res);
+  pipeFile(res, fs.createReadStream(file, range));
+}
+
+/** Pipes a file stream, handling read errors (e.g. file removed mid-stream) without crashing. */
+function pipeFile(res: Response, stream: fs.ReadStream): void {
+  stream.on('error', (err) => {
+    console.error(`[stream] falha ao ler arquivo: ${err.message}`);
+    if (!res.headersSent) res.status(500).json({ error: 'Falha ao ler o arquivo de áudio' });
+    else res.destroy(err);
+  });
+  res.on('close', () => stream.destroy());
+  stream.pipe(res);
 }

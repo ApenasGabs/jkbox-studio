@@ -5,7 +5,7 @@ import { QueueList } from '../components/QueueList';
 import { SourceBadge } from '../components/SourceBadge';
 import { useToast } from '../components/Toast';
 import { api, getHostPin, setHostPin } from '../lib/api';
-import { formatTime, isLoopback, remoteUrl } from '../lib/format';
+import { cssImageUrl, formatTime, isLoopback, remoteUrl } from '../lib/format';
 import type { AppConfig, QueueEntry } from '../lib/types';
 import { useJukebox } from '../lib/useJukebox';
 
@@ -21,6 +21,8 @@ export function Kiosk() {
   const lastSent = useRef(0);
   const loadedFor = useRef<number | null>(null);
   const firstLoad = useRef(true);
+  /** Position to restore after a reload; applied on `loadedmetadata` (setting it earlier is ignored). */
+  const pendingSeek = useRef<number | null>(null);
   const toast = useToast();
 
   const nowPlaying = state.nowPlaying;
@@ -58,7 +60,7 @@ export function Kiosk() {
     loadedFor.current = current.id;
     audio.src = api.streamUrl(current.trackId);
     // Resume where we were after a page reload.
-    if (firstLoad.current && nowPlaying && nowPlaying.positionSec > 0) audio.currentTime = nowPlaying.positionSec;
+    pendingSeek.current = firstLoad.current && nowPlaying && nowPlaying.positionSec > 0 ? nowPlaying.positionSec : null;
     firstLoad.current = false;
     if (unlocked) audio.play().catch(() => setPlaying(false));
   }, [current, nowPlaying, unlocked]);
@@ -102,15 +104,17 @@ export function Kiosk() {
   const remove = (entry: QueueEntry) => run(() => api.remove(entry.id));
   const url = remoteUrl(config?.publicUrl ?? null);
   const progressPct = time.duration > 0 ? (time.current / time.duration) * 100 : 0;
+  const backdrop = cssImageUrl(current?.track.thumbnail);
 
   return (
-    <div className="relative flex h-full flex-col overflow-hidden lg:flex-row">
+    // Mobile/tablet: natural page scroll so the QR code and queue stay reachable.
+    // Desktop (lg+): fixed full-height split layout.
+    <div className="relative flex min-h-full flex-col overflow-x-hidden lg:h-full lg:flex-row lg:overflow-hidden">
       {/* Blurred backdrop from the album art */}
-      {current?.track.thumbnail && (
-        <div
-          className="pointer-events-none absolute inset-0 scale-110 bg-cover bg-center opacity-25 blur-3xl"
-          style={{ backgroundImage: `url(${current.track.thumbnail})` }}
-        />
+      {backdrop && (
+        <div className="pointer-events-none absolute inset-0 overflow-hidden">
+          <div className="absolute inset-0 scale-110 bg-cover bg-center opacity-25 blur-3xl" style={{ backgroundImage: backdrop }} />
+        </div>
       )}
 
       <audio
@@ -123,6 +127,13 @@ export function Kiosk() {
         onPause={() => {
           setPlaying(false);
           reportProgress(true);
+        }}
+        onLoadedMetadata={(e) => {
+          const seek = pendingSeek.current;
+          pendingSeek.current = null;
+          if (seek !== null && Number.isFinite(e.currentTarget.duration) && seek < e.currentTarget.duration) {
+            e.currentTarget.currentTime = seek;
+          }
         }}
         onTimeUpdate={(e) => {
           setTime({ current: e.currentTarget.currentTime, duration: e.currentTarget.duration || current?.track.durationSec || 0 });
@@ -138,25 +149,25 @@ export function Kiosk() {
       />
 
       {/* Now playing */}
-      <main className="relative z-10 flex flex-1 flex-col items-center justify-center gap-6 p-8">
-        <header className="absolute left-8 top-6 flex items-center gap-3">
-          <span className="text-2xl font-black tracking-tight">
-            jkbox<span className="text-accent">studio</span>
-          </span>
-          <span className={`h-2 w-2 rounded-full ${connected ? 'bg-emerald-400' : 'bg-red-500'}`} title={connected ? 'online' : 'reconectando'} />
-        </header>
-        <button
-          onClick={() => setSettingsOpen((v) => !v)}
-          className="absolute right-8 top-6 rounded-full bg-white/10 px-3 py-1 text-sm hover:bg-white/20"
-        >
-          ⚙︎ Host
-        </button>
+      <main className="relative z-10 flex flex-1 flex-col items-center justify-center gap-6 px-5 pb-8 pt-4 sm:px-8 lg:p-8 lg:pt-20">
+        {/* In the flow on mobile/tablet (never overlaps the cover); pinned to the corners on desktop. */}
+        <div className="flex w-full items-center justify-between gap-3 lg:absolute lg:inset-x-8 lg:top-6 lg:w-auto">
+          <header className="flex items-center gap-3">
+            <span className="text-2xl font-black tracking-tight">
+              jkbox<span className="text-accent">studio</span>
+            </span>
+            <span className={`h-2 w-2 rounded-full ${connected ? 'bg-emerald-400' : 'bg-red-500'}`} title={connected ? 'online' : 'reconectando'} />
+          </header>
+          <button onClick={() => setSettingsOpen((v) => !v)} className="rounded-full bg-white/10 px-3 py-1 text-sm hover:bg-white/20">
+            ⚙︎ Host
+          </button>
+        </div>
 
         {current ? (
           <>
-            <Cover src={current.track.thumbnail} alt={current.track.title} className="aspect-square w-[min(60vh,80vw)] rounded-3xl shadow-2xl shadow-black/60" />
+            <Cover src={current.track.thumbnail} alt={current.track.title} className="aspect-square w-[min(50vh,80vw)] rounded-3xl shadow-2xl shadow-black/60 lg:w-[min(60vh,80vw)]" />
             <div className="max-w-3xl text-center">
-              <h1 className="text-4xl font-bold leading-tight lg:text-5xl">{current.track.title}</h1>
+              <h1 className="text-3xl font-bold leading-tight [overflow-wrap:anywhere] sm:text-4xl lg:text-5xl">{current.track.title}</h1>
               <p className="mt-2 text-xl text-zinc-300">{current.track.artist}</p>
               <div className="mt-3 flex items-center justify-center gap-2 text-sm text-zinc-400">
                 <SourceBadge source={current.track.source} />
@@ -203,14 +214,14 @@ export function Kiosk() {
       </main>
 
       {/* Sidebar: QR + queue */}
-      <aside className="relative z-10 flex w-full flex-col gap-4 border-white/10 bg-black/30 p-6 lg:w-[420px] lg:border-l">
+      <aside className="relative z-10 flex w-full flex-col gap-4 border-t border-white/10 bg-black/30 p-5 sm:p-6 lg:w-[420px] lg:border-l lg:border-t-0">
         <div className="glass flex items-center gap-4 p-4">
           <div className="rounded-xl bg-white p-2">
             <QRCodeSVG value={url} size={112} />
           </div>
           <div className="min-w-0">
             <p className="font-semibold">Peça sua música 📱</p>
-            <p className="break-all text-sm text-accent-2">{url}</p>
+            <p className="text-sm text-accent-2 [overflow-wrap:anywhere]">{url}</p>
             {isLoopback(url) && (
               <p className="mt-1 text-xs text-amber-300">Defina PUBLIC_URL com o IP da rede para os celulares acessarem.</p>
             )}
@@ -219,7 +230,7 @@ export function Kiosk() {
 
         <div className="flex min-h-0 flex-1 flex-col">
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-zinc-400">Próximas ({state.queue.length})</h2>
-          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+          <div className="pr-1 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
             <QueueList
               queue={state.queue}
               downloads={downloads}
@@ -243,7 +254,7 @@ export function Kiosk() {
       {!unlocked && (
         <button
           onClick={unlock}
-          className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-4 bg-ink/90 text-center backdrop-blur"
+          className="fixed inset-0 z-40 flex flex-col items-center justify-center gap-4 bg-ink/90 text-center backdrop-blur"
         >
           <span className="text-7xl">🔊</span>
           <span className="text-3xl font-bold">Toque para iniciar a Jukebox</span>
@@ -266,10 +277,11 @@ interface HostPanelProps {
 
 function HostPanel({ config, onClose, onChanged, run }: HostPanelProps) {
   const [pin, setPin] = useState(getHostPin());
+  const [playlist, setPlaylist] = useState('');
   const spotify = config?.spotify;
 
   return (
-    <div className="absolute inset-0 z-30 flex justify-end bg-black/50" onClick={onClose}>
+    <div className="fixed inset-0 z-30 flex justify-end bg-black/50" onClick={onClose}>
       <div className="flex h-full w-full max-w-md flex-col gap-5 overflow-y-auto bg-panel p-6" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between">
           <h2 className="text-xl font-bold">Controles do host</h2>
@@ -328,6 +340,28 @@ function HostPanel({ config, onClose, onChanged, run }: HostPanelProps) {
                   Abrir playlist compartilhada ↗
                 </a>
               )}
+              <form
+                className="flex gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!playlist.trim()) return;
+                  run(() => api.spotifyLinkPlaylist(playlist.trim()), 'Playlist vinculada').then(() => {
+                    setPlaylist('');
+                    onChanged();
+                  });
+                }}
+              >
+                <input
+                  value={playlist}
+                  onChange={(e) => setPlaylist(e.target.value)}
+                  className="min-w-0 flex-1 rounded-lg bg-white/10 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-accent"
+                  placeholder="Link de uma playlist existente"
+                  aria-label="Link ou ID de uma playlist existente do Spotify"
+                />
+                <button type="submit" className="rounded-lg bg-white/10 px-3 py-2 text-sm font-semibold hover:bg-white/20">
+                  Vincular
+                </button>
+              </form>
               <div className="grid grid-cols-2 gap-2">
                 <button onClick={() => run(api.spotifySync, 'Fila sincronizada com o Spotify')} className="rounded-lg bg-white/10 px-3 py-2 text-sm hover:bg-white/20">
                   Sincronizar fila

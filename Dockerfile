@@ -23,8 +23,9 @@ RUN npm ci --omit=dev --workspace server --no-audit --no-fund
 FROM node:24-alpine AS runtime
 ARG YTDLP_VERSION=latest
 # ffmpeg: audio extraction/conversion · python3: runs the yt-dlp zipapp
+# py3-mutagen: lets yt-dlp embed cover art (--embed-thumbnail) in m4a/opus/mp3
 # su-exec: drop root after fixing volume permissions · tini: proper PID 1
-RUN apk add --no-cache ffmpeg python3 ca-certificates tini su-exec \
+RUN apk add --no-cache ffmpeg python3 py3-mutagen ca-certificates tini su-exec \
   && if [ "$YTDLP_VERSION" = "latest" ]; then \
        url=https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp; \
      else \

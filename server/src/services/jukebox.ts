@@ -1,4 +1,5 @@
 import { parseInput } from '../lib/parseInput.js';
+import { sanitizeResult } from '../lib/validate.js';
 import type { SearchResult, Track, TrackSource } from '../types.js';
 import type { DownloadManager } from './downloads.js';
 import { QueueError, type QueueService } from './queue.js';
@@ -14,9 +15,12 @@ export interface SearchResponse {
 }
 
 export interface EnqueueRequest {
-  result: SearchResult;
+  /** Untrusted payload (validated by `sanitizeResult`). */
+  result: unknown;
   requesterId: string;
   requesterName: string;
+  /** Mirror the song into the shared Spotify playlist (false when it was imported from there). */
+  syncSpotify?: boolean;
 }
 
 const MAX_BATCH = 50;
@@ -143,8 +147,9 @@ export class Jukebox {
     return best?.sourceId ?? null;
   }
 
-  enqueue({ result, requesterId, requesterName }: EnqueueRequest) {
-    if (!result?.source || !result.sourceId || !result.title) throw new QueueError('Faixa inválida');
+  enqueue({ result: input, requesterId, requesterName, syncSpotify = true }: EnqueueRequest) {
+    const result = sanitizeResult(input);
+    if (!result) throw new QueueError('Faixa inválida');
     if (!requesterId) throw new QueueError('clientId obrigatório');
 
     let track: Track | null = result.trackId ? this.tracks.get(result.trackId) : null;
@@ -154,7 +159,7 @@ export class Jukebox {
     }
     const cached = this.downloads.ensure(track.id);
     const outcome = this.queue.enqueue(track.id, requesterId, requesterName);
-    if (!outcome.duplicate) void this.syncToSpotify(this.tracks.get(track.id)!);
+    if (!outcome.duplicate && syncSpotify) void this.syncToSpotify(this.tracks.get(track.id)!);
     return { ...outcome, cached };
   }
 
@@ -176,8 +181,17 @@ export class Jukebox {
   /** Imports songs added to the shared playlist from the Spotify app into the jukebox queue. */
   async importFromSpotify(): Promise<number> {
     const fresh = await this.spotify.fetchNewPlaylistTracks();
-    for (const result of fresh) this.enqueue({ result, requesterId: 'spotify', requesterName: 'Spotify' });
-    return fresh.length;
+    let imported = 0;
+    for (const result of fresh) {
+      // The track already lives in the shared playlist: don't mirror it back (would duplicate it).
+      try {
+        this.enqueue({ result, requesterId: 'spotify', requesterName: 'Spotify', syncSpotify: false });
+        imported++;
+      } catch (err) {
+        this.log(`[spotify] faixa ignorada na importação (${result.title}): ${errorMessage(err)}`);
+      }
+    }
+    return imported;
   }
 
   startSpotifyImport(intervalSec: number): void {

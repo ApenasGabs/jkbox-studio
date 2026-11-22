@@ -68,6 +68,7 @@ export const api = {
   verifyPin: () => post<{ ok: boolean }>('/api/host/verify'),
   rescanLibrary: () => post<{ added: number }>('/api/library/rescan'),
   spotifySync: () => post<SpotifyStatus & { synced: number }>('/api/spotify/sync'),
+  spotifyLinkPlaylist: (playlist: string) => post<SpotifyStatus>('/api/spotify/playlist', { playlist }),
   spotifyImport: () => post<{ imported: number }>('/api/spotify/import'),
   spotifyDisconnect: () => post<SpotifyStatus>('/api/spotify/disconnect'),
   streamUrl: (trackId: string) => `/api/tracks/${trackId}/stream`,

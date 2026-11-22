@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type { Config } from '../config.js';
 import type { Settings } from '../db.js';
+import { SPOTIFY_ID_RE } from '../lib/validate.js';
 import type { SearchResult } from '../types.js';
 
 const ACCOUNTS = 'https://accounts.spotify.com';
@@ -183,10 +184,14 @@ export class SpotifyService {
     const existing = this.playlistId;
     if (existing) {
       try {
-        await this.api(`/playlists/${existing}?fields=id`, {}, 'user');
+        await this.api(`/playlists/${encodeURIComponent(existing)}?fields=id`, {}, 'user');
         return existing;
       } catch (err) {
         if (!(err instanceof SpotifyError) || err.status !== 404) throw err;
+        // Never silently replace a playlist the host linked explicitly.
+        if (this.settings.get<boolean>('spotify_playlist_linked')) {
+          throw new SpotifyError('A playlist vinculada não foi encontrada no Spotify. Vincule outra ou crie uma nova.', 404);
+        }
       }
     }
     const created = await this.api<{ id: string }>(
@@ -203,14 +208,25 @@ export class SpotifyService {
       'user',
     );
     this.settings.set('spotify_playlist_id', created.id);
+    this.settings.set('spotify_playlist_linked', false);
     this.settings.set('spotify_seen_uris', []);
     return created.id;
   }
 
-  /** Links an existing playlist (by id) instead of creating a new one. */
-  linkPlaylist(id: string): void {
+  /**
+   * Links an existing playlist (by id) instead of creating a new one. Songs already in it are
+   * marked as seen, so only songs added from now on get imported into the queue.
+   */
+  async linkPlaylist(id: string): Promise<void> {
+    this.requireConfigured();
+    if (!SPOTIFY_ID_RE.test(id)) throw new SpotifyError('ID de playlist do Spotify inválido', 400);
+    if (!this.connected) throw new SpotifyError('Conecte uma conta Spotify primeiro', 409);
+    await this.api(`/playlists/${encodeURIComponent(id)}?fields=id`, {}, 'user');
+    const current = await this.getPlaylistTracks(id, 500);
     this.settings.set('spotify_playlist_id', id);
+    this.settings.set('spotify_playlist_linked', true);
     this.settings.set('spotify_seen_uris', []);
+    this.markSeen(current.map((t) => t.spotifyUri).filter((u): u is string => !!u));
   }
 
   async addToPlaylist(uris: string[]): Promise<void> {
@@ -218,7 +234,7 @@ export class SpotifyService {
     const playlistId = await this.ensurePlaylist();
     for (let i = 0; i < uris.length; i += 100) {
       await this.api(
-        `/playlists/${playlistId}/items`,
+        `/playlists/${encodeURIComponent(playlistId)}/items`,
         { method: 'POST', body: JSON.stringify({ uris: uris.slice(i, i + 100) }) },
         'user',
       );

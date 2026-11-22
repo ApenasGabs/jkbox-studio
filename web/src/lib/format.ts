@@ -20,3 +20,15 @@ export function isLoopback(url: string): boolean {
     return false;
   }
 }
+
+/** CSS `url()` value for an image, or null when it isn't a plain http(s) URL (prevents CSS injection). */
+export function cssImageUrl(src: string | null | undefined): string | null {
+  if (!src) return null;
+  try {
+    const url = new URL(src);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    return `url(${JSON.stringify(url.href)})`;
+  } catch {
+    return null;
+  }
+}

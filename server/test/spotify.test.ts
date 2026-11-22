@@ -122,5 +122,33 @@ describe('Spotify integration', () => {
     expect(all.map((e) => e!.track.title)).toContain('Aerodynamic');
     expect(all[0]!.requesterName).toBe('Spotify');
     await jukebox.downloads.idle();
+    // Imported songs must not be mirrored back into the playlist they came from.
+    expect(fake.calls.filter((c) => c.method === 'POST' && c.url.includes('/playlists/pl1/items'))).toHaveLength(0);
+    expect(fake.playlistItems).toHaveLength(1);
+  });
+
+  it('links an existing playlist without re-importing its old songs and never recreates it silently', async () => {
+    const fake = fakeSpotify();
+    const { config, jukebox } = setup(SPOTIFY_ENV, fake.fetchFn);
+    const app = createApp({ config, jukebox });
+    const state = new URL((await request(app).get('/api/spotify/auth')).headers.location).searchParams.get('state');
+    await request(app).get('/api/spotify/callback').query({ code: 'c', state });
+    fake.playlistItems.push({ item: track('old1', 'Old Song') });
+
+    await request(app).post('/api/spotify/playlist').send({ playlist: 'https://open.spotify.com/playlist/../me' }).expect(400);
+    await request(app).post('/api/spotify/playlist').send({ playlist: 'missing' }).expect(404);
+    expect(jukebox.spotify.playlistId).toBe('pl1');
+
+    const linked = await request(app).post('/api/spotify/playlist').send({ playlist: 'https://open.spotify.com/playlist/pl1?si=x' }).expect(200);
+    expect(linked.body).toMatchObject({ playlistId: 'pl1' });
+    expect((await request(app).post('/api/spotify/import').expect(200)).body).toEqual({ imported: 0 });
+
+    // A linked playlist that disappears is reported, not replaced by a brand-new one.
+    fake.playlistItems.length = 0;
+    const creates = () => fake.calls.filter((c) => c.method === 'POST' && c.url.endsWith('/me/playlists')).length;
+    const before = creates();
+    jukebox.spotify['settings'].set('spotify_playlist_id', 'gone');
+    await expect(jukebox.spotify.ensurePlaylist()).rejects.toMatchObject({ status: 404 });
+    expect(creates()).toBe(before);
   });
 });

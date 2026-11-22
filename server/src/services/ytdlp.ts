@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import type { AudioFormat } from '../config.js';
 import type { SearchResult } from '../types.js';
+import { YOUTUBE_ID_RE } from '../lib/validate.js';
 
 export interface DownloadResult {
   filePath: string;
@@ -61,6 +62,11 @@ export function parseProgressLine(line: string): number | null {
   return Math.min(1, Math.max(0, downloaded / size));
 }
 
+/** Defense in depth: never interpolate anything but a canonical video id into a yt-dlp URL. */
+function assertVideoId(videoId: string): void {
+  if (!YOUTUBE_ID_RE.test(videoId)) throw new Error(`ID de vídeo do YouTube inválido: ${videoId.slice(0, 32)}`);
+}
+
 export class YtDlp implements MediaProvider {
   constructor(
     private readonly bin: string,
@@ -112,6 +118,7 @@ export class YtDlp implements MediaProvider {
   }
 
   async getVideo(videoId: string): Promise<SearchResult> {
+    assertVideoId(videoId);
     const out = await this.run(['-J', '--no-playlist', `https://www.youtube.com/watch?v=${videoId}`]);
     return entryToResult(JSON.parse(out) as YtEntry);
   }
@@ -123,6 +130,7 @@ export class YtDlp implements MediaProvider {
   }
 
   async download(videoId: string, outputBase: string, onProgress: (fraction: number) => void): Promise<DownloadResult> {
+    assertVideoId(videoId);
     let filePath = '';
     await this.run(
       [
@@ -136,6 +144,9 @@ export class YtDlp implements MediaProvider {
         '--audio-quality',
         '0',
         '--embed-metadata',
+        '--embed-thumbnail',
+        '--convert-thumbnails',
+        'jpg',
         '--progress',
         '--newline',
         '--progress-template',

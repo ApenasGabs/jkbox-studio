@@ -29,7 +29,12 @@ export function useJukebox() {
         setConnected(true);
       };
       ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data) as ServerMessage;
+        let msg: ServerMessage;
+        try {
+          msg = JSON.parse(event.data) as ServerMessage;
+        } catch {
+          return; // ignore malformed frames
+        }
         if (msg.type === 'state') {
           setState(msg.state);
           setPosition({ positionSec: msg.state.nowPlaying?.positionSec ?? 0, paused: msg.state.nowPlaying?.paused ?? false });

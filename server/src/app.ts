@@ -3,6 +3,7 @@ import path from 'node:path';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { Config } from './config.js';
 import { streamFile } from './lib/stream.js';
+import { SPOTIFY_ID_RE } from './lib/validate.js';
 import type { Jukebox, SearchSource } from './services/jukebox.js';
 import { scanLibrary } from './services/library.js';
 import { QueueError } from './services/queue.js';
@@ -182,12 +183,14 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
 
   api.post('/spotify/playlist', requireSpotify, requireHost, async (req, res, next) => {
     try {
-      const raw = str(req.body?.playlist);
+      const raw = str(req.body?.playlist).trim();
       if (raw) {
         const id = raw.match(/playlist[/:]([A-Za-z0-9]+)/)?.[1] ?? raw;
-        spotify.linkPlaylist(id);
+        if (!SPOTIFY_ID_RE.test(id)) return void res.status(400).json({ error: 'Link ou ID de playlist do Spotify inválido' });
+        await spotify.linkPlaylist(id);
+      } else {
+        await spotify.ensurePlaylist();
       }
-      await spotify.ensurePlaylist();
       res.json(spotify.status());
     } catch (err) {
       next(err);
