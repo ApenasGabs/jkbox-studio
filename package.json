@@ -1,0 +1,21 @@
+{
+  "name": "jkbox-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Jukebox musical moderna, open-source e leve, empacotada via Docker.",
+  "type": "module",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "npm run dev --workspace server & npm run dev --workspace web",
+    "build": "npm run build --workspace web && npm run build --workspace server",
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "npm run test --workspaces --if-present",
+    "start": "npm run start --workspace server"
+  }
+}
