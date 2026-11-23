@@ -26,7 +26,7 @@ interface SpotifyTrack {
   id: string;
   uri: string;
   name: string;
-  duration_ms: number;
+  duration_ms?: number | null;
   artists: { id?: string; name: string }[];
   album?: { name: string; release_date?: string; images?: { url: string; width?: number }[] };
   type?: string;
@@ -95,21 +95,20 @@ function hasPlaybackScopes(tokens: UserTokens | null): boolean {
 
 export function spotifyTrackToResult(track: SpotifyTrack): SearchResult {
   const images = track.album?.images ?? [];
+  const durationSec =
+    typeof track.duration_ms === 'number' && Number.isFinite(track.duration_ms) && track.duration_ms >= 0
+      ? Math.round(track.duration_ms / 1000)
+      : null;
   return {
     source: 'spotify',
     sourceId: track.id,
     title: track.name,
-    artist: track.artists.map((a) => a.name).join(', '),
+    artist: (track.artists ?? []).map((a) => a.name).join(', '),
     album: track.album?.name ?? null,
-    durationSec: Math.round(track.duration_ms / 1000),
+    durationSec,
     thumbnail: [...images].sort((a, b) => (b.width ?? 0) - (a.width ?? 0))[0]?.url ?? null,
     spotifyUri: track.uri,
   };
-}
-
-/** Query used to find the matching audio on YouTube (spotDL approach). */
-export function youtubeQueryFor(result: { title: string; artist: string }): string {
-  return `${result.artist} - ${result.title} audio`.trim();
 }
 
 /**
@@ -275,13 +274,20 @@ export class SpotifyService {
     this.requireConfigured();
     const data = await this.api<SpotifyApiPlaybackState | undefined>('/me/player', {}, 'user');
     if (!data) return null;
+    const item = data.item;
+    const mappedTrack =
+      item && item.id && item.name && (item.type ?? 'track') === 'track' ? spotifyTrackToResult(item) : null;
     return {
       isPlaying: Boolean(data.is_playing),
       progressMs: typeof data.progress_ms === 'number' ? Math.max(0, data.progress_ms) : 0,
       device: data.device?.id ? mapDevice(data.device) : null,
-      trackUri: data.item?.uri ?? null,
-      trackId: data.item?.id ?? null,
-      durationMs: typeof data.item?.duration_ms === 'number' ? data.item.duration_ms : null,
+      trackUri: item?.uri ?? null,
+      trackId: item?.id ?? null,
+      durationMs:
+        typeof item?.duration_ms === 'number' && Number.isFinite(item.duration_ms) && item.duration_ms >= 0
+          ? item.duration_ms
+          : null,
+      track: mappedTrack,
     };
   }
 
