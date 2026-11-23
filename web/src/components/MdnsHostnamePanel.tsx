@@ -23,6 +23,7 @@ export const MdnsHostnamePanel = ({ mdns, onUpdated, onToast }: MdnsHostnamePane
   const cleaned = hostname.trim().toLowerCase().replace(/\.local\.?$/i, '');
   const isValid = cleaned.length >= 2 && cleaned.length <= 63 && HOSTNAME_RE.test(cleaned);
   const changed = cleaned !== mdns.hostname;
+  const previewUrl = isValid ? mdns.url.replace(`${mdns.hostname}.local`, `${cleaned}.local`) : mdns.url;
 
   const handleSave = async () => {
     if (!isValid || saving) return;
@@ -117,7 +118,7 @@ export const MdnsHostnamePanel = ({ mdns, onUpdated, onToast }: MdnsHostnamePane
       )}
 
       <div className="flex items-center justify-between gap-2 rounded-lg bg-black/25 px-3 py-2 text-xs">
-        <span className="truncate font-mono text-accent-2">{mdns.url}</span>
+        <span className="min-w-0 truncate font-mono text-accent-2">{changed && isValid ? previewUrl : mdns.url}</span>
         <button
           type="button"
           onClick={handleCopy}
@@ -152,6 +153,12 @@ export const MdnsHostnamePanel = ({ mdns, onUpdated, onToast }: MdnsHostnamePane
         <p className="rounded-lg bg-amber-500/10 p-2 text-[11px] text-amber-200">
           Rodando em Docker bridge: para anunciar <code>{mdns.fqdn}</code> na rede local, use{' '}
           <code>network_mode: host</code> no <code>docker-compose.yml</code> (Linux) ou rode nativo.
+        </p>
+      )}
+
+      {mdns.lastError && !mdns.active && !mdns.dockerBridgeHint && (
+        <p className="rounded-lg bg-red-500/10 p-2 text-[11px] text-red-200">
+          Aviso mDNS: {mdns.lastError}
         </p>
       )}
     </section>

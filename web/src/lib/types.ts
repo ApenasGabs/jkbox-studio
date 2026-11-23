@@ -181,4 +181,5 @@ export type ServerMessage =
   | { type: 'lyrics_offset'; trackId: string; offsetMs: number }
   | { type: 'reaction'; emoji: ReactionEmoji; senderName?: string }
   | { type: 'notice'; message: string; error?: boolean }
-  | { type: 'input'; command: KioskCommand; phase?: KioskInputPhase; source?: string };
+  | { type: 'input'; command: KioskCommand; phase?: KioskInputPhase; source?: string }
+  | { type: 'mdns'; mdns: MdnsStatus };

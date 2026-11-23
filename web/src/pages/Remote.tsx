@@ -59,7 +59,7 @@ function formatPlayedAt(finishedAt: number | null | undefined): string | null {
 }
 
 export function Remote() {
-  const { state, playbackOutput, position, downloads, lyricsOffset, notice, connected, send } = useJukebox();
+  const { state, playbackOutput, position, downloads, lyricsOffset, mdns, notice, connected, send } = useJukebox();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [view, setView] = useState<'search' | 'queue' | 'lyrics' | 'history'>('search');
   const [name, setNameState] = useState(getName());
@@ -797,8 +797,8 @@ export function Remote() {
             />
 
             <MdnsHostnamePanel
-              mdns={config?.mdns}
-              onUpdated={(mdns) => setConfig((prev) => (prev ? { ...prev, mdns } : prev))}
+              mdns={mdns ?? config?.mdns}
+              onUpdated={(nextMdns) => setConfig((prev) => (prev ? { ...prev, mdns: nextMdns } : prev))}
               onToast={toast.show}
             />
           </div>

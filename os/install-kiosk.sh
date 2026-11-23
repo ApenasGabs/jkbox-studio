@@ -443,6 +443,20 @@ configure_network_mdns() {
 managed=true
 EOF
 
+  write_file /etc/avahi/services/jkbox.service <<EOF
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name replace-wildcards="yes">jkbox-studio (%h)</name>
+  <service>
+    <type>_http._tcp</type>
+    <port>${JKBOX_PORT}</port>
+    <txt-record>path=/</txt-record>
+    <txt-record>app=jkbox</txt-record>
+  </service>
+</service-group>
+EOF
+
   if [ -f "${SCRIPT_DIR}/jkbox-hostname.sh" ]; then
     if [ "$DRY_RUN" -eq 0 ]; then
       install -m 0755 -o root -g root "${SCRIPT_DIR}/jkbox-hostname.sh" /usr/local/bin/jkbox-hostname

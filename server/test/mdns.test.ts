@@ -3,10 +3,12 @@ import request from 'supertest';
 import { createApp } from '../src/app.js';
 import {
   buildMdnsAResponse,
+  buildMdnsServiceResponse,
   buildMdnsUrl,
   encodeDnsName,
   isValidMdnsHostname,
   matchesMdnsAQuery,
+  matchesMdnsQuery,
   MdnsError,
   normalizeMdnsHostname,
   parseMdnsQuestions,
@@ -74,6 +76,23 @@ describe('mDNS hostname validation & DNS packets', () => {
     // Responses must not be parsed as queries
     expect(parseMdnsQuestions(response)).toEqual([]);
   });
+
+  it('matches _http._tcp DNS-SD queries and builds PTR+SRV+TXT+A service responses', () => {
+    const ptrQuery = buildQueryPacket('_http._tcp.local', 12);
+    const metaQuery = buildQueryPacket('_services._dns-sd._udp.local', 12);
+    const aQuery = buildQueryPacket('gabisa.local', 1);
+
+    expect(matchesMdnsQuery(parseMdnsQuestions(ptrQuery), 'gabisa')).toBe('service');
+    expect(matchesMdnsQuery(parseMdnsQuestions(metaQuery), 'gabisa')).toBe('service');
+    expect(matchesMdnsQuery(parseMdnsQuestions(aQuery), 'gabisa')).toBe('a');
+    expect(matchesMdnsQuery(parseMdnsQuestions(aQuery), 'outro')).toBeNull();
+
+    const svcPacket = buildMdnsServiceResponse('gabisa', 3000, ['192.168.31.6']);
+    expect(svcPacket.readUInt16BE(2)).toBe(0x8400); // QR=1, AA=1
+    expect(svcPacket.readUInt16BE(6)).toBe(5); // PTR meta + PTR _http._tcp + SRV + TXT + A
+    expect(svcPacket.toString('utf8')).toContain('path=/');
+    expect([...svcPacket.subarray(svcPacket.length - 4)]).toEqual([192, 168, 31, 6]);
+  });
 });
 
 describe('MdnsService & PATCH /api/config/hostname', () => {
@@ -114,6 +133,9 @@ describe('MdnsService & PATCH /api/config/hostname', () => {
         .expect(400);
       expect(runHelper).not.toHaveBeenCalled();
 
+      const changedEvents: string[] = [];
+      mdns.on('change', (status) => changedEvents.push(`${status.hostname}:${status.useForQr}`));
+
       // Valid update calls OS helper and persists
       const updated = await request(app)
         .patch('/api/config/hostname')
@@ -122,6 +144,7 @@ describe('MdnsService & PATCH /api/config/hostname', () => {
         .expect(200);
 
       expect(runHelper).toHaveBeenCalledWith('/usr/local/bin/jkbox-hostname', 'gabisa');
+      expect(changedEvents).toEqual(['gabisa:true']);
       expect(updated.body.mdns).toMatchObject({
         hostname: 'gabisa',
         fqdn: 'gabisa.local',

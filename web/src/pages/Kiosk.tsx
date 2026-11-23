@@ -19,7 +19,7 @@ import {
   editableFromTrack,
   mergeCategorySuggestions,
 } from '../lib/catalog';
-import { cssImageUrl, formatTime, isLoopback, remoteUrl } from '../lib/format';
+import { cssImageUrl, formatTime, isLoopback, resolveRemoteQrUrl } from '../lib/format';
 import { activateFocusedElement, findNextSpatialCandidate, getFocusableElements } from '../lib/spatialNav';
 import { formatSpotifyOutputBadge } from '../lib/spotifyConnect';
 import type { AppConfig, KioskCommand, PlaybackOutput, QueueEntry, SearchResult, Track } from '../lib/types';
@@ -91,7 +91,7 @@ function youtubeEmbedUrl(youtubeId: string, startSec: number, autoplay: boolean)
 }
 
 export function Kiosk() {
-  const { state, playbackOutput, position, downloads, lyricsOffset, reactions, notice, connected, send, subscribeInput } = useJukebox();
+  const { state, playbackOutput, position, downloads, lyricsOffset, mdns, reactions, notice, connected, send, subscribeInput } = useJukebox();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [unlocked, setUnlocked] = useState(false);
   const [playing, setPlaying] = useState(false);
@@ -424,8 +424,9 @@ export function Kiosk() {
     void persistLyricsOffset(0);
   };
 
-  const qrBaseUrl = config?.mdns?.useForQr && config.mdns.url ? config.mdns.url : (config?.publicUrl ?? null);
-  const url = remoteUrl(qrBaseUrl);
+  const liveMdns = mdns ?? config?.mdns ?? null;
+  const effectiveConfig = config ? { ...config, mdns: liveMdns } : null;
+  const url = resolveRemoteQrUrl(config, liveMdns);
   const effectiveDuration = isSpotifyOutput ? current?.track.durationSec || 0 : time.duration || current?.track.durationSec || 0;
   const progressPct = effectiveDuration > 0 ? Math.min(100, (effectiveCurrentSec / effectiveDuration) * 100) : 0;
   const remainingSec = effectiveDuration > 0 ? Math.max(0, effectiveDuration - effectiveCurrentSec) : Number.POSITIVE_INFINITY;
@@ -1277,7 +1278,7 @@ export function Kiosk() {
         <HostPanel
           panelRef={hostDialogRef}
           remoteUrl={url}
-          config={config}
+          config={effectiveConfig}
           playbackOutput={playbackOutput}
           spotifyVolume={spotifyVolume}
           onSpotifyVolumeChange={setSpotifyVolume}

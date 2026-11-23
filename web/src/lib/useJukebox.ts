@@ -5,6 +5,7 @@ import {
   type KioskCommand,
   type KioskInputEvent,
   type KioskInputPhase,
+  type MdnsStatus,
   type PlaybackOutput,
   type ReactionEmoji,
   type ServerMessage,
@@ -48,6 +49,7 @@ export function useJukebox() {
   const [position, setPosition] = useState({ positionSec: 0, paused: false });
   const [downloads, setDownloads] = useState<Record<string, DownloadInfo>>({});
   const [lyricsOffset, setLyricsOffset] = useState<LyricsOffsetEvent | null>(null);
+  const [mdns, setMdns] = useState<MdnsStatus | null>(null);
   const [reactions, setReactions] = useState<LiveReaction[]>([]);
   const [notice, setNotice] = useState<JukeboxNotice | null>(null);
   const [connected, setConnected] = useState(false);
@@ -96,6 +98,8 @@ export function useJukebox() {
         } else if (msg.type === 'lyrics_offset') {
           offsetSeqRef.current += 1;
           setLyricsOffset({ trackId: msg.trackId, offsetMs: msg.offsetMs, seq: offsetSeqRef.current });
+        } else if (msg.type === 'mdns') {
+          setMdns(msg.mdns);
         } else if (msg.type === 'notice') {
           noticeSeqRef.current += 1;
           setNotice({ seq: noticeSeqRef.current, message: msg.message, error: Boolean(msg.error) });
@@ -142,5 +146,5 @@ export function useJukebox() {
     if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
   }, []);
 
-  return { state, playbackOutput, position, downloads, lyricsOffset, reactions, notice, connected, send, subscribeInput };
+  return { state, playbackOutput, position, downloads, lyricsOffset, mdns, reactions, notice, connected, send, subscribeInput };
 }

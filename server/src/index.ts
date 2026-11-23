@@ -36,7 +36,7 @@ async function main() {
 
   const app = createApp({ config, jukebox, mdns, version: pkg.version });
   const server = http.createServer(app);
-  attachRealtime(server, jukebox);
+  attachRealtime(server, jukebox, { mdns });
 
   server.listen(config.port, () => {
     mdns.start();

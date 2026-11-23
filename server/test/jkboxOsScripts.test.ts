@@ -24,6 +24,7 @@ describe('Phase 2 Etapa 3 OS scripts & manifests', () => {
       'os/jkbox-usb-mount.sh',
       'os/jkbox-wifi-fallback.sh',
       'os/jkbox-kiosk-browser.sh',
+      'os/jkbox-hostname.sh',
     ];
     for (const rel of scripts) {
       const full = path.join(REPO_ROOT, rel);
@@ -207,5 +208,13 @@ exit 0
     expect(buttonsCfg.profiles['zero-delay-arcade']).toBeTruthy();
     expect(readme).toContain('--calibrate');
     expect(readme).toContain('/data/music/usb-');
+  });
+
+  it('rejects invalid or command-injection hostnames in os/jkbox-hostname.sh', async () => {
+    const script = path.join(REPO_ROOT, 'os', 'jkbox-hostname.sh');
+    for (const bad of ['', 'a', '-bad', 'bad-', 'foo;id', 'foo$(whoami)', 'sub.domain']) {
+      await expect(execFileAsync('bash', [script, bad])).rejects.toThrow();
+    }
+    await expect(execFileAsync('bash', [script])).rejects.toThrow();
   });
 });

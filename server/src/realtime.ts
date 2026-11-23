@@ -1,6 +1,7 @@
 import type { IncomingMessage, Server } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { Jukebox } from './services/jukebox.js';
+import type { MdnsService, MdnsStatus } from './services/mdns.js';
 import { type PlaybackOutput, REACTION_EMOJIS, type ReactionEmoji } from './types.js';
 
 export const KIOSK_COMMANDS = ['UP', 'DOWN', 'LEFT', 'RIGHT', 'SELECT', 'PLAY', 'BACK', 'MENU', 'SKIP'] as const;
@@ -22,6 +23,7 @@ export interface ReactionRateLimitOptions {
 
 export interface RealtimeOptions {
   reactionRateLimit?: ReactionRateLimitOptions;
+  mdns?: MdnsService;
 }
 
 export type ServerMessage =
@@ -31,7 +33,8 @@ export type ServerMessage =
   | { type: 'lyrics_offset'; trackId: string; offsetMs: number }
   | { type: 'reaction'; emoji: ReactionEmoji; senderName?: string }
   | { type: 'notice'; message: string; error?: boolean }
-  | { type: 'input'; command: KioskCommand; phase: KioskInputPhase; source?: string };
+  | { type: 'input'; command: KioskCommand; phase: KioskInputPhase; source?: string }
+  | { type: 'mdns'; mdns: MdnsStatus };
 
 export type ClientMessage =
   | { type: 'progress'; queueId: number; positionSec: number; paused: boolean }
@@ -146,12 +149,17 @@ export function attachRealtime(server: Server, jukebox: Jukebox, options: Realti
     pushState();
   });
   lyrics.on('offset', (trackId, offsetMs) => broadcast({ type: 'lyrics_offset', trackId, offsetMs }));
+  const onMdnsChange = (mdns: MdnsStatus) => broadcast({ type: 'mdns', mdns });
+  options.mdns?.on('change', onMdnsChange);
 
   wss.on('connection', (socket, req) => {
     const localInputAllowed = isLocalInputConnection(req);
     socket.send(
       JSON.stringify({ type: 'state', state: queue.state(), playbackOutput: jukebox.playbackOutput } satisfies ServerMessage),
     );
+    if (options.mdns) {
+      socket.send(JSON.stringify({ type: 'mdns', mdns: options.mdns.status() } satisfies ServerMessage));
+    }
     socket.on('message', (raw) => {
       let msg: ClientMessage;
       try {
@@ -206,7 +214,10 @@ export function attachRealtime(server: Server, jukebox: Jukebox, options: Realti
     }
   }, 30_000);
   interval.unref();
-  wss.on('close', () => clearInterval(interval));
+  wss.on('close', () => {
+    clearInterval(interval);
+    options.mdns?.off('change', onMdnsChange);
+  });
 
   return wss;
 }

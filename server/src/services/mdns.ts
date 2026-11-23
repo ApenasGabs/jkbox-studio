@@ -1,15 +1,17 @@
 import { execFile } from 'node:child_process';
 import dgram, { type Socket } from 'node:dgram';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import { promisify } from 'node:util';
 import type { Settings } from '../db.js';
 import {
   buildMdnsAResponse,
+  buildMdnsServiceResponse,
   buildMdnsUrl,
   DEFAULT_MDNS_HOSTNAME,
   isValidMdnsHostname,
-  matchesMdnsAQuery,
+  matchesMdnsQuery,
   MdnsError,
   normalizeMdnsHostname,
   parseMdnsQuestions,
@@ -79,11 +81,15 @@ const defaultRunHelper = async (helperPath: string, hostname: string): Promise<v
   }
 };
 
+export interface MdnsEvents {
+  change: [status: MdnsStatus];
+}
+
 /**
- * Announces `<hostname>.local` on the LAN via embedded RFC 6762 mDNS responder
- * and/or delegates system hostname updates to `os/jkbox-hostname.sh` on Kiosk OS.
+ * Announces `<hostname>.local` and `_http._tcp.local` on the LAN via embedded
+ * RFC 6762/6763 mDNS responder and/or delegates OS updates to `os/jkbox-hostname.sh`.
  */
-export class MdnsService {
+export class MdnsService extends EventEmitter<MdnsEvents> {
   private hostname: string;
   private useForQr: boolean;
   private socket: Socket | null = null;
@@ -99,6 +105,7 @@ export class MdnsService {
   private readonly detectDockerBridge: () => boolean;
 
   constructor(options: MdnsOptions) {
+    super();
     this.port = options.port;
     this.enabled = options.enabled ?? true;
     this.hostnameHelper = (options.hostnameHelper ?? '').trim();
@@ -158,7 +165,10 @@ export class MdnsService {
       });
       sock.on('message', (msg) => {
         const questions = parseMdnsQuestions(msg);
-        if (matchesMdnsAQuery(questions, `${this.hostname}.local`)) {
+        const match = matchesMdnsQuery(questions, this.hostname);
+        if (match === 'service') {
+          this.announceService();
+        } else if (match === 'a') {
           this.announce();
         }
       });
@@ -169,7 +179,7 @@ export class MdnsService {
           sock.setMulticastLoopback(true);
           this.active = true;
           this.lastError = null;
-          this.announce();
+          this.announceService();
           this.log(`[jkbox] mDNS ativo: ${buildMdnsUrl(this.hostname, this.port)}`);
         } catch (err) {
           this.lastError = (err as Error).message;
@@ -185,27 +195,42 @@ export class MdnsService {
     }
   }
 
-  announce(): void {
+  private sendMulticast(packet: Buffer): void {
     if (!this.socket || !this.active) return;
-    const ips = this.getIpv4Addresses();
-    if (ips.length === 0) return;
-    const packet = buildMdnsAResponse(`${this.hostname}.local`, ips);
     this.socket.send(packet, 0, packet.length, MDNS_PORT, MDNS_ADDR, (err) => {
       if (err) this.lastError = err.message;
     });
   }
 
+  announce(): void {
+    if (!this.socket || !this.active) return;
+    const ips = this.getIpv4Addresses();
+    if (ips.length === 0) return;
+    this.sendMulticast(buildMdnsAResponse(`${this.hostname}.local`, ips));
+  }
+
+  announceService(): void {
+    if (!this.socket || !this.active) return;
+    const ips = this.getIpv4Addresses();
+    if (ips.length === 0) return;
+    this.sendMulticast(buildMdnsServiceResponse(this.hostname, this.port, ips));
+  }
+
   async update(patch: { hostname?: unknown; useForQr?: unknown }): Promise<MdnsStatus> {
     let nextHostname = this.hostname;
     let hostnameChanged = false;
+    let useForQrChanged = false;
 
     if (patch.hostname !== undefined) {
       nextHostname = normalizeMdnsHostname(patch.hostname);
       hostnameChanged = nextHostname !== this.hostname;
     }
 
-    if (patch.useForQr !== undefined && typeof patch.useForQr !== 'boolean') {
-      throw new MdnsError('useForQr deve ser booleano');
+    if (patch.useForQr !== undefined) {
+      if (typeof patch.useForQr !== 'boolean') {
+        throw new MdnsError('useForQr deve ser booleano');
+      }
+      useForQrChanged = patch.useForQr !== this.useForQr;
     }
 
     if (hostnameChanged && this.hostnameHelper) {
@@ -224,7 +249,7 @@ export class MdnsService {
       this.hostname = nextHostname;
       this.settings?.set('mdns_hostname', nextHostname);
       if (this.active && this.socket) {
-        this.announce();
+        this.announceService();
       }
     }
 
@@ -233,7 +258,11 @@ export class MdnsService {
       this.settings?.set('mdns_use_for_qr', patch.useForQr);
     }
 
-    return this.status();
+    const nextStatus = this.status();
+    if (hostnameChanged || useForQrChanged) {
+      this.emit('change', nextStatus);
+    }
+    return nextStatus;
   }
 
   stop(): void {

@@ -52,9 +52,15 @@ export interface DnsQuestion {
 }
 
 const DNS_TYPE_A = 1;
+const DNS_TYPE_PTR = 12;
+const DNS_TYPE_TXT = 16;
+const DNS_TYPE_SRV = 33;
 const DNS_TYPE_ANY = 255;
 const DNS_CLASS_IN = 1;
 const DNS_CLASS_IN_FLUSH = 0x8001;
+
+export const MDNS_HTTP_SERVICE = '_http._tcp.local';
+export const MDNS_SERVICES_META = '_services._dns-sd._udp.local';
 
 export const encodeDnsName = (name: string): Buffer => {
   const labels = name
@@ -135,27 +141,90 @@ export const matchesMdnsAQuery = (questions: DnsQuestion[], fqdn: string): boole
   );
 };
 
-/** Builds an mDNS authoritative response containing A records for `<fqdn>`. */
-export const buildMdnsAResponse = (fqdn: string, ipv4Addresses: string[], ttlSec = 120): Buffer => {
-  const validIps = ipv4Addresses.filter((ip) => /^\d{1,3}(\.\d{1,3}){3}$/.test(ip));
+export const matchesMdnsQuery = (questions: DnsQuestion[], hostname: string): 'service' | 'a' | null => {
+  const clean = hostname.toLowerCase().replace(/\.local\.?$/, '');
+  const instance = `${clean}.${MDNS_HTTP_SERVICE}`;
+  const isServiceMatch = questions.some(
+    (q) =>
+      (q.qclass === DNS_CLASS_IN || q.qclass === DNS_TYPE_ANY) &&
+      ((q.name === MDNS_SERVICES_META && (q.type === DNS_TYPE_PTR || q.type === DNS_TYPE_ANY)) ||
+        (q.name === MDNS_HTTP_SERVICE && (q.type === DNS_TYPE_PTR || q.type === DNS_TYPE_ANY)) ||
+        (q.name === instance &&
+          (q.type === DNS_TYPE_SRV || q.type === DNS_TYPE_TXT || q.type === DNS_TYPE_ANY))),
+  );
+  if (isServiceMatch) return 'service';
+  return matchesMdnsAQuery(questions, `${clean}.local`) ? 'a' : null;
+};
+
+const buildDnsResponseHeader = (answerCount: number): Buffer => {
   const header = Buffer.alloc(12);
   header.writeUInt16BE(0, 0); // Transaction ID = 0 for mDNS
   header.writeUInt16BE(0x8400, 2); // QR=1, AA=1
   header.writeUInt16BE(0, 4); // QDCOUNT = 0
-  header.writeUInt16BE(validIps.length, 6); // ANCOUNT
+  header.writeUInt16BE(answerCount, 6); // ANCOUNT
   header.writeUInt16BE(0, 8); // NSCOUNT
   header.writeUInt16BE(0, 10); // ARCOUNT
+  return header;
+};
 
-  const nameBuf = encodeDnsName(fqdn);
-  const records = validIps.map((ip) => {
-    const meta = Buffer.alloc(10);
-    meta.writeUInt16BE(DNS_TYPE_A, 0);
-    meta.writeUInt16BE(DNS_CLASS_IN_FLUSH, 2);
-    meta.writeUInt32BE(ttlSec, 4);
-    meta.writeUInt16BE(4, 8);
-    const rdata = Buffer.from(ip.split('.').map((octet) => Number.parseInt(octet, 10) & 0xff));
-    return Buffer.concat([nameBuf, meta, rdata]);
+const buildDnsRecord = (name: string, type: number, rrClass: number, ttlSec: number, rdata: Buffer): Buffer => {
+  const meta = Buffer.alloc(10);
+  meta.writeUInt16BE(type, 0);
+  meta.writeUInt16BE(rrClass, 2);
+  meta.writeUInt32BE(ttlSec, 4);
+  meta.writeUInt16BE(rdata.length, 8);
+  return Buffer.concat([encodeDnsName(name), meta, rdata]);
+};
+
+const filterValidIpv4 = (ipv4Addresses: string[]): string[] =>
+  ipv4Addresses.filter((ip) => /^\d{1,3}(\.\d{1,3}){3}$/.test(ip));
+
+const buildARecord = (fqdn: string, ip: string, ttlSec: number): Buffer => {
+  const rdata = Buffer.from(ip.split('.').map((octet) => Number.parseInt(octet, 10) & 0xff));
+  return buildDnsRecord(fqdn, DNS_TYPE_A, DNS_CLASS_IN_FLUSH, ttlSec, rdata);
+};
+
+/** Builds an mDNS authoritative response containing A records for `<fqdn>`. */
+export const buildMdnsAResponse = (fqdn: string, ipv4Addresses: string[], ttlSec = 120): Buffer => {
+  const validIps = filterValidIpv4(ipv4Addresses);
+  const header = buildDnsResponseHeader(validIps.length);
+  const records = validIps.map((ip) => buildARecord(fqdn, ip, ttlSec));
+  return Buffer.concat([header, ...records]);
+};
+
+/**
+ * Builds an RFC 6762 / 6763 DNS-SD response announcing `_http._tcp.local`
+ * along with SRV, TXT and A records for `<hostname>.local:<port>`.
+ */
+export const buildMdnsServiceResponse = (
+  hostname: string,
+  port: number,
+  ipv4Addresses: string[],
+  ttlSec = 120,
+): Buffer => {
+  const clean = hostname.toLowerCase().replace(/\.local\.?$/, '');
+  const fqdn = `${clean}.local`;
+  const instance = `${clean}.${MDNS_HTTP_SERVICE}`;
+  const validIps = filterValidIpv4(ipv4Addresses);
+
+  const srvHead = Buffer.alloc(6);
+  srvHead.writeUInt16BE(0, 0); // priority
+  srvHead.writeUInt16BE(0, 2); // weight
+  srvHead.writeUInt16BE(port & 0xffff, 4);
+  const srvRdata = Buffer.concat([srvHead, encodeDnsName(fqdn)]);
+
+  const txtEntries = ['path=/', 'app=jkbox'].map((entry) => {
+    const buf = Buffer.from(entry, 'utf8');
+    return Buffer.concat([Buffer.from([buf.length]), buf]);
   });
 
-  return Buffer.concat([header, ...records]);
-}
+  const records = [
+    buildDnsRecord(MDNS_SERVICES_META, DNS_TYPE_PTR, DNS_CLASS_IN, ttlSec, encodeDnsName(MDNS_HTTP_SERVICE)),
+    buildDnsRecord(MDNS_HTTP_SERVICE, DNS_TYPE_PTR, DNS_CLASS_IN, ttlSec, encodeDnsName(instance)),
+    buildDnsRecord(instance, DNS_TYPE_SRV, DNS_CLASS_IN_FLUSH, ttlSec, srvRdata),
+    buildDnsRecord(instance, DNS_TYPE_TXT, DNS_CLASS_IN_FLUSH, ttlSec, Buffer.concat(txtEntries)),
+    ...validIps.map((ip) => buildARecord(fqdn, ip, ttlSec)),
+  ];
+
+  return Buffer.concat([buildDnsResponseHeader(records.length), ...records]);
+};

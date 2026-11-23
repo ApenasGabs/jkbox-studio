@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 import { createApp } from '../src/app.js';
 import { attachRealtime, type ServerMessage } from '../src/realtime.js';
+import { MdnsService } from '../src/services/mdns.js';
 import { setup, ytResult } from './helpers.js';
 
 let server: http.Server | null = null;
@@ -156,5 +157,43 @@ describe('WebSocket realtime sync', () => {
     localDaemon.close();
     proxiedGuest.close();
     wss.close();
+  });
+
+  it('broadcasts mdns hostname and QR preference changes over WebSocket', async () => {
+    const { config, jukebox } = setup({ HOST_PIN: '1234' });
+    const mdns = new MdnsService({
+      port: 3000,
+      defaultHostname: 'jkbox',
+      enabled: true,
+      hostnameHelper: '/usr/local/bin/jkbox-hostname',
+      settings: jukebox.settings,
+      runHelper: async () => {},
+      detectDockerBridge: () => false,
+    });
+    mdns.start();
+
+    server = http.createServer(createApp({ config, jukebox, mdns }));
+    const wss = attachRealtime(server, jukebox, { mdns });
+    await new Promise<void>((r) => server!.listen(0, r));
+    const url = `ws://127.0.0.1:${(server.address() as AddressInfo).port}/ws`;
+
+    const kiosk = new WebSocket(url);
+    const initialMdns = await nextMessage(kiosk, (m) => m.type === 'mdns');
+    expect(initialMdns.mdns).toMatchObject({ hostname: 'jkbox', useForQr: false });
+
+    const updatedPromise = nextMessage(kiosk, (m) => m.type === 'mdns' && m.mdns.hostname === 'gabisa');
+    await mdns.update({ hostname: 'gabisa', useForQr: true });
+    const updated = await updatedPromise;
+    expect(updated.mdns).toMatchObject({
+      hostname: 'gabisa',
+      fqdn: 'gabisa.local',
+      url: 'http://gabisa.local:3000',
+      useForQr: true,
+    });
+
+    kiosk.close();
+    wss.close();
+    mdns.stop();
+    jukebox.stop();
   });
 });

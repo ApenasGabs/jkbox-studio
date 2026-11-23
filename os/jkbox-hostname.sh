@@ -9,7 +9,7 @@ if [ "$#" -ne 1 ]; then
 fi
 
 RAW_HOSTNAME="$1"
-HOSTNAME_CLEAN="$(printf '%s' "$RAW_HOSTNAME" | tr '[:upper:]' '[:lower:]' | sed 's/\.local\.\?$//')"
+HOSTNAME_CLEAN="$(printf '%s' "$RAW_HOSTNAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/\.local\.?$//')"
 
 if ! printf '%s' "$HOSTNAME_CLEAN" | grep -Eq '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'; then
   echo "Hostname inválido (RFC 1123): $RAW_HOSTNAME" >&2
