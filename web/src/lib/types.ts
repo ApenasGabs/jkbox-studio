@@ -1,5 +1,5 @@
 // Mirrors server/src/types.ts (kept minimal on purpose).
-export type TrackSource = 'youtube' | 'spotify' | 'local';
+export type TrackSource = 'youtube' | 'spotify' | 'local' | 'deezer';
 export type TrackStatus = 'pending' | 'downloading' | 'ready' | 'error';
 export type VideoMode = 'off' | 'cache' | 'embed';
 
@@ -207,6 +207,34 @@ export interface TrackLyrics {
   source: LyricsSource;
   offsetMs: number;
   fetchedAt: number;
+}
+
+export type DiscoveryMode = 'playlist' | 'category' | 'vibe';
+export type DiscoveryTarget = 'library' | 'playlist' | 'queue';
+export type DiscoverySource = 'deezer' | 'spotify' | 'youtube';
+
+export interface DiscoverySeedSummary {
+  title: string;
+  artist: string;
+  genre: string | null;
+  subgenre: string | null;
+}
+
+export interface DiscoverySuggestResponse {
+  mode: DiscoveryMode;
+  seeds: DiscoverySeedSummary[];
+  sourcesUsed: DiscoverySource[];
+  suggestions: SearchResult[];
+}
+
+export interface DiscoveryPopulateResponse {
+  target: DiscoveryTarget;
+  playlistId?: string;
+  total: number;
+  added: number;
+  duplicates: number;
+  queuedDownloads: number;
+  tracks: Track[];
 }
 
 export const KIOSK_COMMANDS = ['UP', 'DOWN', 'LEFT', 'RIGHT', 'SELECT', 'PLAY', 'BACK', 'MENU', 'SKIP'] as const;

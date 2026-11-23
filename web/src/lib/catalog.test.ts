@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildDiscoveryContext,
   buildMetadataPatch,
   editableFromResult,
   formatAlbumMeta,
@@ -146,6 +147,36 @@ describe('catalog helpers', () => {
       title: 'Sina',
       artist: 'Djavan',
       thumbnail: null,
+    });
+  });
+
+  it('builds discovery request contexts for playlist, category, and vibe modes', () => {
+    expect(
+      buildDiscoveryContext({ mode: 'playlist', playlistId: 'pl-1', label: 'Pagode 90' }),
+    ).toEqual({
+      mode: 'playlist',
+      target: 'playlist',
+      playlistId: 'pl-1',
+      title: 'Popular semelhantes',
+      subtitle: 'Playlist: Pagode 90',
+    });
+
+    expect(
+      buildDiscoveryContext({ mode: 'category', category: 'Rock', subgenre: 'Rock Nacional', label: 'Rock · Rock Nacional' }),
+    ).toEqual({
+      mode: 'category',
+      target: 'library',
+      category: 'Rock',
+      subgenre: 'Rock Nacional',
+      title: 'Popular semelhantes',
+      subtitle: 'Rock · Rock Nacional',
+    });
+
+    expect(buildDiscoveryContext({ mode: 'vibe' })).toEqual({
+      mode: 'vibe',
+      target: 'queue',
+      title: 'Completar fila na vibe atual',
+      subtitle: 'Recomendações baseadas nas últimas faixas tocadas',
     });
   });
 });

@@ -1,5 +1,5 @@
 import type { Db } from '../db.js';
-import type { Track } from '../types.js';
+import type { Track, TrackSource } from '../types.js';
 import { sanitizeTrackMetadata } from './lyrics.js';
 import type { FetchFn, SpotifyService } from './spotify.js';
 import type { TrackRepository } from './tracks.js';
@@ -789,13 +789,15 @@ export class ClassifierService {
   }
 
   private async fetchFromSpotify(
-    track: Track,
+    source: TrackSource | undefined,
+    sourceId: string | undefined,
+    title: string,
     cleanArtist: string,
   ): Promise<{ genres: string[]; year: number | null; artistName?: string } | null> {
     if (!this.spotify?.configured) return null;
     try {
-      if (track.source === 'spotify' && track.sourceId) {
-        const info = await this.spotify.getTrackArtistGenres(track.sourceId);
+      if (source === 'spotify' && sourceId) {
+        const info = await this.spotify.getTrackArtistGenres(sourceId);
         if (info.genres.length > 0 || info.year !== null) return info;
       }
       if (cleanArtist) {
@@ -803,9 +805,106 @@ export class ClassifierService {
         if (genres.length > 0) return { genres, year: null, artistName: cleanArtist };
       }
     } catch (err) {
-      this.log(`[classifier] falha no Spotify para "${cleanArtist || track.title}": ${err instanceof Error ? err.message : String(err)}`);
+      this.log(`[classifier] falha no Spotify para "${cleanArtist || title}": ${err instanceof Error ? err.message : String(err)}`);
     }
     return null;
+  }
+
+  private async resolveExternalMetadata(input: {
+    source?: TrackSource;
+    sourceId?: string;
+    cleanTitle: string;
+    cleanArtist: string;
+    initialYear: number | null;
+  }): Promise<{
+    externalGenres: string[];
+    discoveredYear: number | null;
+    source: TrackClassificationResult['source'];
+  }> {
+    const externalGenres: string[] = [];
+    let discoveredYear = input.initialYear;
+    let source: TrackClassificationResult['source'] = null;
+
+    const cached = input.cleanArtist ? this.getCachedArtist(input.cleanArtist) : null;
+    if (cached) {
+      externalGenres.push(...cached.rawGenres);
+      return { externalGenres, discoveredYear, source: 'cache' };
+    }
+
+    const spotifyInfo = await this.fetchFromSpotify(
+      input.source,
+      input.sourceId,
+      input.cleanTitle,
+      input.cleanArtist,
+    );
+    if (spotifyInfo) {
+      if (discoveredYear === null && spotifyInfo.year !== null) discoveredYear = spotifyInfo.year;
+      if (spotifyInfo.genres.length > 0) {
+        externalGenres.push(...spotifyInfo.genres);
+        source = 'spotify';
+      }
+    }
+
+    if (externalGenres.length === 0) {
+      const itunesInfo = await this.fetchFromItunes(input.cleanTitle, input.cleanArtist);
+      if (itunesInfo) {
+        if (discoveredYear === null && itunesInfo.year !== null) discoveredYear = itunesInfo.year;
+        if (itunesInfo.genres.length > 0) {
+          externalGenres.push(...itunesInfo.genres);
+          source = 'itunes';
+        }
+      }
+    }
+
+    if (input.cleanArtist && externalGenres.length > 0 && (source === 'spotify' || source === 'itunes')) {
+      const baseOutcome = normalizeGenreAndSubgenre(externalGenres, {
+        title: '',
+        artist: input.cleanArtist,
+      });
+      this.saveArtistCache(input.cleanArtist, {
+        rawGenres: externalGenres,
+        genre: baseOutcome?.genre ?? null,
+        subgenre: baseOutcome?.subgenre ?? null,
+        source,
+      });
+    }
+
+    return { externalGenres, discoveredYear, source };
+  }
+
+  /** Classifies unsaved track metadata (e.g. discovery previews) without mutating the database. */
+  async classifyMetadata(input: {
+    title: string;
+    artist: string;
+    album?: string | null;
+    year?: number | null;
+    source?: TrackSource;
+    sourceId?: string;
+    rawGenres?: readonly string[];
+  }): Promise<ClassificationOutcome | null> {
+    const sanitized = sanitizeTrackMetadata(input.title, input.artist);
+    const cleanTitle = sanitized.title || input.title;
+    const cleanArtist = sanitized.artist || input.artist;
+
+    const { externalGenres, discoveredYear } = await this.resolveExternalMetadata({
+      source: input.source,
+      sourceId: input.sourceId,
+      cleanTitle,
+      cleanArtist,
+      initialYear: input.year ?? null,
+    });
+
+    const context: ClassificationContext = {
+      title: cleanTitle,
+      artist: cleanArtist,
+      album: input.album,
+      year: discoveredYear,
+    };
+    const combinedRaw = [...externalGenres, ...(input.rawGenres ?? [])];
+    return (
+      (externalGenres.length > 0 ? normalizeGenreAndSubgenre(externalGenres, context) : null) ??
+      normalizeGenreAndSubgenre(combinedRaw, context)
+    );
   }
 
   private async fetchFromItunes(
@@ -866,47 +965,16 @@ export class ClassifierService {
     const externalGenres: string[] = [];
     const trackGenreTag = track.genre?.trim() ? [track.genre.trim()] : [];
 
-    let discoveredYear: number | null = track.year;
-    let source: TrackClassificationResult['source'] = null;
-
-    const cached = cleanArtist ? this.getCachedArtist(cleanArtist) : null;
-    if (cached) {
-      externalGenres.push(...cached.rawGenres);
-      source = 'cache';
-    } else {
-      const spotifyInfo = await this.fetchFromSpotify(track, cleanArtist);
-      if (spotifyInfo) {
-        if (discoveredYear === null && spotifyInfo.year !== null) discoveredYear = spotifyInfo.year;
-        if (spotifyInfo.genres.length > 0) {
-          externalGenres.push(...spotifyInfo.genres);
-          source = 'spotify';
-        }
-      }
-
-      if (externalGenres.length === 0) {
-        const itunesInfo = await this.fetchFromItunes(cleanTitle, cleanArtist);
-        if (itunesInfo) {
-          if (discoveredYear === null && itunesInfo.year !== null) discoveredYear = itunesInfo.year;
-          if (itunesInfo.genres.length > 0) {
-            externalGenres.push(...itunesInfo.genres);
-            source = 'itunes';
-          }
-        }
-      }
-
-      if (cleanArtist && externalGenres.length > 0 && (source === 'spotify' || source === 'itunes')) {
-        const baseOutcome = normalizeGenreAndSubgenre(externalGenres, {
-          title: '',
-          artist: cleanArtist,
-        });
-        this.saveArtistCache(cleanArtist, {
-          rawGenres: externalGenres,
-          genre: baseOutcome?.genre ?? null,
-          subgenre: baseOutcome?.subgenre ?? null,
-          source,
-        });
-      }
-    }
+    const resolved = await this.resolveExternalMetadata({
+      source: track.source,
+      sourceId: track.sourceId,
+      cleanTitle,
+      cleanArtist,
+      initialYear: track.year,
+    });
+    externalGenres.push(...resolved.externalGenres);
+    const discoveredYear = resolved.discoveredYear;
+    const source = resolved.source;
 
     const context: ClassificationContext = {
       title: cleanTitle,

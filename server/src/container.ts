@@ -1,6 +1,7 @@
 import type { Config } from './config.js';
 import { openDb, Settings } from './db.js';
 import { ClassifierService } from './services/classifier.js';
+import { DiscoveryService } from './services/discovery.js';
 import { DownloadManager } from './services/downloads.js';
 import { Jukebox } from './services/jukebox.js';
 import { LyricsService } from './services/lyrics.js';
@@ -59,6 +60,18 @@ export function createJukebox(config: Config, overrides: ContainerOverrides = {}
     settings,
     classifier,
     playlists,
+  );
+  jukebox.discovery = new DiscoveryService(
+    tracks,
+    queue,
+    downloads,
+    media,
+    spotify,
+    classifier,
+    playlists,
+    overrides.fetchFn,
+    overrides.log,
+    (queued) => jukebox!.syncQueuedBatch(queued),
   );
   return jukebox;
 }

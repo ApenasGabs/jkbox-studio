@@ -1,8 +1,9 @@
 import { QRCodeSVG } from 'qrcode.react';
 import { type RefObject, useCallback, useEffect, useRef, useState } from 'react';
 import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
-import { CatalogBrowser } from '../components/CatalogBrowser';
+import { CatalogBrowser, type DiscoverSimilarRequest } from '../components/CatalogBrowser';
 import { Cover } from '../components/Cover';
+import { DiscoveryModal, type DiscoveryRequestContext } from '../components/DiscoveryModal';
 import { GenreBadges } from '../components/GenreBadges';
 import { LyricsView } from '../components/LyricsView';
 import { MdnsHostnamePanel } from '../components/MdnsHostnamePanel';
@@ -15,6 +16,7 @@ import { TrackMetadataModal } from '../components/TrackMetadataModal';
 import { VideoLyricsOverlay } from '../components/VideoLyricsOverlay';
 import { api, getHostPin, setHostPin } from '../lib/api';
 import {
+  buildDiscoveryContext,
   type CatalogRoute,
   type CatalogTab,
   DEFAULT_CATEGORY_SUGGESTIONS,
@@ -130,6 +132,7 @@ export function Kiosk() {
   const [categorySuggestions, setCategorySuggestions] = useState<string[]>([...DEFAULT_CATEGORY_SUGGESTIONS]);
   const [editingTrack, setEditingTrack] = useState<EditableTrack | null>(null);
   const [playlistPickerTrack, setPlaylistPickerTrack] = useState<PlaylistPickerTrack | null>(null);
+  const [discoveryContext, setDiscoveryContext] = useState<DiscoveryRequestContext | null>(null);
   const [addingKey, setAddingKey] = useState<string | null>(null);
   const [offsetBusy, setOffsetBusy] = useState(false);
   const [cinemaMode, setCinemaMode] = useState(false);
@@ -462,7 +465,7 @@ export function Kiosk() {
   const showUpNextBanner = Boolean(
     current && nextUp && effectiveDuration > 0 && remainingSec <= UP_NEXT_WINDOW_SEC && dismissedUpNextId !== current.id,
   );
-  const controlsHidden = cinemaMode && cinemaIdle && !settingsOpen && !catalogOpen && !editingTrack && !playlistPickerTrack && unlocked;
+  const controlsHidden = cinemaMode && cinemaIdle && !settingsOpen && !catalogOpen && !editingTrack && !playlistPickerTrack && !discoveryContext && unlocked;
   const backdrop = cssImageUrl(current?.track.thumbnail);
 
   const enqueueFromCatalog = async (result: SearchResult) => {
@@ -518,21 +521,30 @@ export function Kiosk() {
     }
   };
 
+  const openDiscoverFromCatalog = useCallback((req: DiscoverSimilarRequest) => {
+    setDiscoveryContext(buildDiscoveryContext(req));
+  }, []);
+
   const activeScope = !unlocked
     ? 'unlock'
-    : playlistPickerTrack
-      ? 'playlist-picker'
-      : editingTrack
-        ? 'metadata'
-        : catalogOpen
-          ? 'catalog'
-          : settingsOpen
-            ? 'host'
-            : 'main';
+    : discoveryContext
+      ? 'discovery'
+      : playlistPickerTrack
+        ? 'playlist-picker'
+        : editingTrack
+          ? 'metadata'
+          : catalogOpen
+            ? 'catalog'
+            : settingsOpen
+              ? 'host'
+              : 'main';
 
   const getActiveScopeElements = useCallback((): HTMLElement[] => {
     if (activeScope === 'unlock') {
       return unlockBtnRef.current ? [unlockBtnRef.current] : [];
+    }
+    if (activeScope === 'discovery') {
+      return getFocusableElements(document.querySelector('[data-kiosk-scope="discovery"]'));
     }
     if (activeScope === 'playlist-picker') {
       return getFocusableElements(document.querySelector('[data-kiosk-scope="playlist-picker"]'));
@@ -598,22 +610,28 @@ export function Kiosk() {
   useEffect(() => {
     const root = kioskRef.current;
     if (!root || typeof MutationObserver === 'undefined') return;
+    const isUnavailableFocusTarget = (el: HTMLElement | null): boolean =>
+      Boolean(el && (!el.isConnected || ('disabled' in el && Boolean((el as HTMLButtonElement).disabled))));
     let scheduled = false;
     const observer = new MutationObserver(() => {
       if (!dpadActiveRef.current || scheduled) return;
-      const currentEl = focusedElRef.current;
-      if (currentEl && !currentEl.isConnected) {
+      if (isUnavailableFocusTarget(focusedElRef.current)) {
         scheduled = true;
         queueMicrotask(() => {
           scheduled = false;
           if (!dpadActiveRef.current) return;
-          if (focusedElRef.current && !focusedElRef.current.isConnected) {
+          if (isUnavailableFocusTarget(focusedElRef.current)) {
             focusDefaultInScope();
           }
         });
       }
     });
-    observer.observe(root, { childList: true, subtree: true });
+    observer.observe(root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['disabled'],
+    });
     return () => observer.disconnect();
   }, [focusDefaultInScope]);
 
@@ -663,6 +681,10 @@ export function Kiosk() {
       dpadActiveRef.current = true;
 
       if (command === 'BACK') {
+        if (discoveryContext) {
+          setDiscoveryContext(null);
+          return;
+        }
         if (playlistPickerTrack) {
           setPlaylistPickerTrack(null);
           return;
@@ -690,6 +712,7 @@ export function Kiosk() {
       }
 
       if (command === 'MENU') {
+        if (discoveryContext) setDiscoveryContext(null);
         if (playlistPickerTrack) setPlaylistPickerTrack(null);
         if (editingTrack) setEditingTrack(null);
         if (catalogOpen) setCatalogOpen(false);
@@ -742,6 +765,7 @@ export function Kiosk() {
     },
     [
       unlocked,
+      discoveryContext,
       playlistPickerTrack,
       editingTrack,
       catalogOpen,
@@ -1381,6 +1405,10 @@ export function Kiosk() {
             setCatalogHistory([{ kind: 'root' }]);
             setCatalogOpen(true);
           }}
+          onDiscoverQueueVibe={() => {
+            setSettingsOpen(false);
+            setDiscoveryContext(buildDiscoveryContext({ mode: 'vibe' }));
+          }}
           reloadKey={catalogReloadKey}
           onCatalogChanged={() => setCatalogReloadKey((k) => k + 1)}
           onClose={() => setSettingsOpen(false)}
@@ -1443,6 +1471,7 @@ export function Kiosk() {
                 onAddAlbum={enqueueAlbumFromCatalog}
                 onAddPlaylist={enqueuePlaylistFromCatalog}
                 onAddToPlaylist={setPlaylistPickerTrack}
+                onDiscoverSimilar={openDiscoverFromCatalog}
                 canEditMetadata
                 canEnqueueAlbum
                 onEditTrack={setEditingTrack}
@@ -1470,6 +1499,19 @@ export function Kiosk() {
         onClose={() => setPlaylistPickerTrack(null)}
         onChanged={() => setCatalogReloadKey((k) => k + 1)}
         onToast={toast.show}
+      />
+
+      <DiscoveryModal
+        context={discoveryContext}
+        onClose={() => setDiscoveryContext(null)}
+        onPopulated={() => setCatalogReloadKey((k) => k + 1)}
+        onToast={toast.show}
+        onSuggestionsLoaded={() => {
+          if (!dpadActiveRef.current) return;
+          window.requestAnimationFrame(() => {
+            if (dpadActiveRef.current) focusDefaultInScope();
+          });
+        }}
       />
 
       {!unlocked && (
@@ -1530,6 +1572,7 @@ interface HostPanelProps {
   onAddCurrentToPlaylist: () => void;
   onOpenCatalog: () => void;
   onOpenPlaylistsTab: () => void;
+  onDiscoverQueueVibe: () => void;
   reloadKey: number;
   onCatalogChanged: () => void;
   onClose: () => void;
@@ -1562,6 +1605,7 @@ function HostPanel({
   onAddCurrentToPlaylist,
   onOpenCatalog,
   onOpenPlaylistsTab,
+  onDiscoverQueueVibe,
   reloadKey,
   onCatalogChanged,
   onClose,
@@ -1953,6 +1997,13 @@ function HostPanel({
               )}
             </div>
           )}
+          <button
+            type="button"
+            onClick={onDiscoverQueueVibe}
+            className="rounded-xl border border-accent/40 bg-accent/20 px-3 py-2 text-xs font-semibold text-purple-100 transition hover:bg-accent/30"
+          >
+            ✨ Completar fila na vibe atual
+          </button>
         </section>
 
         <section className="glass flex items-center justify-between gap-3 p-4">

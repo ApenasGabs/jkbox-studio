@@ -1,8 +1,9 @@
 import type { SearchResult, TrackSource } from '../types.js';
 
-const SOURCES = new Set<TrackSource>(['youtube', 'spotify', 'local']);
+const SOURCES = new Set<TrackSource>(['youtube', 'spotify', 'local', 'deezer']);
 export const YOUTUBE_ID_RE = /^[\w-]{11}$/;
 export const SPOTIFY_ID_RE = /^[A-Za-z0-9]{1,64}$/;
+export const DEEZER_ID_RE = /^\d{1,32}$/;
 const SPOTIFY_TRACK_URI_RE = /^spotify:track:[A-Za-z0-9]{1,64}$/;
 const MAX_TEXT = 300;
 
@@ -35,6 +36,7 @@ export function sanitizeResult(input: unknown): SearchResult | null {
   if (!sourceId || !title) return null;
   if (source === 'youtube' && !YOUTUBE_ID_RE.test(sourceId)) return null;
   if (source === 'spotify' && !SPOTIFY_ID_RE.test(sourceId)) return null;
+  if (source === 'deezer' && !DEEZER_ID_RE.test(sourceId)) return null;
 
   const duration = raw.durationSec;
   const spotifyUri = typeof raw.spotifyUri === 'string' && SPOTIFY_TRACK_URI_RE.test(raw.spotifyUri) ? raw.spotifyUri : null;

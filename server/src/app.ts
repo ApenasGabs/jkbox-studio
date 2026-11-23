@@ -5,6 +5,7 @@ import type { Config } from './config.js';
 import { parseMetadataPatch } from './lib/metadata.js';
 import { streamFile } from './lib/stream.js';
 import { SPOTIFY_ID_RE } from './lib/validate.js';
+import { DiscoveryError } from './services/discovery.js';
 import type { Jukebox, SearchSource } from './services/jukebox.js';
 import { scanLibrary } from './services/library.js';
 import { LyricsError } from './services/lyrics.js';
@@ -216,6 +217,60 @@ export const createApp = ({ config, jukebox, mdns, version = '0.1.0' }: AppDeps)
   api.post('/library/autocategorize', requireHost, async (_req, res, next) => {
     try {
       res.json(await jukebox.autocategorizeLibrary());
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Discovery (#35) ----------------------------------------------------
+  api.post('/discovery/suggest', requireHost, async (req, res, next) => {
+    try {
+      if (!jukebox.discovery) throw new DiscoveryError('Serviço de descoberta indisponível', 500);
+      const body = req.body ?? {};
+      const mode = body.mode;
+      const playlistId = typeof body.playlistId === 'string' ? body.playlistId : undefined;
+      const category = typeof body.category === 'string' ? body.category : undefined;
+      const subgenre = typeof body.subgenre === 'string' ? body.subgenre : body.subgenre === null ? null : undefined;
+      const limit = body.limit;
+      if (body.playlistId !== undefined && typeof body.playlistId !== 'string') {
+        throw new DiscoveryError('playlistId deve ser texto', 400);
+      }
+      if (body.category !== undefined && typeof body.category !== 'string') {
+        throw new DiscoveryError('category deve ser texto', 400);
+      }
+      if (body.subgenre !== undefined && body.subgenre !== null && typeof body.subgenre !== 'string') {
+        throw new DiscoveryError('subgenre deve ser texto ou null', 400);
+      }
+      res.json(
+        await jukebox.discovery.suggest({
+          mode,
+          playlistId,
+          category,
+          subgenre,
+          limit,
+        }),
+      );
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  api.post('/discovery/populate', requireHost, async (req, res, next) => {
+    try {
+      if (!jukebox.discovery) throw new DiscoveryError('Serviço de descoberta indisponível', 500);
+      const body = req.body ?? {};
+      if (body.playlistId !== undefined && typeof body.playlistId !== 'string') {
+        throw new DiscoveryError('playlistId deve ser texto', 400);
+      }
+      res.json(
+        await jukebox.discovery.populate({
+          tracks: body.tracks,
+          target: body.target,
+          playlistId: typeof body.playlistId === 'string' ? body.playlistId : undefined,
+          requesterId: str(body.clientId) || undefined,
+          requesterName: str(body.name) || undefined,
+        }),
+      );
     } catch (err) {
       next(err);
     }
@@ -643,7 +698,12 @@ export const createApp = ({ config, jukebox, mdns, version = '0.1.0' }: AppDeps)
     if (err instanceof SpotifyError) {
       return void res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     }
-    if (err instanceof QueueError || err instanceof LyricsError || err instanceof PlaylistError) {
+    if (
+      err instanceof QueueError ||
+      err instanceof LyricsError ||
+      err instanceof PlaylistError ||
+      err instanceof DiscoveryError
+    ) {
       return void res.status(err.status).json({ error: err.message });
     }
     console.error(err);
