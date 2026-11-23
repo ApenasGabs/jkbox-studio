@@ -1,6 +1,7 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { CatalogBrowser } from '../components/CatalogBrowser';
 import { Cover } from '../components/Cover';
+import { GenreBadges } from '../components/GenreBadges';
 import { LyricsView } from '../components/LyricsView';
 import { QueueList } from '../components/QueueList';
 import { SourceBadge } from '../components/SourceBadge';
@@ -521,16 +522,7 @@ export function Remote() {
                         </p>
                         <div className="mt-1 flex flex-wrap items-center gap-1.5">
                           <SourceBadge source={result.source} cached={result.cached} />
-                          {result.genre && (
-                            <span className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-medium text-zinc-300">
-                              {result.genre}
-                            </span>
-                          )}
-                          {result.subgenre && (
-                            <span className="rounded-full border border-accent/30 bg-accent/15 px-2 py-0.5 text-[10px] font-medium text-purple-200">
-                              {result.subgenre}
-                            </span>
-                          )}
+                          <GenreBadges genre={result.genre} subgenre={result.subgenre} />
                         </div>
                       </div>
                       <div className="flex shrink-0 items-center gap-1.5">
@@ -638,16 +630,7 @@ export function Remote() {
                       </p>
                       <div className="mt-1 flex flex-wrap items-center gap-1.5">
                         <SourceBadge source={entry.track.source} cached={entry.track.status === 'ready'} />
-                        {entry.track.genre && (
-                          <span className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-medium text-zinc-300">
-                            {entry.track.genre}
-                          </span>
-                        )}
-                        {entry.track.subgenre && (
-                          <span className="rounded-full border border-accent/30 bg-accent/15 px-2 py-0.5 text-[10px] font-medium text-purple-200">
-                            {entry.track.subgenre}
-                          </span>
-                        )}
+                        <GenreBadges genre={entry.track.genre} subgenre={entry.track.subgenre} />
                       </div>
                     </div>
                     <div className="flex shrink-0 items-center gap-1.5">

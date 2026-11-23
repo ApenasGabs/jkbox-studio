@@ -3,8 +3,17 @@ import type { Settings } from '../db.js';
 import { DEFAULT_AUTO_DJ_RECENT_WINDOW, pickAutoDjTrack } from '../lib/autoDj.js';
 import { parseInput } from '../lib/parseInput.js';
 import { sanitizeResult } from '../lib/validate.js';
-import type { AutoDjMode, PlaybackOutput, QueueEntryView, SearchResult, SpotifyDevice, Track, TrackSource } from '../types.js';
-import type { AutocategorizeSummary, ClassifierService } from './classifier.js';
+import type {
+  AutoDjConfig,
+  AutoDjMode,
+  PlaybackOutput,
+  QueueEntryView,
+  SearchResult,
+  SpotifyDevice,
+  Track,
+  TrackSource,
+} from '../types.js';
+import { isCanonicalCategory, type AutocategorizeSummary, type ClassifierService } from './classifier.js';
 import type { DownloadManager } from './downloads.js';
 import type { LyricsService } from './lyrics.js';
 import { QueueError, type QueueService } from './queue.js';
@@ -86,6 +95,8 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
   private _autoDjCategory: string | null;
   private _autoDjSubgenre: string | null;
   private _playbackOutput: PlaybackOutput;
+  private autocategorizeInFlight: Promise<AutocategorizeSummary> | null = null;
+  private readonly classifyingTrackIds = new Set<string>();
 
   constructor(
     readonly tracks: TrackRepository,
@@ -543,7 +554,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     mode?: AutoDjMode;
     category?: string | null;
     subgenre?: string | null;
-  }): { enabled: boolean; mode: AutoDjMode; category: string | null; subgenre: string | null } {
+  }): AutoDjConfig {
     if (patch.enabled !== undefined) {
       this._autoDjEnabled = patch.enabled;
       this.settings?.set('autoDjEnabled', this._autoDjEnabled);
@@ -553,8 +564,14 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       this.settings?.set('autoDjMode', this._autoDjMode);
     }
     if (patch.category !== undefined) {
-      this._autoDjCategory = patch.category?.trim() || null;
+      const nextCategory = patch.category?.trim() || null;
+      const categoryChanged = nextCategory !== this._autoDjCategory;
+      this._autoDjCategory = nextCategory;
       this.settings?.set('autoDjCategory', this._autoDjCategory);
+      if (patch.subgenre === undefined && (categoryChanged || !nextCategory)) {
+        this._autoDjSubgenre = null;
+        this.settings?.set('autoDjSubgenre', null);
+      }
     }
     if (patch.subgenre !== undefined) {
       this._autoDjSubgenre = patch.subgenre?.trim() || null;
@@ -575,10 +592,11 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
   }
 
   async classifyTrackInBackground(trackId: string): Promise<void> {
-    if (!this.classifier) return;
+    if (!this.classifier || this.classifyingTrackIds.has(trackId)) return;
     const track = this.tracks.get(trackId);
     if (!track || track.genreManual) return;
-    if (track.genre?.trim() && track.subgenre?.trim()) return;
+    if (isCanonicalCategory(track.genre) && track.subgenre?.trim()) return;
+    this.classifyingTrackIds.add(trackId);
     try {
       const res = await this.classifier.classifyTrack(track);
       if (res.updated && this.hasActiveTrack(new Set([trackId]))) {
@@ -586,6 +604,8 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       }
     } catch (err) {
       this.log(`[classifier] falha em segundo plano (${track.title}): ${errorMessage(err)}`);
+    } finally {
+      this.classifyingTrackIds.delete(trackId);
     }
   }
 
@@ -593,11 +613,24 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     if (!this.classifier) {
       return { processed: 0, updated: 0, skippedManual: 0, failed: 0, updatedTrackIds: [] };
     }
-    const summary = await this.classifier.autocategorizeAll();
-    if (summary.updatedTrackIds.length > 0 && this.hasActiveTrack(new Set(summary.updatedTrackIds))) {
-      this.queue.emit('change');
+    if (this.autocategorizeInFlight) {
+      return this.autocategorizeInFlight;
     }
-    return summary;
+    const run = (async () => {
+      const summary = await this.classifier!.autocategorizeAll();
+      if (summary.updatedTrackIds.length > 0 && this.hasActiveTrack(new Set(summary.updatedTrackIds))) {
+        this.queue.emit('change');
+      }
+      return summary;
+    })();
+    this.autocategorizeInFlight = run;
+    try {
+      return await run;
+    } finally {
+      if (this.autocategorizeInFlight === run) {
+        this.autocategorizeInFlight = null;
+      }
+    }
   }
 
   /** Enqueues a cached track when Auto-DJ is enabled and playback just drained the queue. */
@@ -634,11 +667,23 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     }
   }
 
-  /** Marks results that are already in the local library so the UI can flag them as instant. */
+  /** Marks results that are already in the local library so the UI can flag them as instant and display saved genres. */
   private annotate(results: SearchResult[]): SearchResult[] {
     return results.map((r) => {
       const track = this.tracks.findBySource(r.source, r.sourceId);
-      return track ? { ...r, trackId: track.id, cached: this.tracks.isCached(track) } : r;
+      if (!track) return r;
+      return {
+        ...r,
+        title: track.title || r.title,
+        artist: track.artist || r.artist,
+        album: track.album ?? r.album ?? null,
+        genre: track.genre,
+        subgenre: track.subgenre,
+        year: track.year ?? r.year ?? null,
+        trackNumber: track.trackNumber ?? r.trackNumber ?? null,
+        trackId: track.id,
+        cached: this.tracks.isCached(track),
+      };
     });
   }
 
@@ -752,7 +797,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       track = this.tracks.upsertFromResult(result);
     }
     const cached = this.downloads.ensure(track.id);
-    if (cached) void this.classifyTrackInBackground(track.id);
+    void this.classifyTrackInBackground(track.id);
     const outcome = this.queue.enqueue(track.id, requesterId, requesterName);
     if (!outcome.duplicate && syncSpotify) void this.syncToSpotify(this.tracks.get(track.id)!);
     return { ...outcome, cached };

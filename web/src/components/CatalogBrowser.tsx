@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import {
   type CatalogRoute,
@@ -85,6 +85,7 @@ export function CatalogBrowser({
   const [detailTracks, setDetailTracks] = useState<SearchResult[]>([]);
   const [detailSubcategories, setDetailSubcategories] = useState<CatalogSubcategory[]>([]);
   const [artistDetail, setArtistDetail] = useState<CatalogArtistDetail | null>(null);
+  const prevCategoryKeyRef = useRef<string | null>(null);
 
   const pushRoute = (next: CatalogRoute) => onHistoryChange([...history, next]);
   const replaceTopRoute = (next: CatalogRoute) => {
@@ -99,6 +100,12 @@ export function CatalogBrowser({
   useEffect(() => {
     const controller = new AbortController();
     const { signal } = controller;
+    const categoryKey = route.kind === 'category' ? (route.uncategorized ? '__uncategorized__' : route.name) : null;
+    if (prevCategoryKeyRef.current !== categoryKey) {
+      prevCategoryKeyRef.current = categoryKey;
+      setDetailSubcategories([]);
+      if (route.kind === 'category') setDetailTracks([]);
+    }
 
     const load = async () => {
       setLoading(true);

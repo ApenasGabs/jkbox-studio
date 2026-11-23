@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import type { Db } from '../db.js';
+import { CANONICAL_CATEGORIES } from './classifier.js';
 import type {
   CatalogAlbum,
   CatalogArtist,
@@ -326,12 +327,8 @@ export class TrackRepository {
     let subFilter = '';
     const trimmedSub = subgenre?.trim();
     if (trimmedSub) {
-      if (trimmedSub === '__none__') {
-        subFilter = "AND (subgenre IS NULL OR TRIM(subgenre) = '')";
-      } else {
-        subFilter = 'AND LOWER(TRIM(subgenre)) = LOWER(TRIM(?))';
-        params.push(trimmedSub);
-      }
+      subFilter = 'AND LOWER(TRIM(subgenre)) = LOWER(TRIM(?))';
+      params.push(trimmedSub);
     }
     const rows = this.db
       .prepare(
@@ -342,21 +339,29 @@ export class TrackRepository {
     return rows.map(toTrack);
   }
 
-  /** Returns ready tracks eligible for auto-categorization (never overwrites `genre_manual = 1`). */
+  /** Returns tracks eligible for auto-categorization (ready or Spotify tracks, never overwrites `genre_manual = 1`). */
   listTracksForAutocategorize(): { candidates: Track[]; skippedManual: number } {
+    const canonicalPlaceholders = CANONICAL_CATEGORIES.map(() => '?').join(', ');
+    const scope = `(${READY} OR source = 'spotify')`;
     const rows = this.db
       .prepare(
         `SELECT * FROM tracks
-          WHERE ${READY}
+          WHERE ${scope}
             AND genre_manual = 0
-            AND (genre IS NULL OR TRIM(genre) = '' OR subgenre IS NULL OR TRIM(subgenre) = '')
+            AND (
+              genre IS NULL
+              OR TRIM(genre) = ''
+              OR TRIM(genre) NOT IN (${canonicalPlaceholders})
+              OR subgenre IS NULL
+              OR TRIM(subgenre) = ''
+            )
           ORDER BY created_at DESC`,
       )
-      .all() as unknown as TrackRow[];
+      .all(...CANONICAL_CATEGORIES) as unknown as TrackRow[];
     const skippedRow = this.db
       .prepare(
         `SELECT COUNT(*) AS count FROM tracks
-          WHERE ${READY} AND genre_manual = 1`,
+          WHERE ${scope} AND genre_manual = 1`,
       )
       .get() as { count: number };
     return { candidates: rows.map(toTrack), skippedManual: skippedRow.count };

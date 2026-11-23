@@ -2,6 +2,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { type RefObject, useCallback, useEffect, useRef, useState } from 'react';
 import { CatalogBrowser } from '../components/CatalogBrowser';
 import { Cover } from '../components/Cover';
+import { GenreBadges } from '../components/GenreBadges';
 import { LyricsView } from '../components/LyricsView';
 import { QueueList } from '../components/QueueList';
 import { SourceBadge } from '../components/SourceBadge';
@@ -951,16 +952,7 @@ export function Kiosk() {
                   </p>
                   <div className="mt-3 flex flex-wrap items-center justify-center gap-2 text-sm text-zinc-400">
                     <SourceBadge source={current.track.source} />
-                    {current.track.genre && (
-                      <span className="rounded-full border border-accent/35 bg-accent/15 px-2.5 py-0.5 text-xs font-medium text-purple-200">
-                        {current.track.genre}
-                      </span>
-                    )}
-                    {current.track.subgenre && (
-                      <span className="rounded-full border border-white/15 bg-white/10 px-2.5 py-0.5 text-xs font-medium text-zinc-200">
-                        {current.track.subgenre}
-                      </span>
-                    )}
+                    <GenreBadges genre={current.track.genre} subgenre={current.track.subgenre} variant="kiosk-hero" />
                     <span>pedido por {current.requesterName}</span>
                   </div>
                 </div>
@@ -978,16 +970,7 @@ export function Kiosk() {
                   </div>
                   <div className="hidden shrink-0 items-center gap-2 text-xs text-zinc-400 sm:flex">
                     <SourceBadge source={current.track.source} />
-                    {current.track.genre && (
-                      <span className="rounded-full border border-accent/35 bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-purple-200">
-                        {current.track.genre}
-                      </span>
-                    )}
-                    {current.track.subgenre && (
-                      <span className="rounded-full border border-white/15 bg-white/10 px-2 py-0.5 text-[11px] font-medium text-zinc-200">
-                        {current.track.subgenre}
-                      </span>
-                    )}
+                    <GenreBadges genre={current.track.genre} subgenre={current.track.subgenre} variant="kiosk-compact" />
                     <span>pedido por {current.requesterName}</span>
                   </div>
                 </div>
@@ -1016,16 +999,7 @@ export function Kiosk() {
                 </div>
                 <div className="hidden shrink-0 items-center gap-2 text-xs text-zinc-400 sm:flex">
                   <SourceBadge source={current.track.source} />
-                  {current.track.genre && (
-                    <span className="rounded-full border border-accent/35 bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-purple-200">
-                      {current.track.genre}
-                    </span>
-                  )}
-                  {current.track.subgenre && (
-                    <span className="rounded-full border border-white/15 bg-white/10 px-2 py-0.5 text-[11px] font-medium text-zinc-200">
-                      {current.track.subgenre}
-                    </span>
-                  )}
+                  <GenreBadges genre={current.track.genre} subgenre={current.track.subgenre} variant="kiosk-compact" />
                   <span>pedido por {current.requesterName}</span>
                 </div>
               </div>

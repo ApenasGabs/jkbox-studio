@@ -98,8 +98,18 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
     const nextMode = rawMode ?? jukebox.autoDjMode;
     const nextCategory =
       rawCategory !== undefined ? (rawCategory === null ? null : rawCategory.trim() || null) : jukebox.autoDjCategory;
+    const categoryChanged = rawCategory !== undefined && nextCategory !== jukebox.autoDjCategory;
     const nextSubgenre =
-      rawSubgenre !== undefined ? (rawSubgenre === null ? null : rawSubgenre.trim() || null) : jukebox.autoDjSubgenre;
+      !nextCategory
+        ? null
+        : rawSubgenre !== undefined
+          ? rawSubgenre === null
+            ? null
+            : rawSubgenre.trim() || null
+          : categoryChanged
+            ? null
+            : jukebox.autoDjSubgenre;
+    const shouldUpdateSubgenre = rawSubgenre !== undefined || categoryChanged || !nextCategory;
 
     if (nextMode === 'category' && !nextCategory) {
       return void res.status(400).json({ error: 'Selecione uma categoria para travar o Auto-DJ' });
@@ -109,7 +119,7 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
       ...(rawEnabled !== undefined ? { enabled: rawEnabled } : {}),
       ...(rawMode !== undefined ? { mode: rawMode } : {}),
       ...(rawCategory !== undefined ? { category: nextCategory } : {}),
-      ...(rawSubgenre !== undefined ? { subgenre: nextSubgenre } : {}),
+      ...(shouldUpdateSubgenre ? { subgenre: nextSubgenre } : {}),
     });
 
     res.json({
@@ -144,7 +154,11 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
   api.post('/library/rescan', requireHost, async (_req, res, next) => {
     try {
       const added = await scanLibrary(tracks, config.musicDir);
-      if (added > 0) void jukebox.autocategorizeLibrary();
+      if (added > 0) {
+        void jukebox.autocategorizeLibrary().catch((err) => {
+          console.warn(`[jkbox] falha na auto-categorização pós-rescan: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      }
       res.json({ added });
     } catch (err) {
       next(err);
