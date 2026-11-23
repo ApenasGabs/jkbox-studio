@@ -1,5 +1,5 @@
 import { QRCodeSVG } from 'qrcode.react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { type RefObject, useCallback, useEffect, useRef, useState } from 'react';
 import { CatalogBrowser } from '../components/CatalogBrowser';
 import { Cover } from '../components/Cover';
 import { LyricsView } from '../components/LyricsView';
@@ -18,8 +18,10 @@ import {
   mergeCategorySuggestions,
 } from '../lib/catalog';
 import { cssImageUrl, formatTime, isLoopback, remoteUrl } from '../lib/format';
-import type { AppConfig, QueueEntry, SearchResult, Track } from '../lib/types';
+import { activateFocusedElement, findNextSpatialCandidate, getFocusableElements } from '../lib/spatialNav';
+import type { AppConfig, KioskCommand, QueueEntry, SearchResult, Track } from '../lib/types';
 import { useJukebox } from '../lib/useJukebox';
+import { useKioskInput } from '../lib/useKioskInput';
 import { useTrackLyrics } from '../lib/useTrackLyrics';
 
 type StageMode = 'cover' | 'lyrics' | 'video';
@@ -84,7 +86,7 @@ function youtubeEmbedUrl(youtubeId: string, startSec: number, autoplay: boolean)
 }
 
 export function Kiosk() {
-  const { state, downloads, lyricsOffset, reactions, connected, send } = useJukebox();
+  const { state, downloads, lyricsOffset, reactions, connected, send, subscribeInput } = useJukebox();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [unlocked, setUnlocked] = useState(false);
   const [playing, setPlaying] = useState(false);
@@ -115,6 +117,14 @@ export function Kiosk() {
   );
   const [dismissedUpNextId, setDismissedUpNextId] = useState<number | null>(null);
   const kioskRef = useRef<HTMLDivElement>(null);
+  const mainRef = useRef<HTMLElement>(null);
+  const asideRef = useRef<HTMLElement>(null);
+  const hostDialogRef = useRef<HTMLDivElement>(null);
+  const catalogDialogRef = useRef<HTMLDivElement>(null);
+  const unlockBtnRef = useRef<HTMLButtonElement>(null);
+  const focusedElRef = useRef<HTMLElement | null>(null);
+  const dpadActiveRef = useRef(false);
+  const wakeCinemaRef = useRef<(() => void) | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const embedIframeRef = useRef<HTMLIFrameElement>(null);
@@ -402,14 +412,77 @@ export function Kiosk() {
     }
   };
 
+  const activeScope = !unlocked
+    ? 'unlock'
+    : editingTrack
+      ? 'metadata'
+      : catalogOpen
+        ? 'catalog'
+        : settingsOpen
+          ? 'host'
+          : 'main';
+
+  const getActiveScopeElements = useCallback((): HTMLElement[] => {
+    if (activeScope === 'unlock') {
+      return unlockBtnRef.current ? [unlockBtnRef.current] : [];
+    }
+    if (activeScope === 'metadata') {
+      return getFocusableElements(document.querySelector('[data-kiosk-scope="metadata"]'));
+    }
+    if (activeScope === 'catalog') {
+      return getFocusableElements(catalogDialogRef.current);
+    }
+    if (activeScope === 'host') {
+      return getFocusableElements(hostDialogRef.current);
+    }
+    return [...getFocusableElements(mainRef.current), ...getFocusableElements(asideRef.current)];
+  }, [activeScope]);
+
+  const setKioskFocus = useCallback((el: HTMLElement | null) => {
+    const prev = focusedElRef.current;
+    if (prev && prev !== el) {
+      prev.removeAttribute('data-kiosk-focused');
+    }
+    focusedElRef.current = el;
+    if (el && dpadActiveRef.current) {
+      el.setAttribute('data-kiosk-focused', 'true');
+      el.focus({ preventScroll: true });
+      el.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+    }
+  }, []);
+
+  const focusDefaultInScope = useCallback(() => {
+    const candidates = getActiveScopeElements();
+    if (candidates.length === 0) {
+      setKioskFocus(null);
+      return null;
+    }
+    const preferred = candidates.find((c) => c.dataset.kioskDefault === 'true') ?? candidates[0];
+    setKioskFocus(preferred);
+    return preferred;
+  }, [getActiveScopeElements, setKioskFocus]);
+
   useEffect(() => {
-    if (!catalogOpen || editingTrack) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setCatalogOpen(false);
+    const clearDpadOnPointer = () => {
+      dpadActiveRef.current = false;
+      if (focusedElRef.current) {
+        focusedElRef.current.removeAttribute('data-kiosk-focused');
+      }
     };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [catalogOpen, editingTrack]);
+    window.addEventListener('pointerdown', clearDpadOnPointer, { passive: true });
+    return () => window.removeEventListener('pointerdown', clearDpadOnPointer);
+  }, []);
+
+  useEffect(() => {
+    if (!dpadActiveRef.current) return;
+    const raf = window.requestAnimationFrame(() => {
+      const candidates = getActiveScopeElements();
+      if (!focusedElRef.current || !candidates.includes(focusedElRef.current)) {
+        focusDefaultInScope();
+      }
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [activeScope, catalogHistory, catalogTab, current?.id, cinemaMode, getActiveScopeElements, focusDefaultInScope]);
 
   useEffect(() => {
     const onFullscreenChange = () => setIsFullscreen(Boolean(document.fullscreenElement));
@@ -420,6 +493,7 @@ export function Kiosk() {
   useEffect(() => {
     if (!cinemaMode || settingsOpen || !unlocked) {
       setCinemaIdle(false);
+      wakeCinemaRef.current = null;
       return;
     }
     let timer = window.setTimeout(() => setCinemaIdle(true), CINEMA_IDLE_MS);
@@ -428,25 +502,121 @@ export function Kiosk() {
       window.clearTimeout(timer);
       timer = window.setTimeout(() => setCinemaIdle(true), CINEMA_IDLE_MS);
     };
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !document.fullscreenElement) {
-        setCinemaMode(false);
-        return;
-      }
-      resetIdle();
-    };
+    wakeCinemaRef.current = resetIdle;
     window.addEventListener('mousemove', resetIdle);
     window.addEventListener('mousedown', resetIdle);
     window.addEventListener('touchstart', resetIdle, { passive: true });
-    window.addEventListener('keydown', onKeyDown);
     return () => {
+      wakeCinemaRef.current = null;
       window.clearTimeout(timer);
       window.removeEventListener('mousemove', resetIdle);
       window.removeEventListener('mousedown', resetIdle);
       window.removeEventListener('touchstart', resetIdle);
-      window.removeEventListener('keydown', onKeyDown);
     };
   }, [cinemaMode, settingsOpen, unlocked]);
+
+  const handleKioskCommand = useCallback(
+    (command: KioskCommand) => {
+      wakeCinemaRef.current?.();
+
+      if (!unlocked) {
+        if (command === 'SELECT' || command === 'PLAY') {
+          dpadActiveRef.current = true;
+          unlock();
+        }
+        return;
+      }
+
+      dpadActiveRef.current = true;
+
+      if (command === 'BACK') {
+        if (editingTrack) {
+          setEditingTrack(null);
+          return;
+        }
+        if (catalogOpen) {
+          if (catalogHistory.length > 1) {
+            setCatalogHistory((prev) => prev.slice(0, -1));
+          } else {
+            setCatalogOpen(false);
+          }
+          return;
+        }
+        if (settingsOpen) {
+          setSettingsOpen(false);
+          return;
+        }
+        if (cinemaMode && !document.fullscreenElement) {
+          setCinemaMode(false);
+        }
+        return;
+      }
+
+      if (command === 'MENU') {
+        if (editingTrack) setEditingTrack(null);
+        if (catalogOpen) setCatalogOpen(false);
+        setSettingsOpen((v) => !v);
+        return;
+      }
+
+      if (command === 'SKIP') {
+        if (current) void run(api.skip);
+        return;
+      }
+
+      if (command === 'PLAY') {
+        if (current) {
+          togglePlay();
+        } else if (focusedElRef.current && getActiveScopeElements().includes(focusedElRef.current)) {
+          activateFocusedElement(focusedElRef.current);
+        }
+        return;
+      }
+
+      if (command === 'SELECT') {
+        const candidates = getActiveScopeElements();
+        const target =
+          focusedElRef.current && candidates.includes(focusedElRef.current)
+            ? focusedElRef.current
+            : focusDefaultInScope();
+        activateFocusedElement(target);
+        return;
+      }
+
+      // Spatial D-Pad directions: UP, DOWN, LEFT, RIGHT
+      const candidates = getActiveScopeElements();
+      if (candidates.length === 0) return;
+      const currentEl = focusedElRef.current;
+      if (!currentEl || !candidates.includes(currentEl)) {
+        focusDefaultInScope();
+        return;
+      }
+
+      const next = findNextSpatialCandidate(
+        currentEl.getBoundingClientRect(),
+        candidates.map((el) => ({ el, rect: el.getBoundingClientRect() })),
+        command,
+      );
+      if (next) setKioskFocus(next.el);
+    },
+    [
+      unlocked,
+      editingTrack,
+      catalogOpen,
+      catalogHistory.length,
+      settingsOpen,
+      cinemaMode,
+      current,
+      getActiveScopeElements,
+      focusDefaultInScope,
+      setKioskFocus,
+    ],
+  );
+
+  const { holdState } = useKioskInput({
+    onCommand: handleKioskCommand,
+    subscribeInput,
+  });
 
   const toggleFullscreen = useCallback(async () => {
     try {
@@ -531,8 +701,9 @@ export function Kiosk() {
 
       {/* Now playing */}
       <main
+        ref={mainRef}
         className={`relative z-10 flex min-h-0 flex-1 flex-col items-center justify-center gap-4 px-5 pt-4 sm:px-8 lg:gap-5 lg:p-8 lg:pt-20 ${
-          cinemaMode ? 'pb-24 sm:pb-8' : 'pb-8'
+          cinemaMode ? 'pb-24 sm:pb-14' : 'pb-12 sm:pb-14'
         }`}
       >
         {/* In the flow on mobile/tablet (never overlaps the cover); pinned to the corners on desktop. */}
@@ -548,6 +719,14 @@ export function Kiosk() {
             <span className={`h-2 w-2 rounded-full ${connected ? 'bg-emerald-400' : 'bg-red-500'}`} title={connected ? 'online' : 'reconectando'} />
           </header>
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setCatalogOpen(true)}
+              className="rounded-full bg-white/10 px-3 py-1 text-xs font-medium transition hover:bg-white/20 sm:text-sm"
+              title="Explorar acervo local"
+            >
+              📚 Acervo
+            </button>
             <button
               type="button"
               aria-pressed={cinemaMode}
@@ -804,36 +983,116 @@ export function Kiosk() {
               </div>
             </div>
             <div
-              className={`flex shrink-0 items-center gap-4 transition-opacity duration-300 ${
+              className={`flex shrink-0 flex-wrap items-center justify-center gap-3 transition-opacity duration-300 sm:gap-4 ${
                 controlsHidden ? 'pointer-events-none opacity-0' : 'opacity-100'
               }`}
             >
-              <button onClick={togglePlay} className="h-14 w-14 rounded-full bg-white text-2xl text-zinc-900 hover:scale-105" aria-label={playing ? 'Pausar' : 'Tocar'}>
+              <button
+                type="button"
+                data-kiosk-default="true"
+                onClick={togglePlay}
+                className="h-14 w-14 rounded-full bg-white text-2xl text-zinc-900 hover:scale-105"
+                aria-label={playing ? 'Pausar' : 'Tocar'}
+              >
                 {playing ? '❚❚' : '▶'}
               </button>
-              <button onClick={() => run(api.skip)} className="h-12 w-12 rounded-full bg-white/10 text-xl hover:bg-white/20" aria-label="Pular">
+              <button
+                type="button"
+                onClick={() => run(api.skip)}
+                className="h-12 w-12 rounded-full bg-white/10 text-xl hover:bg-white/20"
+                aria-label="Pular"
+              >
                 ⏭
               </button>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.05}
-                value={volume}
-                onChange={(e) => setVolume(Number(e.target.value))}
-                className="w-32 accent-accent"
-                aria-label="Volume"
-              />
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setVolume((v) => Math.max(0, Math.round((v - 0.1) * 100) / 100))}
+                  aria-label="Diminuir volume"
+                  className="flex h-9 w-9 items-center justify-center rounded-full bg-white/10 text-xs font-bold hover:bg-white/20"
+                >
+                  🔉-
+                </button>
+                <input
+                  type="range"
+                  data-kiosk-focus="skip"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={volume}
+                  onChange={(e) => setVolume(Number(e.target.value))}
+                  className="w-24 accent-accent sm:w-28"
+                  aria-label="Volume"
+                />
+                <button
+                  type="button"
+                  onClick={() => setVolume((v) => Math.min(1, Math.round((v + 0.1) * 100) / 100))}
+                  aria-label="Aumentar volume"
+                  className="flex h-9 w-9 items-center justify-center rounded-full bg-white/10 text-xs font-bold hover:bg-white/20"
+                >
+                  🔊+
+                </button>
+              </div>
             </div>
           </>
         ) : (
-          <div className="text-center">
+          <div className="flex flex-col items-center text-center">
             <p className="text-6xl">🎶</p>
             <h1 className="mt-4 text-4xl font-bold">Nada tocando ainda</h1>
             <p className="mt-2 text-lg text-zinc-400">
-              {state.queue.length > 0 ? 'Baixando a próxima música…' : 'Escaneie o QR Code e peça a primeira música!'}
+              {state.queue.length > 0 ? 'Baixando a próxima música…' : 'Escaneie o QR Code ou escolha uma música no acervo local!'}
             </p>
+            <button
+              type="button"
+              data-kiosk-default="true"
+              onClick={() => setCatalogOpen(true)}
+              className="mt-5 rounded-2xl bg-accent px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-accent/25 transition hover:brightness-110 sm:text-base"
+            >
+              📚 Explorar Acervo Local
+            </button>
           </div>
+        )}
+
+        {holdState && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="glass pointer-events-none fixed bottom-12 left-1/2 z-40 flex -translate-x-1/2 flex-col items-center gap-1.5 border-accent-2/50 bg-panel/95 px-4 py-2 shadow-2xl backdrop-blur-md"
+          >
+            <span className="text-xs font-semibold text-white">
+              {holdState.target === 'BACK'
+                ? 'Segurando: Voltar…'
+                : holdState.target === 'SKIP'
+                  ? 'Segurando: Pular faixa…'
+                  : 'Segurando: Menu do Host…'}
+            </span>
+            <div className="h-1.5 w-36 overflow-hidden rounded-full bg-white/15">
+              <div
+                key={`${holdState.target}-${holdState.startedAt}`}
+                style={{ '--hold-duration': `${holdState.durationMs}ms` } as Record<string, string>}
+                className="animate-hold-fill h-full rounded-full bg-gradient-to-r from-accent to-accent-2"
+              />
+            </div>
+          </div>
+        )}
+
+        {unlocked && !controlsHidden && (
+          <footer
+            aria-label="Atalhos de navegação"
+            className="pointer-events-none mt-2 flex w-full max-w-2xl flex-wrap items-center justify-center gap-x-3 gap-y-1 text-center text-[11px] text-zinc-400/85 lg:absolute lg:inset-x-8 lg:bottom-3 lg:mx-auto"
+          >
+            <span>↑↓←→ Navegar</span>
+            <span>·</span>
+            <span>Enter Escolher</span>
+            <span>·</span>
+            <span>Espaço Tocar</span>
+            <span className="hidden sm:inline">·</span>
+            <span className="hidden sm:inline">Esc / Segurar Enter Voltar</span>
+            <span className="hidden md:inline">·</span>
+            <span className="hidden md:inline">Segurar Espaço Pular</span>
+            <span className="hidden md:inline">·</span>
+            <span className="hidden md:inline">←+→ Menu</span>
+          </footer>
         )}
 
         {reactionsEnabled && reactions.length > 0 && (
@@ -866,7 +1125,7 @@ export function Kiosk() {
 
       {/* Sidebar: QR + queue (hidden in Modo Cinema, replaced by discrete corner mini QR) */}
       {!cinemaMode ? (
-        <aside className="relative z-10 flex w-full flex-col gap-4 border-t border-white/10 bg-black/30 p-5 sm:p-6 lg:w-[420px] lg:border-l lg:border-t-0">
+        <aside ref={asideRef} className="relative z-10 flex w-full flex-col gap-4 border-t border-white/10 bg-black/30 p-5 sm:p-6 lg:w-[420px] lg:border-l lg:border-t-0">
           <div className="glass flex items-center gap-4 p-4">
             <div className="rounded-xl bg-white p-2">
               <QRCodeSVG value={url} size={112} />
@@ -887,6 +1146,7 @@ export function Kiosk() {
                 queue={state.queue}
                 downloads={downloads}
                 currentRemainingSec={queueRemainingSec}
+                onVote={(entry) => run(() => api.vote(entry.id))}
                 onRemove={remove}
                 onRetry={(entry) => run(() => api.retry(entry.trackId), 'Tentando baixar novamente')}
                 compact
@@ -911,6 +1171,8 @@ export function Kiosk() {
 
       {settingsOpen && (
         <HostPanel
+          panelRef={hostDialogRef}
+          remoteUrl={url}
           config={config}
           currentTrack={current?.track ?? null}
           defaultView={defaultView}
@@ -938,6 +1200,7 @@ export function Kiosk() {
           onClick={() => setCatalogOpen(false)}
         >
           <div
+            ref={catalogDialogRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby="kiosk-catalog-title"
@@ -1004,12 +1267,13 @@ export function Kiosk() {
 
       {!unlocked && (
         <button
+          ref={unlockBtnRef}
           onClick={unlock}
-          className="fixed inset-0 z-40 flex flex-col items-center justify-center gap-4 bg-ink/90 text-center backdrop-blur"
+          className="fixed inset-0 z-40 flex flex-col items-center justify-center gap-4 bg-ink/90 px-6 text-center backdrop-blur"
         >
           <span className="text-7xl">🔊</span>
           <span className="text-3xl font-bold">Toque para iniciar a Jukebox</span>
-          <span className="text-zinc-400">Os navegadores exigem uma interação antes de reproduzir áudio.</span>
+          <span className="text-zinc-400">Pressione Enter, Espaço ou toque na tela para liberar o áudio.</span>
         </button>
       )}
       {toast.node}
@@ -1020,6 +1284,8 @@ export function Kiosk() {
 type RunFn = <T>(action: () => Promise<T>, ok?: string | ((result: T) => string)) => Promise<void>;
 
 interface HostPanelProps {
+  panelRef: RefObject<HTMLDivElement | null>;
+  remoteUrl: string;
   config: AppConfig | null;
   currentTrack: Track | null;
   defaultView: DefaultStageView;
@@ -1034,6 +1300,8 @@ interface HostPanelProps {
 }
 
 function HostPanel({
+  panelRef,
+  remoteUrl: qrUrl,
   config,
   currentTrack,
   defaultView,
@@ -1052,11 +1320,36 @@ function HostPanel({
 
   return (
     <div className="fixed inset-0 z-30 flex justify-end bg-black/50" onClick={onClose}>
-      <div className="flex h-full w-full max-w-md flex-col gap-5 overflow-y-auto bg-panel p-6" onClick={(e) => e.stopPropagation()}>
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Controles do host"
+        className="flex h-full w-full max-w-md flex-col gap-5 overflow-y-auto bg-panel p-6"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between">
           <h2 className="text-xl font-bold">Controles do host</h2>
-          <button onClick={onClose} className="rounded-lg px-2 py-1 hover:bg-white/10">✕</button>
+          <button
+            type="button"
+            data-kiosk-default="true"
+            onClick={onClose}
+            aria-label="Fechar controles do host"
+            className="rounded-lg px-2 py-1 hover:bg-white/10"
+          >
+            ✕
+          </button>
         </div>
+
+        <section className="glass flex items-center gap-3 p-3.5">
+          <div className="shrink-0 rounded-xl bg-white p-1.5">
+            <QRCodeSVG value={qrUrl} size={68} />
+          </div>
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold">QR Code do Controle Remoto</h3>
+            <p className="text-xs text-accent-2 [overflow-wrap:anywhere]">{qrUrl}</p>
+          </div>
+        </section>
 
         {config?.hostPinRequired && (
           <section className="glass flex flex-col gap-2 p-4">

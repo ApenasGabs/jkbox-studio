@@ -75,6 +75,7 @@ export function TrackMetadataModal({ track, categorySuggestions, onClose, onSave
         role="dialog"
         aria-modal="true"
         aria-labelledby="metadata-modal-title"
+        data-kiosk-scope="metadata"
         onClick={(e) => e.stopPropagation()}
         className="flex max-h-[90dvh] w-full max-w-lg flex-col gap-4 overflow-y-auto rounded-t-3xl border border-white/15 bg-panel p-5 shadow-2xl sm:rounded-3xl sm:p-6"
       >

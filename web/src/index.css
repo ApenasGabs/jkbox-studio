@@ -18,6 +18,28 @@ body {
   @apply rounded-2xl border border-white/10 bg-white/5 backdrop-blur;
 }
 
+[data-kiosk-focused='true'] {
+  outline: 3px solid var(--color-accent-2);
+  outline-offset: 2px;
+  box-shadow:
+    0 0 0 6px rgba(168, 85, 247, 0.35),
+    0 0 22px rgba(34, 211, 238, 0.45);
+  scroll-margin: 20px;
+}
+
+@keyframes jkbox-hold-fill {
+  from {
+    width: 0%;
+  }
+  to {
+    width: 100%;
+  }
+}
+
+.animate-hold-fill {
+  animation: jkbox-hold-fill var(--hold-duration, 1000ms) linear forwards;
+}
+
 @keyframes jkbox-float-reaction {
   0% {
     opacity: 0;

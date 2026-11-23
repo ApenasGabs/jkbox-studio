@@ -215,6 +215,7 @@ export function CatalogBrowser({
       <div className="flex min-w-0 items-center gap-2">
         <button
           type="button"
+          data-kiosk-default={route.kind !== 'root' ? 'true' : undefined}
           onClick={goBack}
           className="shrink-0 rounded-xl border border-white/10 bg-white/10 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-white/20"
         >
@@ -268,6 +269,7 @@ export function CatalogBrowser({
               type="button"
               role="tab"
               aria-selected={active}
+              data-kiosk-default={route.kind === 'root' && active ? 'true' : undefined}
               onClick={() => {
                 onTabChange(item.id);
                 onHistoryChange([{ kind: 'root' }]);
