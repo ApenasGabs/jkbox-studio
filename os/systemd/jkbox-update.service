@@ -1,0 +1,12 @@
+[Unit]
+Description=jkbox-studio Atomic Auto-Updater
+Documentation=https://github.com/ApenasGabs/jkbox-studio
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/jkbox/jkbox.env
+ExecStart=/opt/jkbox/current/os/jkbox-update.sh
+StandardOutput=journal
+StandardError=journal
