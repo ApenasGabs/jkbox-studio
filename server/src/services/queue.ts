@@ -38,6 +38,10 @@ export interface EnqueueResult {
   duplicate: boolean;
 }
 
+function sanitizeRequesterName(name: string): string {
+  return name.trim().slice(0, 40) || 'Convidado';
+}
+
 /** Collaborative queue + playback state machine. The kiosk browser does the actual audio playback. */
 export class QueueService extends EventEmitter<QueueEvents> {
   private positionSec = 0;
@@ -70,7 +74,7 @@ export class QueueService extends EventEmitter<QueueEvents> {
     }
     const result = this.db
       .prepare('INSERT INTO queue (track_id, requester_id, requester_name, added_at) VALUES (?, ?, ?, ?)')
-      .run(trackId, requesterId, requesterName.trim().slice(0, 40) || 'Convidado', Date.now());
+      .run(trackId, requesterId, sanitizeRequesterName(requesterName), Date.now());
     const row = this.getRow(Number(result.lastInsertRowid))!;
     this.advanceIfIdle();
     this.emit('change');
@@ -134,7 +138,7 @@ export class QueueService extends EventEmitter<QueueEvents> {
     const startedAt = now - Math.round(safePos * 1000);
     const result = this.db
       .prepare("INSERT INTO queue (track_id, requester_id, requester_name, added_at, status, started_at) VALUES (?, ?, ?, ?, 'playing', ?)")
-      .run(trackId, requesterId, requesterName.trim().slice(0, 40) || 'Convidado', now, startedAt);
+      .run(trackId, requesterId, sanitizeRequesterName(requesterName), now, startedAt);
     this.positionSec = safePos;
     this.paused = false;
     const entry = this.view(this.getRow(Number(result.lastInsertRowid))!);

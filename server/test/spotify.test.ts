@@ -2,7 +2,8 @@ import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { createJukebox } from '../src/container.js';
-import { pickYoutubeVideoCandidate } from '../src/services/spotify.js';
+import { pickYoutubeVideoCandidate } from '../src/lib/youtubeMatch.js';
+import { spotifyTrackToResult } from '../src/services/spotify.js';
 import { FakeMedia, setup, ytResult } from './helpers.js';
 
 const SPOTIFY_ENV = { SPOTIFY_CLIENT_ID: 'cid', SPOTIFY_CLIENT_SECRET: 'secret', PUBLIC_URL: 'http://192.168.0.10:3000' };
@@ -544,6 +545,15 @@ describe('Spotify integration', () => {
     });
     const episodePb = await jukebox.spotify.getPlaybackState();
     expect(episodePb?.track).toBeNull();
+
+    const missingDuration = spotifyTrackToResult({
+      id: 'nodur',
+      uri: 'spotify:track:nodur',
+      name: 'No Duration',
+      duration_ms: undefined,
+      artists: [{ name: 'Daft Punk' }],
+    });
+    expect(missingDuration.durationSec).toBeNull();
     jukebox.stop();
   });
 
@@ -666,11 +676,42 @@ describe('Spotify integration', () => {
     expect(jukebox.queue.state().nowPlaying).toBeNull();
     expect(ensureSpy).not.toHaveBeenCalled();
 
+    // Transient 204 (null) or paused state must NOT clear suppression on the skipped track
+    fake.setPlaybackState(null);
+    await jukebox.pollSpotifyPlayback();
+    fake.setPlaybackState({ is_playing: false, progress_ms: 21_000, item: track('autoSkip', 'Skipped Song') });
+    await jukebox.pollSpotifyPlayback();
+    fake.setPlaybackState({ is_playing: true, progress_ms: 22_000, item: track('autoSkip', 'Skipped Song') });
     await jukebox.pollSpotifyPlayback();
     expect(jukebox.queue.state().nowPlaying).toBeNull();
 
-    // Once Spotify moves to a new track, adoption resumes normally
-    fake.setPlaybackState({ is_playing: true, progress_ms: 4_000, item: track('autoFresh', 'Fresh Song') });
+    // Playback coming from a different Spotify device must NOT be adopted or clear suppression
+    fake.setPlaybackState({
+      is_playing: true,
+      progress_ms: 4_000,
+      device: { id: 'tv-quarto', name: 'TV Quarto', type: 'TV', is_active: true, is_restricted: false, volume_percent: 40 },
+      item: track('otherDev', 'Other Room Song'),
+    });
+    await jukebox.pollSpotifyPlayback();
+    expect(jukebox.queue.state().nowPlaying).toBeNull();
+
+    // Still suppresses autoSkip on the selected speaker even after the other-device poll
+    fake.setPlaybackState({
+      is_playing: true,
+      progress_ms: 24_000,
+      device: { id: 'spk-sala', name: 'Caixa da Sala', type: 'Speaker', is_active: true, is_restricted: false, volume_percent: 65 },
+      item: track('autoSkip', 'Skipped Song'),
+    });
+    await jukebox.pollSpotifyPlayback();
+    expect(jukebox.queue.state().nowPlaying).toBeNull();
+
+    // Once Spotify moves to a new track on the selected device, adoption resumes normally
+    fake.setPlaybackState({
+      is_playing: true,
+      progress_ms: 4_000,
+      device: { id: 'spk-sala', name: 'Caixa da Sala', type: 'Speaker', is_active: true, is_restricted: false, volume_percent: 65 },
+      item: track('autoFresh', 'Fresh Song'),
+    });
     await jukebox.pollSpotifyPlayback();
     expect(jukebox.queue.state().nowPlaying?.item.track.sourceId).toBe('autoFresh');
 
@@ -678,6 +719,26 @@ describe('Spotify integration', () => {
     const playingId = jukebox.queue.state().nowPlaying!.item.id;
     await request(app).delete(`/api/queue/${playingId}`).expect(204);
     expect(ensureSpy).not.toHaveBeenCalled();
+
+    // Skipping an adopted track when the queued next track is unavailable on Spotify must keep the skipped URI suppressed
+    fake.setPlaybackState({ is_playing: true, progress_ms: 5_000, item: track('autoQueued', 'Queued Followup') });
+    await jukebox.pollSpotifyPlayback();
+    expect(jukebox.queue.state().nowPlaying?.item.track.sourceId).toBe('autoQueued');
+    const unavailableFake = fakeSpotify({ searchEmptyFor: ['Unavailable Followup'] });
+    const ctx2 = setup(SPOTIFY_ENV, unavailableFake.fetchFn);
+    const app2 = createApp({ config: ctx2.config, jukebox: ctx2.jukebox });
+    const state2 = new URL((await request(app2).get('/api/spotify/auth')).headers.location).searchParams.get('state');
+    await request(app2).get('/api/spotify/callback').query({ code: 'c', state: state2 });
+    await request(app2).post('/api/spotify/device').send({ deviceId: 'spk-sala' }).expect(200);
+    unavailableFake.setPlaybackState({ is_playing: true, progress_ms: 10_000, item: track('autoBeforeFail', 'Before Fail') });
+    await ctx2.jukebox.pollSpotifyPlayback();
+    await request(app2).post('/api/queue').send({ result: ytResult('unavail0002', 'Unavailable Followup', 'Nobody'), clientId: 'u2' }).expect(201);
+    await request(app2).post('/api/player/skip').expect(200);
+    await vi.waitFor(() => expect(ctx2.jukebox.queue.state().nowPlaying).toBeNull());
+    await ctx2.jukebox.pollSpotifyPlayback();
+    expect(ctx2.jukebox.queue.state().nowPlaying).toBeNull();
+    ctx2.jukebox.stop();
+
     jukebox.stop();
   });
 
@@ -685,12 +746,33 @@ describe('Spotify integration', () => {
     const candidates = [
       { source: 'youtube' as const, sourceId: 'react111111', title: 'Daft Punk - Digital Love Reaction!', artist: 'Reactor', durationSec: 205 },
       { source: 'youtube' as const, sourceId: 'short222222', title: 'Daft Punk - Digital Love (Official Music Video)', artist: 'Daft Punk', durationSec: 45 },
+      { source: 'youtube' as const, sourceId: 'other333333', title: 'Daft Punk - Instant Love (Official Music Video)', artist: 'Daft Punk', durationSec: 202 },
+      { source: 'youtube' as const, sourceId: 'wrong444444', title: 'Daft Punk - Harder Better Faster (Official Music Video)', artist: 'Daft Punk', durationSec: 200 },
       { source: 'youtube' as const, sourceId: 'audio333333', title: 'Daft Punk - Digital Love (Official Audio)', artist: 'Daft Punk - Topic', durationSec: 200 },
       { source: 'youtube' as const, sourceId: 'clip4444444', title: 'Daft Punk - Digital Love (Official Music Video)', artist: 'Daft Punk', durationSec: 208 },
     ];
     expect(pickYoutubeVideoCandidate(candidates, { title: 'Digital Love', artist: 'Daft Punk', durationSec: 200 })?.sourceId).toBe(
       'clip4444444',
     );
+
+    // Must NOT pick another song by the same artist even if it has Official Music Video + compatible duration
+    expect(
+      pickYoutubeVideoCandidate(
+        [
+          { source: 'youtube', sourceId: 'other333333', title: 'Daft Punk - Instant Love (Official Music Video)', artist: 'Daft Punk', durationSec: 202 },
+          { source: 'youtube', sourceId: 'wrong444444', title: 'Daft Punk - Harder Better Faster (Official Music Video)', artist: 'Daft Punk', durationSec: 200 },
+        ],
+        { title: 'Digital Love', artist: 'Daft Punk', durationSec: 200 },
+      ),
+    ).toBeNull();
+
+    // Short 2-letter tokens must match whole words only (e.g. "De" must NOT match inside "Video")
+    expect(
+      pickYoutubeVideoCandidate(
+        [{ source: 'youtube', sourceId: 'sub55555555', title: 'Artista - Outra Musica (Official Video)', artist: 'Artista', durationSec: 180 }],
+        { title: 'De', artist: 'Artista', durationSec: 180 },
+      ),
+    ).toBeNull();
 
     const fake = fakeSpotify();
     const { jukebox, media } = setup(SPOTIFY_ENV, fake.fetchFn);
