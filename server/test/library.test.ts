@@ -150,6 +150,8 @@ describe('migration v4', () => {
     raw.exec(
       legacySchema
         .replace(/,\s*genre TEXT/, '')
+        .replace(/,\s*subgenre TEXT/, '')
+        .replace(/,\s*genre_manual INTEGER NOT NULL DEFAULT 0/, '')
         .replace(/,\s*year INTEGER/, '')
         .replace(/,\s*track_number INTEGER/, '') + ';',
     );
@@ -159,12 +161,19 @@ describe('migration v4', () => {
     raw.close();
 
     const db = openDb(file);
-    expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(4);
+    expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(5);
     const cols = (db.prepare('PRAGMA table_info(tracks)').all() as { name: string }[]).map((c) => c.name);
-    expect(cols).toEqual(expect.arrayContaining(['genre', 'year', 'track_number', 'video_path']));
+    expect(cols).toEqual(expect.arrayContaining(['genre', 'subgenre', 'genre_manual', 'year', 'track_number', 'video_path']));
     const indexes = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as { name: string }[]).map((r) => r.name);
-    expect(indexes).toEqual(expect.arrayContaining(['idx_tracks_album', 'idx_tracks_artist', 'idx_tracks_genre']));
-    expect(db.prepare("SELECT title, genre FROM tracks WHERE id = 't1'").get()).toEqual({ title: 'Old', genre: null });
+    expect(indexes).toEqual(expect.arrayContaining(['idx_tracks_album', 'idx_tracks_artist', 'idx_tracks_genre', 'idx_tracks_subgenre']));
+    const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((r) => r.name);
+    expect(tables).toContain('artist_genres');
+    expect(db.prepare("SELECT title, genre, subgenre, genre_manual FROM tracks WHERE id = 't1'").get()).toEqual({
+      title: 'Old',
+      genre: null,
+      subgenre: null,
+      genre_manual: 0,
+    });
     db.close();
   });
 });

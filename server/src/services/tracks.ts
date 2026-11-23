@@ -6,6 +6,7 @@ import type {
   CatalogArtist,
   CatalogArtistDetail,
   CatalogCategory,
+  CatalogSubcategory,
   SearchResult,
   Track,
   TrackMetadataPatch,
@@ -19,6 +20,8 @@ export interface LocalTrackMeta {
   artist: string;
   album?: string | null;
   genre?: string | null;
+  subgenre?: string | null;
+  genreManual?: boolean;
   year?: number | null;
   trackNumber?: number | null;
   durationSec?: number | null;
@@ -48,6 +51,8 @@ interface TrackRow {
   artist: string;
   album: string | null;
   genre: string | null;
+  subgenre: string | null;
+  genre_manual: number;
   year: number | null;
   track_number: number | null;
   duration_sec: number | null;
@@ -71,6 +76,8 @@ function toTrack(row: TrackRow): Track {
     artist: row.artist,
     album: row.album,
     genre: row.genre ?? null,
+    subgenre: row.subgenre ?? null,
+    genreManual: row.genre_manual === 1,
     year: row.year ?? null,
     trackNumber: row.track_number ?? null,
     durationSec: row.duration_sec,
@@ -147,9 +154,9 @@ export class TrackRepository {
     const id = randomUUID();
     this.db
       .prepare(
-        `INSERT INTO tracks (id, source, source_id, title, artist, album, genre, year, track_number, duration_sec,
+        `INSERT INTO tracks (id, source, source_id, title, artist, album, genre, subgenre, genre_manual, year, track_number, duration_sec,
           file_path, status, progress, created_at)
-         VALUES (?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', 1, ?)`,
+         VALUES (?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', 1, ?)`,
       )
       .run(
         id,
@@ -158,6 +165,8 @@ export class TrackRepository {
         meta.artist,
         meta.album ?? null,
         meta.genre ?? null,
+        meta.subgenre ?? null,
+        meta.genreManual ? 1 : 0,
         meta.year ?? null,
         meta.trackNumber ?? null,
         meta.durationSec ?? null,
@@ -172,7 +181,7 @@ export class TrackRepository {
     patch: Partial<
       Pick<
         Track,
-        'status' | 'progress' | 'error' | 'filePath' | 'videoPath' | 'youtubeId' | 'spotifyUri' | 'durationSec' | 'thumbnail'
+        'status' | 'progress' | 'error' | 'filePath' | 'videoPath' | 'youtubeId' | 'spotifyUri' | 'durationSec' | 'thumbnail' | 'genreManual'
       >
     > &
       TrackMetadataPatch,
@@ -191,13 +200,21 @@ export class TrackRepository {
       artist: 'artist',
       album: 'album',
       genre: 'genre',
+      subgenre: 'subgenre',
+      genreManual: 'genre_manual',
       year: 'year',
       trackNumber: 'track_number',
     };
     const entries = Object.entries(patch).filter(([key, value]) => key in columns && value !== undefined);
     if (entries.length === 0) return;
     const sql = `UPDATE tracks SET ${entries.map(([key]) => `${columns[key]} = ?`).join(', ')} WHERE id = ?`;
-    this.db.prepare(sql).run(...entries.map(([, value]) => (value ?? null) as string | number | null), id);
+    this.db.prepare(sql).run(
+      ...entries.map(([key, value]) => {
+        if (key === 'genreManual') return value ? 1 : 0;
+        return (value ?? null) as string | number | null;
+      }),
+      id,
+    );
   }
 
   /** True when the track's audio file is available on disk. */
@@ -245,9 +262,9 @@ export class TrackRepository {
     return rows.map(toTrack).filter((track) => this.isCached(track));
   }
 
-  // --- Catalog (#10) --------------------------------------------------------
+  // --- Catalog (#10, #27) --------------------------------------------------
 
-  /** Genres/categories of playable tracks with counts and a representative cover. */
+  /** Genres/categories of playable tracks with counts, subcategories and a representative cover. */
   listCategories(): CatalogCategory[] {
     const rows = this.db
       .prepare(
@@ -260,18 +277,89 @@ export class TrackRepository {
           GROUP BY LOWER(TRIM(genre))
           ORDER BY name COLLATE NOCASE`,
       )
-      .all() as unknown as CatalogCategory[];
+      .all() as unknown as Omit<CatalogCategory, 'subcategories'>[];
+
+    const subRows = this.db
+      .prepare(
+        `SELECT LOWER(TRIM(genre)) AS genreKey, MIN(TRIM(subgenre)) AS name, COUNT(*) AS trackCount,
+                MAX(thumbnail) AS cover
+           FROM tracks
+          WHERE ${READY}
+            AND genre IS NOT NULL AND TRIM(genre) <> ''
+            AND subgenre IS NOT NULL AND TRIM(subgenre) <> ''
+          GROUP BY LOWER(TRIM(genre)), LOWER(TRIM(subgenre))
+          ORDER BY trackCount DESC, name COLLATE NOCASE`,
+      )
+      .all() as unknown as { genreKey: string; name: string; trackCount: number; cover: string | null }[];
+
+    const subsByGenre = new Map<string, CatalogSubcategory[]>();
+    for (const sub of subRows) {
+      const list = subsByGenre.get(sub.genreKey) ?? [];
+      list.push({ name: sub.name, trackCount: sub.trackCount, cover: sub.cover ?? null });
+      subsByGenre.set(sub.genreKey, list);
+    }
+
+    return rows.map((r) => ({
+      ...r,
+      cover: r.cover ?? null,
+      subcategories: subsByGenre.get(r.name.trim().toLowerCase()) ?? [],
+    }));
+  }
+
+  subcategoriesForCategory(name: string): CatalogSubcategory[] {
+    const rows = this.db
+      .prepare(
+        `SELECT MIN(TRIM(subgenre)) AS name, COUNT(*) AS trackCount, MAX(thumbnail) AS cover
+           FROM tracks
+          WHERE ${READY}
+            AND LOWER(TRIM(genre)) = LOWER(TRIM(?))
+            AND subgenre IS NOT NULL AND TRIM(subgenre) <> ''
+          GROUP BY LOWER(TRIM(subgenre))
+          ORDER BY trackCount DESC, name COLLATE NOCASE`,
+      )
+      .all(name) as unknown as CatalogSubcategory[];
     return rows.map((r) => ({ ...r, cover: r.cover ?? null }));
   }
 
-  tracksByCategory(name: string): Track[] {
+  tracksByCategory(name: string, subgenre?: string): Track[] {
+    const params: string[] = [name];
+    let subFilter = '';
+    const trimmedSub = subgenre?.trim();
+    if (trimmedSub) {
+      if (trimmedSub === '__none__') {
+        subFilter = "AND (subgenre IS NULL OR TRIM(subgenre) = '')";
+      } else {
+        subFilter = 'AND LOWER(TRIM(subgenre)) = LOWER(TRIM(?))';
+        params.push(trimmedSub);
+      }
+    }
     const rows = this.db
       .prepare(
-        `SELECT * FROM tracks WHERE ${READY} AND LOWER(TRIM(genre)) = LOWER(TRIM(?))
+        `SELECT * FROM tracks WHERE ${READY} AND LOWER(TRIM(genre)) = LOWER(TRIM(?)) ${subFilter}
           ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, ${TRACK_ORDER}`,
       )
-      .all(name) as unknown as TrackRow[];
+      .all(...params) as unknown as TrackRow[];
     return rows.map(toTrack);
+  }
+
+  /** Returns ready tracks eligible for auto-categorization (never overwrites `genre_manual = 1`). */
+  listTracksForAutocategorize(): { candidates: Track[]; skippedManual: number } {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM tracks
+          WHERE ${READY}
+            AND genre_manual = 0
+            AND (genre IS NULL OR TRIM(genre) = '' OR subgenre IS NULL OR TRIM(subgenre) = '')
+          ORDER BY created_at DESC`,
+      )
+      .all() as unknown as TrackRow[];
+    const skippedRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM tracks
+          WHERE ${READY} AND genre_manual = 1`,
+      )
+      .get() as { count: number };
+    return { candidates: rows.map(toTrack), skippedManual: skippedRow.count };
   }
 
   /** Albums grouped by (album, artist), optionally filtered by text, category or artist. */

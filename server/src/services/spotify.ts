@@ -27,9 +27,15 @@ interface SpotifyTrack {
   uri: string;
   name: string;
   duration_ms: number;
-  artists: { name: string }[];
-  album?: { name: string; images?: { url: string; width?: number }[] };
+  artists: { id?: string; name: string }[];
+  album?: { name: string; release_date?: string; images?: { url: string; width?: number }[] };
   type?: string;
+}
+
+interface SpotifyArtist {
+  id: string;
+  name: string;
+  genres?: string[];
 }
 
 interface SpotifyApiDevice {
@@ -196,6 +202,41 @@ export class SpotifyService {
   async getTrack(id: string): Promise<SearchResult> {
     this.requireConfigured();
     return spotifyTrackToResult(await this.api<SpotifyTrack>(`/tracks/${encodeURIComponent(id)}`));
+  }
+
+  /** Fetches Spotify artist genres (and album release year) for a track ID using app or user auth. */
+  async getTrackArtistGenres(id: string): Promise<{ genres: string[]; year: number | null; artistName?: string }> {
+    this.requireConfigured();
+    const track = await this.api<SpotifyTrack>(`/tracks/${encodeURIComponent(id)}`);
+    const yearMatch = track.album?.release_date?.match(/^(\d{4})\b/);
+    const year = yearMatch ? Number(yearMatch[1]) : null;
+    const primaryArtist = track.artists?.[0];
+    if (!primaryArtist?.id) return { genres: [], year, artistName: primaryArtist?.name };
+    const artist = await this.api<SpotifyArtist>(`/artists/${encodeURIComponent(primaryArtist.id)}`);
+    return {
+      genres: Array.isArray(artist.genres) ? artist.genres : [],
+      year: year && year >= 1000 && year <= 2100 ? year : null,
+      artistName: artist.name || primaryArtist.name,
+    };
+  }
+
+  /** Searches Spotify artists by name and returns genres for the closest match. */
+  async searchArtistGenres(artistName: string): Promise<string[]> {
+    this.requireConfigured();
+    const query = artistName.trim();
+    if (!query) return [];
+    const params = new URLSearchParams({ q: query, type: 'artist', limit: '3' });
+    const data = await this.api<{ artists?: { items?: SpotifyArtist[] } }>(`/search?${params}`);
+    const items = (data.artists?.items ?? []).filter(Boolean);
+    if (items.length === 0) return [];
+    const normalizedTarget = query.toLowerCase();
+    const exact = items.find((a) => a.name.trim().toLowerCase() === normalizedTarget);
+    const partial = items.find((a) => {
+      const n = a.name.trim().toLowerCase();
+      return n.includes(normalizedTarget) || normalizedTarget.includes(n);
+    });
+    const picked = exact ?? partial ?? items[0];
+    return Array.isArray(picked.genres) ? picked.genres : [];
   }
 
   async getAlbumTracks(id: string, limit = 50): Promise<SearchResult[]> {

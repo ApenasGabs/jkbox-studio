@@ -1,5 +1,6 @@
 import type { Config } from './config.js';
 import { openDb, Settings } from './db.js';
+import { ClassifierService } from './services/classifier.js';
 import { DownloadManager } from './services/downloads.js';
 import { Jukebox } from './services/jukebox.js';
 import { LyricsService } from './services/lyrics.js';
@@ -12,6 +13,7 @@ export interface ContainerOverrides {
   media?: MediaProvider;
   fetchFn?: FetchFn;
   log?: (msg: string) => void;
+  externalClassifierLookup?: boolean;
 }
 
 /** Wires all services together (overridable for tests). */
@@ -22,6 +24,14 @@ export function createJukebox(config: Config, overrides: ContainerOverrides = {}
   const media = overrides.media ?? new YtDlp(config.ytdlpPath, config.audioFormat, config.ytdlpExtraArgs);
   const spotify = new SpotifyService(config.spotify, settings, overrides.fetchFn);
   const lyrics = new LyricsService(db, config.musicDir, overrides.fetchFn, overrides.log);
+  const classifier = new ClassifierService(
+    db,
+    tracks,
+    spotify,
+    overrides.fetchFn,
+    overrides.log,
+    overrides.externalClassifierLookup ?? true,
+  );
   const queue = new QueueService(db, tracks);
   let jukebox: Jukebox | null = null;
   const downloads = new DownloadManager(
@@ -36,6 +46,6 @@ export function createJukebox(config: Config, overrides: ContainerOverrides = {}
       log: overrides.log,
     },
   );
-  jukebox = new Jukebox(tracks, queue, downloads, media, spotify, lyrics, overrides.log, settings);
+  jukebox = new Jukebox(tracks, queue, downloads, media, spotify, lyrics, overrides.log, settings, classifier);
   return jukebox;
 }

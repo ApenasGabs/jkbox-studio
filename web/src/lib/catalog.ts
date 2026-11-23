@@ -5,7 +5,7 @@ export type CatalogTab = 'categories' | 'albums' | 'artists' | 'all';
 
 export type CatalogRoute =
   | { kind: 'root' }
-  | { kind: 'category'; name: string; uncategorized?: boolean }
+  | { kind: 'category'; name: string; subgenre?: string | null; uncategorized?: boolean }
   | { kind: 'album'; name: string; artist: string }
   | { kind: 'artist'; name: string };
 
@@ -15,6 +15,7 @@ export interface EditableTrack {
   artist: string;
   album: string | null;
   genre: string | null;
+  subgenre: string | null;
   year: number | null;
   trackNumber: number | null;
   thumbnail: string | null;
@@ -25,6 +26,7 @@ export interface MetadataFormValues {
   artist: string;
   album: string;
   genre: string;
+  subgenre: string;
   year: string;
   trackNumber: string;
 }
@@ -75,14 +77,42 @@ const UNCATEGORIZED_THEME: CategoryTheme = {
 };
 
 export const DEFAULT_CATEGORY_SUGGESTIONS = [
-  'Rock',
+  'Samba & Pagode',
   'Sertanejo',
-  'Pop',
-  'Pagode',
+  'Funk',
+  'Gospel',
+  'Rock',
   'MPB',
+  'Pop',
+  'Forró & Piseiro',
+  'Rap & Trap',
   'Eletrônica',
+  'Reggae',
+  'Flashback',
   'Karaokê',
 ] as const;
+
+export const SUBCATEGORY_SUGGESTIONS_BY_CATEGORY: Record<string, readonly string[]> = {
+  funk: ['Funk Anos 2000', 'Funk Mandelão', 'Funk Bruxaria', 'Funk Melody', 'Funk Ostentação', 'Funk Pop'],
+  'samba & pagode': ['Pagode 90', 'Pagode Atual', 'Samba Raiz'],
+  pagode: ['Pagode 90', 'Pagode Atual', 'Samba Raiz'],
+  sertanejo: ['Sertanejo Raiz', 'Sertanejo Universitário', 'Feminejo', 'Agronejo'],
+  gospel: ['Louvor & Adoração', 'Gospel Pentecostal', 'Gospel Jovem'],
+  rock: ['Rock Nacional', 'Rock Clássico', 'Pop Rock', 'Metal & Hard Rock'],
+  mpb: ['MPB Clássica', 'Bossa Nova', 'Nova MPB'],
+  pop: ['Pop Nacional', 'Pop Internacional'],
+  'forró & piseiro': ['Piseiro', 'Forró Eletrônico', 'Forró Tradicional'],
+  'rap & trap': ['Rap Nacional', 'Trap BR', 'Hip Hop Internacional'],
+  eletrônica: ['EDM & House', 'Brazilian Bass', 'Psytrance & Techno'],
+  reggae: ['Reggae Nacional', 'Reggae Roots'],
+  flashback: ['Flashback 70s/80s', 'Flashback 90s/2000s'],
+};
+
+export function getSubcategorySuggestions(genre: string): string[] {
+  const key = genre.trim().toLowerCase();
+  if (!key) return [];
+  return [...(SUBCATEGORY_SUGGESTIONS_BY_CATEGORY[key] ?? [])];
+}
 
 export function getCategoryTheme(name: string, uncategorized = false): CategoryTheme {
   if (uncategorized) return UNCATEGORIZED_THEME;
@@ -124,6 +154,7 @@ export function editableFromTrack(track: Track): EditableTrack {
     artist: track.artist,
     album: track.album ?? null,
     genre: track.genre ?? null,
+    subgenre: track.subgenre ?? null,
     year: track.year ?? null,
     trackNumber: track.trackNumber ?? null,
     thumbnail: track.thumbnail,
@@ -138,6 +169,7 @@ export function editableFromResult(result: SearchResult): EditableTrack | null {
     artist: result.artist,
     album: result.album ?? null,
     genre: result.genre ?? null,
+    subgenre: result.subgenre ?? null,
     year: result.year ?? null,
     trackNumber: result.trackNumber ?? null,
     thumbnail: result.thumbnail ?? null,
@@ -159,6 +191,9 @@ export function buildMetadataPatch(
 
   const genre = values.genre.trim();
   if (genre.length > 100) return { ok: false, error: 'Categoria deve ter no máximo 100 caracteres.' };
+
+  const subgenre = values.subgenre.trim();
+  if (subgenre.length > 100) return { ok: false, error: 'Subcategoria deve ter no máximo 100 caracteres.' };
 
   let year: number | null = null;
   const rawYear = values.year.trim();
@@ -189,6 +224,7 @@ export function buildMetadataPatch(
       artist,
       album: album || null,
       genre: genre || null,
+      subgenre: subgenre || null,
       year,
       trackNumber,
     },

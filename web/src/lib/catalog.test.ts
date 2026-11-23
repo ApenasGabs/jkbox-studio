@@ -4,6 +4,7 @@ import {
   editableFromResult,
   formatAlbumMeta,
   getCategoryTheme,
+  getSubcategorySuggestions,
   mergeCategorySuggestions,
   splitUncategorizedTracks,
 } from './catalog';
@@ -63,22 +64,33 @@ describe('catalog helpers', () => {
         artist: ' Djavan ',
         album: '',
         genre: ' MPB ',
+        subgenre: ' MPB Clássica ',
         year: '1982',
         trackNumber: '3',
       }),
     ).toEqual({
       ok: true,
-      patch: { title: 'Sina', artist: 'Djavan', album: null, genre: 'MPB', year: 1982, trackNumber: 3 },
+      patch: {
+        title: 'Sina',
+        artist: 'Djavan',
+        album: null,
+        genre: 'MPB',
+        subgenre: 'MPB Clássica',
+        year: 1982,
+        trackNumber: 3,
+      },
     });
 
+    expect(getSubcategorySuggestions('Funk')).toContain('Funk Mandelão');
+
     expect(
-      buildMetadataPatch({ title: '  ', artist: 'X', album: '', genre: '', year: '', trackNumber: '' }),
+      buildMetadataPatch({ title: '  ', artist: 'X', album: '', genre: '', subgenre: '', year: '', trackNumber: '' }),
     ).toMatchObject({ ok: false });
     expect(
-      buildMetadataPatch({ title: 'X', artist: 'Y', album: '', genre: '', year: '999', trackNumber: '' }),
+      buildMetadataPatch({ title: 'X', artist: 'Y', album: '', genre: '', subgenre: '', year: '999', trackNumber: '' }),
     ).toMatchObject({ ok: false });
     expect(
-      buildMetadataPatch({ title: 'X', artist: 'Y', album: '', genre: '', year: '', trackNumber: '1000' }),
+      buildMetadataPatch({ title: 'X', artist: 'Y', album: '', genre: '', subgenre: '', year: '', trackNumber: '1000' }),
     ).toMatchObject({ ok: false });
   });
 

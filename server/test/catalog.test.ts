@@ -30,7 +30,7 @@ describe('catalog API', () => {
 
     const res = await request(app).get('/api/catalog/categories').expect(200);
     expect(res.body.categories).toEqual([
-      { name: 'MPB', trackCount: 1, albumCount: 1, artistCount: 1, cover: null },
+      { name: 'MPB', trackCount: 1, albumCount: 1, artistCount: 1, cover: null, subcategories: [] },
       expect.objectContaining({ name: expect.stringMatching(/^rock$/i), trackCount: 4, albumCount: 2, artistCount: 1 }),
     ]);
 
@@ -97,20 +97,30 @@ describe('catalog API', () => {
     await request(app).patch('/api/tracks/missing/metadata').set('x-host-pin', '1234').send(body).expect(404);
     expect(jukebox.tracks.get(track.id)).toMatchObject({ title: 'Untitled', genre: null });
 
-    const res = await request(app).patch(url).set('x-host-pin', '1234').send(body).expect(200);
-    expect(res.body).toMatchObject({ id: track.id, ...body });
+    const res = await request(app).patch(url).set('x-host-pin', '1234').send({ ...body, subgenre: 'MPB Clássica' }).expect(200);
+    expect(res.body).toMatchObject({ id: track.id, ...body, subgenre: 'MPB Clássica', genreManual: true });
     expect((await request(app).get('/api/catalog/categories').expect(200)).body.categories).toEqual([
-      expect.objectContaining({ name: 'MPB', trackCount: 1 }),
+      expect.objectContaining({
+        name: 'MPB',
+        trackCount: 1,
+        subcategories: [{ name: 'MPB Clássica', trackCount: 1, cover: null }],
+      }),
     ]);
+    const subFiltered = await request(app).get('/api/catalog/categories/MPB/tracks').query({ subgenre: 'MPB Clássica' }).expect(200);
+    expect(subFiltered.body.tracks).toHaveLength(1);
+    expect(subFiltered.body.subcategories).toEqual([{ name: 'MPB Clássica', trackCount: 1, cover: null }]);
 
-    const cleared = await request(app).patch(url).set('x-host-pin', '1234').send({ genre: null, album: '' }).expect(200);
-    expect(cleared.body).toMatchObject({ genre: null, album: null, title: 'Sina' });
+    const cleared = await request(app).patch(url).set('x-host-pin', '1234').send({ genre: null, subgenre: '', album: '' }).expect(200);
+    expect(cleared.body).toMatchObject({ genre: null, subgenre: null, album: null, title: 'Sina', genreManual: true });
   });
 });
 
 describe('parseMetadataPatch', () => {
   it('validates and normalizes fields', () => {
-    expect(parseMetadataPatch({ title: ' A ', genre: '', year: null })).toEqual({ ok: true, patch: { title: 'A', genre: null, year: null } });
+    expect(parseMetadataPatch({ title: ' A ', genre: '', subgenre: ' Pagode 90 ', year: null })).toEqual({
+      ok: true,
+      patch: { title: 'A', genre: null, subgenre: 'Pagode 90', year: null },
+    });
     expect(parseMetadataPatch(null)).toMatchObject({ ok: false });
     expect(parseMetadataPatch([])).toMatchObject({ ok: false });
     expect(parseMetadataPatch({})).toMatchObject({ ok: false });

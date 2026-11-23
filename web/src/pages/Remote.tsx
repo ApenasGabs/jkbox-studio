@@ -40,6 +40,7 @@ function trackToSearchResult(track: Track): SearchResult {
     artist: track.artist,
     album: track.album,
     genre: track.genre,
+    subgenre: track.subgenre,
     year: track.year,
     trackNumber: track.trackNumber,
     durationSec: track.durationSec,
@@ -525,6 +526,11 @@ export function Remote() {
                               {result.genre}
                             </span>
                           )}
+                          {result.subgenre && (
+                            <span className="rounded-full border border-accent/30 bg-accent/15 px-2 py-0.5 text-[10px] font-medium text-purple-200">
+                              {result.subgenre}
+                            </span>
+                          )}
                         </div>
                       </div>
                       <div className="flex shrink-0 items-center gap-1.5">
@@ -630,8 +636,18 @@ export function Remote() {
                         {entry.track.artist || '—'} · {formatTime(entry.track.durationSec)} · por {entry.requesterName}
                         {playedAt ? ` · ${playedAt}` : ''}
                       </p>
-                      <div className="mt-1">
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
                         <SourceBadge source={entry.track.source} cached={entry.track.status === 'ready'} />
+                        {entry.track.genre && (
+                          <span className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-medium text-zinc-300">
+                            {entry.track.genre}
+                          </span>
+                        )}
+                        {entry.track.subgenre && (
+                          <span className="rounded-full border border-accent/30 bg-accent/15 px-2 py-0.5 text-[10px] font-medium text-purple-200">
+                            {entry.track.subgenre}
+                          </span>
+                        )}
                       </div>
                     </div>
                     <div className="flex shrink-0 items-center gap-1.5">

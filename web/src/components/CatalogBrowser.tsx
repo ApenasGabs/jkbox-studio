@@ -13,7 +13,14 @@ import {
 } from '../lib/catalog';
 import { formatTime } from '../lib/format';
 import { applyKaraokeFilter } from '../lib/karaoke';
-import type { CatalogAlbum, CatalogArtist, CatalogArtistDetail, CatalogCategory, SearchResult } from '../lib/types';
+import type {
+  CatalogAlbum,
+  CatalogArtist,
+  CatalogArtistDetail,
+  CatalogCategory,
+  CatalogSubcategory,
+  SearchResult,
+} from '../lib/types';
 import { Cover } from './Cover';
 import { SourceBadge } from './SourceBadge';
 
@@ -76,9 +83,14 @@ export function CatalogBrowser({
   const [artists, setArtists] = useState<CatalogArtist[]>([]);
   const [allTracks, setAllTracks] = useState<SearchResult[]>([]);
   const [detailTracks, setDetailTracks] = useState<SearchResult[]>([]);
+  const [detailSubcategories, setDetailSubcategories] = useState<CatalogSubcategory[]>([]);
   const [artistDetail, setArtistDetail] = useState<CatalogArtistDetail | null>(null);
 
   const pushRoute = (next: CatalogRoute) => onHistoryChange([...history, next]);
+  const replaceTopRoute = (next: CatalogRoute) => {
+    if (history.length <= 1) onHistoryChange([next]);
+    else onHistoryChange([...history.slice(0, -1), next]);
+  };
   const goBack = () => {
     if (history.length > 1) onHistoryChange(history.slice(0, -1));
     else onHistoryChange([{ kind: 'root' }]);
@@ -95,9 +107,11 @@ export function CatalogBrowser({
         if (route.kind === 'category') {
           if (route.uncategorized) {
             const lib = await api.library('', signal);
+            setDetailSubcategories([]);
             setDetailTracks(splitUncategorizedTracks(lib.results).tracks);
           } else {
-            const res = await api.catalogCategoryTracks(route.name, signal);
+            const res = await api.catalogCategoryTracks(route.name, route.subgenre ?? null, signal);
+            setDetailSubcategories(res.subcategories ?? []);
             setDetailTracks(res.tracks);
           }
           return;
@@ -150,7 +164,9 @@ export function CatalogBrowser({
   const filterTracksLocally = (items: SearchResult[]) => {
     if (!normalizedFilter) return items;
     return items.filter((item) =>
-      [item.title, item.artist, item.album ?? '', item.genre ?? ''].some((v) => v.toLowerCase().includes(normalizedFilter)),
+      [item.title, item.artist, item.album ?? '', item.genre ?? '', item.subgenre ?? ''].some((v) =>
+        v.toLowerCase().includes(normalizedFilter),
+      ),
     );
   };
 
@@ -181,6 +197,11 @@ export function CatalogBrowser({
             {result.genre && (
               <span className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-medium text-zinc-300">
                 {result.genre}
+              </span>
+            )}
+            {result.subgenre && (
+              <span className="rounded-full border border-accent/30 bg-accent/15 px-2 py-0.5 text-[10px] font-medium text-purple-200">
+                {result.subgenre}
               </span>
             )}
           </div>
@@ -306,8 +327,48 @@ export function CatalogBrowser({
       {route.kind === 'category' ? (
         <div className="flex flex-col gap-3">
           {renderBreadcrumb(
-            route.uncategorized ? 'Sem Categoria' : route.name,
+            route.uncategorized ? 'Sem Categoria' : route.subgenre ? `${route.name} · ${route.subgenre}` : route.name,
             'Acervo · Categorias',
+          )}
+          {!route.uncategorized && detailSubcategories.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filtrar por subcategoria">
+              <button
+                type="button"
+                aria-pressed={!route.subgenre}
+                onClick={() => replaceTopRoute({ kind: 'category', name: route.name, subgenre: null })}
+                className={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
+                  !route.subgenre
+                    ? 'border-accent bg-accent text-white shadow-sm'
+                    : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/15 hover:text-white'
+                }`}
+              >
+                Todas
+              </button>
+              {detailSubcategories.map((sub) => {
+                const active = route.subgenre?.toLowerCase() === sub.name.toLowerCase();
+                return (
+                  <button
+                    key={sub.name}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() =>
+                      replaceTopRoute({
+                        kind: 'category',
+                        name: route.name,
+                        subgenre: active ? null : sub.name,
+                      })
+                    }
+                    className={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
+                      active
+                        ? 'border-accent bg-accent text-white shadow-sm'
+                        : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/15 hover:text-white'
+                    }`}
+                  >
+                    {sub.name} ({sub.trackCount})
+                  </button>
+                );
+              })}
+            </div>
           )}
           {loading ? (
             <p className="py-8 text-center text-sm text-zinc-500">Carregando músicas…</p>
@@ -512,6 +573,12 @@ export function CatalogBrowser({
                     {cat.albumCount > 0 && (
                       <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${theme.badge}`}>
                         {formatAlbumCount(cat.albumCount)}
+                      </span>
+                    )}
+                    {(cat.subcategories?.length ?? 0) > 0 && (
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${theme.badge}`}>
+                        {cat.subcategories!.length}{' '}
+                        {cat.subcategories!.length === 1 ? 'subcategoria' : 'subcategorias'}
                       </span>
                     )}
                   </div>
