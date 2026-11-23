@@ -54,6 +54,9 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
       audioFormat: config.audioFormat,
       videoMode: config.videoMode,
       autoDjEnabled: jukebox.autoDjEnabled,
+      autoDjMode: jukebox.autoDjMode,
+      autoDjCategory: jukebox.autoDjCategory,
+      autoDjSubgenre: jukebox.autoDjSubgenre,
       playbackOutput: jukebox.playbackOutput,
       spotify: spotify.status(),
     });
@@ -70,6 +73,61 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
     }
     jukebox.setAutoDjEnabled(autoDjEnabled);
     res.json({ autoDjEnabled: jukebox.autoDjEnabled });
+  });
+
+  api.post('/config/autodj', requireHost, (req, res) => {
+    const body = req.body ?? {};
+    const rawEnabled = body.enabled ?? body.autoDjEnabled;
+    const rawMode = body.mode ?? body.autoDjMode;
+    const rawCategory = body.category ?? body.autoDjCategory;
+    const rawSubgenre = body.subgenre ?? body.autoDjSubgenre;
+
+    if (rawEnabled !== undefined && typeof rawEnabled !== 'boolean') {
+      return void res.status(400).json({ error: 'enabled deve ser booleano' });
+    }
+    if (rawMode !== undefined && rawMode !== 'vibe' && rawMode !== 'category' && rawMode !== 'random') {
+      return void res.status(400).json({ error: 'mode deve ser vibe, category ou random' });
+    }
+    if (rawCategory !== undefined && rawCategory !== null && typeof rawCategory !== 'string') {
+      return void res.status(400).json({ error: 'category deve ser texto ou null' });
+    }
+    if (rawSubgenre !== undefined && rawSubgenre !== null && typeof rawSubgenre !== 'string') {
+      return void res.status(400).json({ error: 'subgenre deve ser texto ou null' });
+    }
+
+    const nextMode = rawMode ?? jukebox.autoDjMode;
+    const nextCategory =
+      rawCategory !== undefined ? (rawCategory === null ? null : rawCategory.trim() || null) : jukebox.autoDjCategory;
+    const categoryChanged = rawCategory !== undefined && nextCategory !== jukebox.autoDjCategory;
+    const nextSubgenre =
+      !nextCategory
+        ? null
+        : rawSubgenre !== undefined
+          ? rawSubgenre === null
+            ? null
+            : rawSubgenre.trim() || null
+          : categoryChanged
+            ? null
+            : jukebox.autoDjSubgenre;
+    const shouldUpdateSubgenre = rawSubgenre !== undefined || categoryChanged || !nextCategory;
+
+    if (nextMode === 'category' && !nextCategory) {
+      return void res.status(400).json({ error: 'Selecione uma categoria para travar o Auto-DJ' });
+    }
+
+    jukebox.setAutoDjConfig({
+      ...(rawEnabled !== undefined ? { enabled: rawEnabled } : {}),
+      ...(rawMode !== undefined ? { mode: rawMode } : {}),
+      ...(rawCategory !== undefined ? { category: nextCategory } : {}),
+      ...(shouldUpdateSubgenre ? { subgenre: nextSubgenre } : {}),
+    });
+
+    res.json({
+      autoDjEnabled: jukebox.autoDjEnabled,
+      autoDjMode: jukebox.autoDjMode,
+      autoDjCategory: jukebox.autoDjCategory,
+      autoDjSubgenre: jukebox.autoDjSubgenre,
+    });
   });
 
   api.get('/state', (_req, res) => {
@@ -95,13 +153,27 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
 
   api.post('/library/rescan', requireHost, async (_req, res, next) => {
     try {
-      res.json({ added: await scanLibrary(tracks, config.musicDir) });
+      const added = await scanLibrary(tracks, config.musicDir);
+      if (added > 0) {
+        void jukebox.autocategorizeLibrary().catch((err) => {
+          console.warn(`[jkbox] falha na auto-categorização pós-rescan: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      }
+      res.json({ added });
     } catch (err) {
       next(err);
     }
   });
 
-  // --- Catalog (#10) ------------------------------------------------------
+  api.post('/library/autocategorize', requireHost, async (_req, res, next) => {
+    try {
+      res.json(await jukebox.autocategorizeLibrary());
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Catalog (#10, #27) -------------------------------------------------
   const toResults = (list: Track[]) => list.map((t) => jukebox.trackToResult(t));
 
   api.get('/catalog/categories', (_req, res) => {
@@ -110,7 +182,12 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
 
   api.get('/catalog/categories/:name/tracks', (req, res) => {
     const name = str(req.params.name);
-    res.json({ category: name, tracks: toResults(tracks.tracksByCategory(name)) });
+    const subgenre = str(req.query.subgenre);
+    res.json({
+      category: name,
+      subcategories: tracks.subcategoriesForCategory(name),
+      tracks: toResults(tracks.tracksByCategory(name, subgenre)),
+    });
   });
 
   api.get('/catalog/albums', (req, res) => {
@@ -138,7 +215,8 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
     if (!track) return void res.status(404).json({ error: 'Faixa não encontrada' });
     const parsed = parseMetadataPatch(req.body);
     if (!parsed.ok) return void res.status(400).json({ error: parsed.error });
-    tracks.update(track.id, parsed.patch);
+    const isGenreEdited = 'genre' in parsed.patch || 'subgenre' in parsed.patch;
+    tracks.update(track.id, isGenreEdited ? { ...parsed.patch, genreManual: true } : parsed.patch);
     // Queue/now-playing views embed the track: push the new metadata to connected clients.
     queue.emit('change');
     res.json(tracks.get(track.id));

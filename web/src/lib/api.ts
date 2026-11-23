@@ -1,9 +1,11 @@
 import type {
   AppConfig,
+  AutoDjMode,
   CatalogAlbum,
   CatalogArtist,
   CatalogArtistDetail,
   CatalogCategory,
+  CatalogSubcategory,
   JukeboxState,
   PlaybackOutput,
   QueueEntry,
@@ -76,11 +78,15 @@ export const api = {
     request<{ results: SearchResult[] }>(`/api/library?${new URLSearchParams({ q })}`, { signal }),
   catalogCategories: (signal?: AbortSignal) =>
     request<{ categories: CatalogCategory[] }>('/api/catalog/categories', { signal }),
-  catalogCategoryTracks: (name: string, signal?: AbortSignal) =>
-    request<{ category: string; tracks: SearchResult[] }>(
-      `/api/catalog/categories/${encodeURIComponent(name)}/tracks`,
+  catalogCategoryTracks: (name: string, subgenre?: string | null, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    if (subgenre?.trim()) query.set('subgenre', subgenre.trim());
+    const qs = query.toString();
+    return request<{ category: string; subcategories?: CatalogSubcategory[]; tracks: SearchResult[] }>(
+      `/api/catalog/categories/${encodeURIComponent(name)}/tracks${qs ? `?${qs}` : ''}`,
       { signal },
-    ),
+    );
+  },
   catalogAlbums: (params?: { q?: string; category?: string }, signal?: AbortSignal) => {
     const query = new URLSearchParams();
     if (params?.q?.trim()) query.set('q', params.q.trim());
@@ -129,7 +135,21 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(settings),
     }),
+  updateAutoDjConfig: (settings: {
+    enabled?: boolean;
+    mode?: AutoDjMode;
+    category?: string | null;
+    subgenre?: string | null;
+  }) =>
+    post<{
+      autoDjEnabled: boolean;
+      autoDjMode: AutoDjMode;
+      autoDjCategory: string | null;
+      autoDjSubgenre: string | null;
+    }>('/api/config/autodj', settings),
   rescanLibrary: () => post<{ added: number }>('/api/library/rescan'),
+  autocategorizeLibrary: () =>
+    post<{ processed: number; updated: number; skippedManual: number; failed: number }>('/api/library/autocategorize'),
   spotifySync: () => post<SpotifyStatus & { synced: number }>('/api/spotify/sync'),
   spotifyLinkPlaylist: (playlist: string) => post<SpotifyStatus>('/api/spotify/playlist', { playlist }),
   spotifyImport: () => post<{ imported: number }>('/api/spotify/import'),

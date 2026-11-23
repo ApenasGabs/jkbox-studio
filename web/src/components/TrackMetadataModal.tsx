@@ -1,6 +1,11 @@
 import { type FormEvent, useEffect, useState } from 'react';
 import { api } from '../lib/api';
-import { buildMetadataPatch, DEFAULT_CATEGORY_SUGGESTIONS, type EditableTrack } from '../lib/catalog';
+import {
+  buildMetadataPatch,
+  DEFAULT_CATEGORY_SUGGESTIONS,
+  type EditableTrack,
+  getSubcategorySuggestions,
+} from '../lib/catalog';
 import type { Track } from '../lib/types';
 import { Cover } from './Cover';
 
@@ -16,6 +21,7 @@ export function TrackMetadataModal({ track, categorySuggestions, onClose, onSave
   const [artist, setArtist] = useState('');
   const [album, setAlbum] = useState('');
   const [genre, setGenre] = useState('');
+  const [subgenre, setSubgenre] = useState('');
   const [year, setYear] = useState('');
   const [trackNumber, setTrackNumber] = useState('');
   const [saving, setSaving] = useState(false);
@@ -27,6 +33,7 @@ export function TrackMetadataModal({ track, categorySuggestions, onClose, onSave
     setArtist(track.artist);
     setAlbum(track.album ?? '');
     setGenre(track.genre ?? '');
+    setSubgenre(track.subgenre ?? '');
     setYear(track.year != null ? String(track.year) : '');
     setTrackNumber(track.trackNumber != null ? String(track.trackNumber) : '');
     setError(null);
@@ -45,10 +52,11 @@ export function TrackMetadataModal({ track, categorySuggestions, onClose, onSave
   if (!track) return null;
 
   const suggestions = categorySuggestions?.length ? categorySuggestions : [...DEFAULT_CATEGORY_SUGGESTIONS];
+  const subSuggestions = getSubcategorySuggestions(genre);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    const parsed = buildMetadataPatch({ title, artist, album, genre, year, trackNumber });
+    const parsed = buildMetadataPatch({ title, artist, album, genre, subgenre, year, trackNumber });
     if (!parsed.ok) {
       setError(parsed.error);
       return;
@@ -136,7 +144,7 @@ export function TrackMetadataModal({ track, categorySuggestions, onClose, onSave
               />
             </label>
             <div className="flex flex-wrap gap-1.5" aria-label="Sugestões de categoria">
-              {suggestions.slice(0, 12).map((item) => {
+              {suggestions.slice(0, 13).map((item) => {
                 const active = genre.trim().toLowerCase() === item.toLowerCase();
                 return (
                   <button
@@ -154,6 +162,40 @@ export function TrackMetadataModal({ track, categorySuggestions, onClose, onSave
                 );
               })}
             </div>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label className="flex flex-col gap-1 text-xs font-medium text-zinc-300">
+              Subcategoria / Estilo
+              <input
+                value={subgenre}
+                onChange={(e) => setSubgenre(e.target.value)}
+                maxLength={100}
+                className="rounded-xl bg-white/10 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-accent"
+                placeholder="Ex.: Funk Mandelão, Pagode 90, Sertanejo Raiz (opcional)"
+              />
+            </label>
+            {subSuggestions.length > 0 && (
+              <div className="flex flex-wrap gap-1.5" aria-label="Sugestões de subcategoria">
+                {subSuggestions.map((item) => {
+                  const active = subgenre.trim().toLowerCase() === item.toLowerCase();
+                  return (
+                    <button
+                      key={item}
+                      type="button"
+                      onClick={() => setSubgenre(active ? '' : item)}
+                      className={`rounded-full border px-2.5 py-0.5 text-xs transition ${
+                        active
+                          ? 'border-accent-2 bg-accent-2/25 font-semibold text-white'
+                          : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/15 hover:text-white'
+                      }`}
+                    >
+                      {item}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           <label className="flex flex-col gap-1 text-xs font-medium text-zinc-300">

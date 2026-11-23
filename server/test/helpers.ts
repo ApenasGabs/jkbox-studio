@@ -74,6 +74,11 @@ export function tempConfig(env: Record<string, string> = {}): Config {
 export function setup(env: Record<string, string> = {}, fetchFn?: FetchFn) {
   const config = tempConfig(env);
   const media = new FakeMedia();
-  const jukebox = createJukebox(config, { media, fetchFn, log: () => {} });
+  const jukebox = createJukebox(config, {
+    media,
+    fetchFn,
+    log: () => {},
+    externalClassifierLookup: Boolean(fetchFn),
+  });
   return { config, media, jukebox };
 }

@@ -10,6 +10,10 @@ export interface Track {
   album: string | null;
   /** Genre / Host-managed category. */
   genre: string | null;
+  /** Subcategory / specific style (e.g. Funk Mandelão, Pagode 90). */
+  subgenre: string | null;
+  /** True when the Host manually edited genre/subgenre (protected from auto-categorization). */
+  genreManual: boolean;
   year: number | null;
   trackNumber: number | null;
   durationSec: number | null;
@@ -33,6 +37,7 @@ export interface SearchResult {
   artist: string;
   album?: string | null;
   genre?: string | null;
+  subgenre?: string | null;
   year?: number | null;
   trackNumber?: number | null;
   durationSec?: number | null;
@@ -49,8 +54,15 @@ export interface TrackMetadataPatch {
   artist?: string;
   album?: string | null;
   genre?: string | null;
+  subgenre?: string | null;
   year?: number | null;
   trackNumber?: number | null;
+}
+
+export interface CatalogSubcategory {
+  name: string;
+  trackCount: number;
+  cover: string | null;
 }
 
 export interface CatalogCategory {
@@ -59,6 +71,16 @@ export interface CatalogCategory {
   albumCount: number;
   artistCount: number;
   cover: string | null;
+  subcategories?: CatalogSubcategory[];
+}
+
+export type AutoDjMode = 'vibe' | 'category' | 'random';
+
+export interface AutoDjConfig {
+  enabled: boolean;
+  mode: AutoDjMode;
+  category: string | null;
+  subgenre: string | null;
 }
 
 export interface CatalogAlbum {
