@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 import { createApp } from '../src/app.js';
-import { attachRealtime } from '../src/realtime.js';
+import { attachRealtime, type ServerMessage } from '../src/realtime.js';
 import { setup, ytResult } from './helpers.js';
 
 let server: http.Server | null = null;
@@ -71,9 +71,9 @@ describe('WebSocket realtime sync', () => {
       nextMessage(phone2, (m) => m.type === 'state'),
     ]);
 
-    const received: any[] = [];
+    const received: ServerMessage[] = [];
     kiosk.on('message', (raw) => {
-      const msg = JSON.parse(String(raw));
+      const msg = JSON.parse(String(raw)) as ServerMessage;
       if (msg.type === 'reaction') received.push(msg);
     });
 
@@ -105,6 +105,51 @@ describe('WebSocket realtime sync', () => {
     kiosk.close();
     phone1.close();
     phone2.close();
+    wss.close();
+  });
+
+  it('broadcasts validated local input commands and rejects invalid or proxied inputs', async () => {
+    const { config, jukebox } = setup();
+    server = http.createServer(createApp({ config, jukebox }));
+    const wss = attachRealtime(server, jukebox);
+    await new Promise<void>((r) => server!.listen(0, r));
+    const url = `ws://127.0.0.1:${(server.address() as AddressInfo).port}/ws`;
+
+    const kiosk = new WebSocket(url);
+    const localDaemon = new WebSocket(url);
+    const proxiedGuest = new WebSocket(url, { headers: { 'x-forwarded-for': '192.168.1.50' } });
+    await Promise.all([
+      nextMessage(kiosk, (m) => m.type === 'state'),
+      nextMessage(localDaemon, (m) => m.type === 'state'),
+      nextMessage(proxiedGuest, (m) => m.type === 'state'),
+    ]);
+
+    const received: ServerMessage[] = [];
+    kiosk.on('message', (raw) => {
+      const msg = JSON.parse(String(raw)) as ServerMessage;
+      if (msg.type === 'input') received.push(msg);
+    });
+
+    // Proxied/remote client cannot inject hardware input commands
+    proxiedGuest.send(JSON.stringify({ type: 'input', command: 'SKIP', source: 'guest' }));
+    // Invalid command / phase from local daemon are ignored
+    localDaemon.send(JSON.stringify({ type: 'input', command: 'DROP_ALL' }));
+    localDaemon.send(JSON.stringify({ type: 'input', command: 'UP', phase: 'hold' }));
+    // Valid local daemon inputs are normalized and broadcast
+    localDaemon.send(JSON.stringify({ type: 'input', command: 'up', source: 'evdev' }));
+    localDaemon.send(JSON.stringify({ type: 'input', command: 'SELECT', phase: 'down', source: 'evdev' }));
+    localDaemon.send(JSON.stringify({ type: 'input', command: 'SELECT', phase: 'up', source: 'evdev' }));
+
+    await new Promise((r) => setTimeout(r, 60));
+    expect(received).toEqual([
+      { type: 'input', command: 'UP', phase: 'press', source: 'evdev' },
+      { type: 'input', command: 'SELECT', phase: 'down', source: 'evdev' },
+      { type: 'input', command: 'SELECT', phase: 'up', source: 'evdev' },
+    ]);
+
+    kiosk.close();
+    localDaemon.close();
+    proxiedGuest.close();
     wss.close();
   });
 });

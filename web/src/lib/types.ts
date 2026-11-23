@@ -133,9 +133,20 @@ export interface TrackLyrics {
   fetchedAt: number;
 }
 
+export const KIOSK_COMMANDS = ['UP', 'DOWN', 'LEFT', 'RIGHT', 'SELECT', 'PLAY', 'BACK', 'MENU', 'SKIP'] as const;
+export type KioskCommand = (typeof KIOSK_COMMANDS)[number];
+export type KioskInputPhase = 'press' | 'down' | 'up';
+
+export interface KioskInputEvent {
+  command: KioskCommand;
+  phase: KioskInputPhase;
+  source?: string;
+}
+
 export type ServerMessage =
   | { type: 'state'; state: JukeboxState }
   | { type: 'progress'; positionSec: number; paused: boolean }
   | { type: 'download'; trackId: string; status: TrackStatus; progress: number; error: string | null }
   | { type: 'lyrics_offset'; trackId: string; offsetMs: number }
-  | { type: 'reaction'; emoji: ReactionEmoji; senderName?: string };
+  | { type: 'reaction'; emoji: ReactionEmoji; senderName?: string }
+  | { type: 'input'; command: KioskCommand; phase?: KioskInputPhase; source?: string };

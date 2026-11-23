@@ -1,5 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { JukeboxState, ReactionEmoji, ServerMessage, TrackStatus } from './types';
+import {
+  KIOSK_COMMANDS,
+  type JukeboxState,
+  type KioskCommand,
+  type KioskInputEvent,
+  type KioskInputPhase,
+  type ReactionEmoji,
+  type ServerMessage,
+  type TrackStatus,
+} from './types';
+
+const ALLOWED_COMMANDS = new Set<string>(KIOSK_COMMANDS);
+const ALLOWED_PHASES = new Set<string>(['press', 'down', 'up']);
 
 export interface DownloadInfo {
   status: TrackStatus;
@@ -34,6 +46,14 @@ export function useJukebox() {
   const offsetSeqRef = useRef(0);
   const reactionSeqRef = useRef(0);
   const reactionTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const inputSubscribersRef = useRef<Set<(event: KioskInputEvent) => void>>(new Set());
+
+  const subscribeInput = useCallback((handler: (event: KioskInputEvent) => void) => {
+    inputSubscribersRef.current.add(handler);
+    return () => {
+      inputSubscribersRef.current.delete(handler);
+    };
+  }, []);
 
   useEffect(() => {
     let closed = false;
@@ -73,6 +93,17 @@ export function useJukebox() {
             setReactions((prev) => prev.filter((item) => item.id !== id));
           }, REACTION_TTL_MS);
           reactionTimersRef.current.add(expireTimer);
+        } else if (msg.type === 'input') {
+          const command = typeof msg.command === 'string' ? msg.command.trim().toUpperCase() : '';
+          if (!ALLOWED_COMMANDS.has(command)) return;
+          const phase = msg.phase === undefined ? 'press' : String(msg.phase).trim().toLowerCase();
+          if (!ALLOWED_PHASES.has(phase)) return;
+          const inputEvent: KioskInputEvent = {
+            command: command as KioskCommand,
+            phase: phase as KioskInputPhase,
+            ...(typeof msg.source === 'string' ? { source: msg.source } : {}),
+          };
+          for (const listener of inputSubscribersRef.current) listener(inputEvent);
         }
       };
       ws.onclose = () => {
@@ -97,5 +128,5 @@ export function useJukebox() {
     if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
   }, []);
 
-  return { state, position, downloads, lyricsOffset, reactions, connected, send };
+  return { state, position, downloads, lyricsOffset, reactions, connected, send, subscribeInput };
 }

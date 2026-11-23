@@ -1,9 +1,15 @@
-import type { Server } from 'node:http';
+import type { IncomingMessage, Server } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { Jukebox } from './services/jukebox.js';
 import { REACTION_EMOJIS, type ReactionEmoji } from './types.js';
 
+export const KIOSK_COMMANDS = ['UP', 'DOWN', 'LEFT', 'RIGHT', 'SELECT', 'PLAY', 'BACK', 'MENU', 'SKIP'] as const;
+export type KioskCommand = (typeof KIOSK_COMMANDS)[number];
+export type KioskInputPhase = 'press' | 'down' | 'up';
+
 const ALLOWED_REACTION_EMOJIS = new Set<string>(REACTION_EMOJIS);
+const ALLOWED_KIOSK_COMMANDS = new Set<string>(KIOSK_COMMANDS);
+const ALLOWED_INPUT_PHASES = new Set<string>(['press', 'down', 'up']);
 const DEFAULT_REACTION_MAX_COUNT = 5;
 const DEFAULT_REACTION_WINDOW_MS = 5_000;
 const MAX_CLIENT_BUCKETS = 1000;
@@ -23,11 +29,30 @@ export type ServerMessage =
   | { type: 'progress'; positionSec: number; paused: boolean }
   | { type: 'download'; trackId: string; status: string; progress: number; error: string | null }
   | { type: 'lyrics_offset'; trackId: string; offsetMs: number }
-  | { type: 'reaction'; emoji: ReactionEmoji; senderName?: string };
+  | { type: 'reaction'; emoji: ReactionEmoji; senderName?: string }
+  | { type: 'input'; command: KioskCommand; phase: KioskInputPhase; source?: string };
 
 export type ClientMessage =
   | { type: 'progress'; queueId: number; positionSec: number; paused: boolean }
-  | { type: 'reaction'; emoji: ReactionEmoji; senderName?: string; clientId?: string };
+  | { type: 'reaction'; emoji: ReactionEmoji; senderName?: string; clientId?: string }
+  | { type: 'input'; command: KioskCommand; phase?: KioskInputPhase; source?: string };
+
+function isLoopbackRemote(address: string | undefined): boolean {
+  if (!address) return false;
+  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+}
+
+function isLocalInputConnection(req: IncomingMessage | undefined): boolean {
+  if (!req) return false;
+  if (req.headers['x-forwarded-for']) return false;
+  return isLoopbackRemote(req.socket.remoteAddress);
+}
+
+function sanitizeInputSource(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const clean = value.replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, 32);
+  return clean || undefined;
+}
 
 function sanitizeSenderName(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -119,7 +144,8 @@ export function attachRealtime(server: Server, jukebox: Jukebox, options: Realti
   });
   lyrics.on('offset', (trackId, offsetMs) => broadcast({ type: 'lyrics_offset', trackId, offsetMs }));
 
-  wss.on('connection', (socket) => {
+  wss.on('connection', (socket, req) => {
+    const localInputAllowed = isLocalInputConnection(req);
     socket.send(JSON.stringify({ type: 'state', state: queue.state() } satisfies ServerMessage));
     socket.on('message', (raw) => {
       let msg: ClientMessage;
@@ -140,6 +166,19 @@ export function attachRealtime(server: Server, jukebox: Jukebox, options: Realti
           type: 'reaction',
           emoji: msg.emoji as ReactionEmoji,
           ...(senderName ? { senderName } : {}),
+        });
+      } else if (msg.type === 'input') {
+        if (!localInputAllowed) return;
+        const command = typeof msg.command === 'string' ? msg.command.trim().toUpperCase() : '';
+        if (!ALLOWED_KIOSK_COMMANDS.has(command)) return;
+        const phase = msg.phase === undefined ? 'press' : String(msg.phase).trim().toLowerCase();
+        if (!ALLOWED_INPUT_PHASES.has(phase)) return;
+        const source = sanitizeInputSource(msg.source);
+        broadcast({
+          type: 'input',
+          command: command as KioskCommand,
+          phase: phase as KioskInputPhase,
+          ...(source ? { source } : {}),
         });
       }
     });
