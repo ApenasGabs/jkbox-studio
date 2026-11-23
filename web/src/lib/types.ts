@@ -68,10 +68,15 @@ export interface CatalogCategory {
 
 export type AutoDjMode = 'vibe' | 'category' | 'playlist' | 'random';
 
+export type PlaylistSource = 'youtube' | 'spotify';
+
 export interface PlaylistSummary {
   id: string;
   name: string;
   description: string | null;
+  source?: PlaylistSource | null;
+  sourceId?: string | null;
+  thumbnail?: string | null;
   trackCount: number;
   cover: string | null;
   createdAt: number;
@@ -85,6 +90,17 @@ export interface PlaylistTrackResult extends SearchResult {
 }
 
 export interface PlaylistDetail extends PlaylistSummary {
+  tracks: PlaylistTrackResult[];
+}
+
+export interface PlaylistImportResult {
+  playlist: PlaylistSummary;
+  created: boolean;
+  imported: number;
+  alreadyCached: number;
+  queued: number;
+  downloading: number;
+  skipped: number;
   tracks: PlaylistTrackResult[];
 }
 

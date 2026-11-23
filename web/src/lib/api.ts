@@ -15,6 +15,7 @@ import type {
   PlaybackOutput,
   PlaylistDetail,
   PlaylistEnqueueResponse,
+  PlaylistImportResult,
   PlaylistSummary,
   QueueEntry,
   SearchResult,
@@ -146,6 +147,18 @@ export const api = {
       ...(options?.shuffle !== undefined ? { shuffle: options.shuffle } : {}),
       ...(options?.count !== undefined ? { count: options.count } : {}),
     }),
+  importPlaylist: (
+    url: string,
+    requester?: { clientId?: string; name?: string; enqueue?: boolean } | string,
+  ) => {
+    const opts = typeof requester === 'string' ? { name: requester } : (requester ?? {});
+    return post<PlaylistImportResult>('/api/playlists/import', {
+      url,
+      clientId: opts.clientId !== undefined ? opts.clientId : getClientId(),
+      name: opts.name !== undefined ? opts.name : getName(),
+      ...(opts.enqueue !== undefined ? { enqueue: opts.enqueue } : {}),
+    });
+  },
   updateTrackMetadata: (trackId: string, patch: TrackMetadataPatch) =>
     request<Track>(`/api/tracks/${encodeURIComponent(trackId)}/metadata`, {
       method: 'PATCH',

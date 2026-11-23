@@ -2,6 +2,7 @@ import { type FormEvent, useState } from 'react';
 import { api } from '../lib/api';
 import { formatTrackCount } from '../lib/catalog';
 import type { PlaylistSummary } from '../lib/types';
+import { SourceBadge } from './SourceBadge';
 
 interface Props {
   playlists: PlaylistSummary[];
@@ -197,7 +198,10 @@ export function PlaylistManagerPanel({ playlists, onChanged, onToast, onOpenPlay
                 className="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2"
               >
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-semibold text-white">{pl.name}</p>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <p className="truncate text-sm font-semibold text-white">{pl.name}</p>
+                    {pl.source && <SourceBadge source={pl.source} />}
+                  </div>
                   <p className="truncate text-[11px] text-zinc-400">
                     {formatTrackCount(pl.trackCount)}
                     {pl.description ? ` · ${pl.description}` : ''}
