@@ -702,13 +702,13 @@ export function Kiosk() {
       {/* Now playing */}
       <main
         ref={mainRef}
-        className={`relative z-10 flex min-h-0 flex-1 flex-col items-center justify-center gap-4 px-5 pt-4 sm:px-8 lg:gap-4 lg:px-8 lg:pt-20 ${
-          cinemaMode ? 'pb-24 sm:pb-14 lg:pb-14' : 'pb-12 sm:pb-14 lg:pb-14'
+        className={`relative z-10 flex min-h-0 flex-1 flex-col items-center justify-center gap-4 px-5 pt-4 sm:px-8 lg:justify-between lg:gap-3 lg:px-8 lg:pb-3 lg:pt-6 ${
+          cinemaMode ? 'pb-24 sm:pb-14' : 'pb-12 sm:pb-14'
         }`}
       >
-        {/* In the flow on mobile/tablet (never overlaps the cover); pinned to the corners on desktop. */}
+        {/* Always in normal flex flow so central stage controls can never collide with the header. */}
         <div
-          className={`flex w-full flex-wrap items-center justify-between gap-2 transition-opacity duration-300 lg:absolute lg:inset-x-8 lg:top-6 lg:w-auto ${
+          className={`flex w-full shrink-0 flex-wrap items-center justify-between gap-2 transition-opacity duration-300 ${
             controlsHidden ? 'pointer-events-none opacity-0' : 'opacity-100'
           }`}
         >
@@ -786,13 +786,14 @@ export function Kiosk() {
           </div>
         )}
 
-        {current ? (
-          <>
-            <div
-              className={`flex shrink-0 flex-wrap items-center justify-center gap-2 transition-opacity duration-300 ${
-                controlsHidden ? 'pointer-events-none opacity-0' : 'opacity-100'
-              }`}
-            >
+        <div className="flex min-h-0 w-full flex-1 flex-col items-center justify-center gap-4 lg:gap-3 xl:gap-4">
+          {current ? (
+            <>
+              <div
+                className={`flex shrink-0 flex-wrap items-center justify-center gap-2 transition-opacity duration-300 ${
+                  controlsHidden ? 'pointer-events-none opacity-0' : 'opacity-100'
+                }`}
+              >
               <div
                 role="tablist"
                 aria-label="Modo de visualização do palco"
@@ -847,14 +848,20 @@ export function Kiosk() {
 
             {effectiveStageMode === 'cover' ? (
               <>
-                <Cover
-                  src={current.track.thumbnail}
-                  alt={current.track.title}
-                  className={`aspect-square rounded-3xl shadow-2xl shadow-black/60 ${
-                    cinemaMode ? 'w-[min(56vh,84vw)] lg:w-[min(50vh,84vw)]' : 'w-[min(48vh,78vw)] lg:w-[min(44vh,80vw)]'
+                <div
+                  className={`flex items-center justify-center lg:min-h-0 lg:w-full lg:flex-1 ${
+                    cinemaMode ? 'lg:max-h-[min(48vh,460px)]' : 'lg:max-h-[min(42vh,400px)]'
                   }`}
-                />
-                <div className="max-w-3xl text-center">
+                >
+                  <Cover
+                    src={current.track.thumbnail}
+                    alt={current.track.title}
+                    className={`aspect-square rounded-3xl shadow-2xl shadow-black/60 lg:h-full lg:w-auto lg:max-w-full ${
+                      cinemaMode ? 'w-[min(56vh,84vw)]' : 'w-[min(48vh,78vw)]'
+                    }`}
+                  />
+                </div>
+                <div className="max-w-3xl shrink-0 text-center">
                   <h1 className="text-3xl font-bold leading-tight [overflow-wrap:anywhere] sm:text-4xl lg:text-5xl">{current.track.title}</h1>
                   <p className="mt-2 text-xl text-zinc-300">
                     {current.track.artist}
@@ -932,7 +939,7 @@ export function Kiosk() {
             <div
               className={
                 effectiveStageMode === 'video'
-                  ? `relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-3xl border border-white/10 bg-black shadow-2xl shadow-black/60 ${
+                  ? `relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-3xl border border-white/10 bg-black shadow-2xl shadow-black/60 lg:min-h-0 lg:flex-1 ${
                       cinemaMode ? 'max-h-[56vh] max-w-6xl lg:max-h-[54vh]' : 'max-h-[48vh] max-w-4xl lg:max-h-[48vh]'
                     }`
                   : 'pointer-events-none fixed left-0 top-0 h-px w-px overflow-hidden opacity-0'
@@ -1052,6 +1059,7 @@ export function Kiosk() {
             </button>
           </div>
         )}
+        </div>
 
         {holdState && (
           <div
@@ -1076,10 +1084,13 @@ export function Kiosk() {
           </div>
         )}
 
-        {unlocked && !controlsHidden && (
+        {unlocked && (
           <footer
             aria-label="Atalhos de navegação"
-            className="pointer-events-none mt-2 flex w-full max-w-2xl flex-wrap items-center justify-center gap-x-3 gap-y-1 text-center text-[11px] text-zinc-400/85 lg:absolute lg:inset-x-8 lg:bottom-3 lg:mx-auto"
+            aria-hidden={controlsHidden}
+            className={`pointer-events-none mt-2 flex w-full max-w-2xl shrink-0 flex-wrap items-center justify-center gap-x-3 gap-y-1 text-center text-[11px] text-zinc-400/85 transition-opacity duration-300 lg:mx-auto lg:mt-0 ${
+              controlsHidden ? 'opacity-0' : 'opacity-100'
+            }`}
           >
             <span>↑↓←→ Navegar</span>
             <span>·</span>
