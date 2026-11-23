@@ -5,6 +5,7 @@ import { CatalogBrowser } from '../components/CatalogBrowser';
 import { Cover } from '../components/Cover';
 import { GenreBadges } from '../components/GenreBadges';
 import { LyricsView } from '../components/LyricsView';
+import { MdnsHostnamePanel } from '../components/MdnsHostnamePanel';
 import { PlaylistManagerPanel } from '../components/PlaylistManagerPanel';
 import { QueueList } from '../components/QueueList';
 import { SourceBadge } from '../components/SourceBadge';
@@ -23,7 +24,7 @@ import {
   type PlaylistPickerTrack,
   playlistTrackFromTrack,
 } from '../lib/catalog';
-import { cssImageUrl, formatTime, isLoopback, remoteUrl } from '../lib/format';
+import { cssImageUrl, formatTime, isLoopback, resolveRemoteQrUrl } from '../lib/format';
 import { activateFocusedElement, findNextSpatialCandidate, getFocusableElements } from '../lib/spatialNav';
 import { formatSpotifyOutputBadge } from '../lib/spotifyConnect';
 import type {
@@ -31,6 +32,7 @@ import type {
   AutoDjMode,
   CatalogCategory,
   KioskCommand,
+  MdnsStatus,
   PlaybackOutput,
   PlaylistSummary,
   QueueEntry,
@@ -105,7 +107,7 @@ function youtubeEmbedUrl(youtubeId: string, startSec: number, autoplay: boolean)
 }
 
 export function Kiosk() {
-  const { state, playbackOutput, position, downloads, lyricsOffset, reactions, notice, connected, send, subscribeInput } = useJukebox();
+  const { state, playbackOutput, position, downloads, lyricsOffset, mdns, setMdns, reactions, notice, connected, send, subscribeInput } = useJukebox();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [unlocked, setUnlocked] = useState(false);
   const [playing, setPlaying] = useState(false);
@@ -193,6 +195,13 @@ export function Kiosk() {
   );
 
   const refreshConfig = useCallback(() => api.config().then(setConfig).catch(() => {}), []);
+  const handleMdnsUpdated = useCallback(
+    (nextMdns: MdnsStatus) => {
+      setMdns(nextMdns);
+      setConfig((prev) => (prev ? { ...prev, mdns: nextMdns } : prev));
+    },
+    [setMdns],
+  );
 
   useEffect(() => {
     refreshConfig();
@@ -439,7 +448,9 @@ export function Kiosk() {
     void persistLyricsOffset(0);
   };
 
-  const url = remoteUrl(config?.publicUrl ?? null);
+  const liveMdns = mdns ?? config?.mdns ?? null;
+  const effectiveConfig = config ? { ...config, mdns: liveMdns } : null;
+  const url = resolveRemoteQrUrl(config, liveMdns);
   const effectiveDuration = isSpotifyOutput ? current?.track.durationSec || 0 : time.duration || current?.track.durationSec || 0;
   const progressPct = effectiveDuration > 0 ? Math.min(100, (effectiveCurrentSec / effectiveDuration) * 100) : 0;
   const remainingSec = effectiveDuration > 0 ? Math.max(0, effectiveDuration - effectiveCurrentSec) : Number.POSITIVE_INFINITY;
@@ -577,12 +588,34 @@ export function Kiosk() {
     if (!dpadActiveRef.current) return;
     const raf = window.requestAnimationFrame(() => {
       const candidates = getActiveScopeElements();
-      if (!focusedElRef.current || !candidates.includes(focusedElRef.current)) {
+      if (!focusedElRef.current || !focusedElRef.current.isConnected || !candidates.includes(focusedElRef.current)) {
         focusDefaultInScope();
       }
     });
     return () => window.cancelAnimationFrame(raf);
   }, [activeScope, catalogHistory, catalogTab, current?.id, cinemaMode, getActiveScopeElements, focusDefaultInScope]);
+
+  useEffect(() => {
+    const root = kioskRef.current;
+    if (!root || typeof MutationObserver === 'undefined') return;
+    let scheduled = false;
+    const observer = new MutationObserver(() => {
+      if (!dpadActiveRef.current || scheduled) return;
+      const currentEl = focusedElRef.current;
+      if (currentEl && !currentEl.isConnected) {
+        scheduled = true;
+        queueMicrotask(() => {
+          scheduled = false;
+          if (!dpadActiveRef.current) return;
+          if (focusedElRef.current && !focusedElRef.current.isConnected) {
+            focusDefaultInScope();
+          }
+        });
+      }
+    });
+    observer.observe(root, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [focusDefaultInScope]);
 
   useEffect(() => {
     const onFullscreenChange = () => setIsFullscreen(Boolean(document.fullscreenElement));
@@ -672,18 +705,21 @@ export function Kiosk() {
       if (command === 'PLAY') {
         if (current) {
           togglePlay();
-        } else if (focusedElRef.current && getActiveScopeElements().includes(focusedElRef.current)) {
-          activateFocusedElement(focusedElRef.current);
+        } else {
+          const candidates = getActiveScopeElements();
+          const currentEl = focusedElRef.current;
+          const target =
+            currentEl && currentEl.isConnected && candidates.includes(currentEl) ? currentEl : focusDefaultInScope();
+          activateFocusedElement(target);
         }
         return;
       }
 
       if (command === 'SELECT') {
         const candidates = getActiveScopeElements();
+        const currentEl = focusedElRef.current;
         const target =
-          focusedElRef.current && candidates.includes(focusedElRef.current)
-            ? focusedElRef.current
-            : focusDefaultInScope();
+          currentEl && currentEl.isConnected && candidates.includes(currentEl) ? currentEl : focusDefaultInScope();
         activateFocusedElement(target);
         return;
       }
@@ -692,7 +728,7 @@ export function Kiosk() {
       const candidates = getActiveScopeElements();
       if (candidates.length === 0) return;
       const currentEl = focusedElRef.current;
-      if (!currentEl || !candidates.includes(currentEl)) {
+      if (!currentEl || !currentEl.isConnected || !candidates.includes(currentEl)) {
         focusDefaultInScope();
         return;
       }
@@ -1315,7 +1351,7 @@ export function Kiosk() {
         <HostPanel
           panelRef={hostDialogRef}
           remoteUrl={url}
-          config={config}
+          config={effectiveConfig}
           playbackOutput={playbackOutput}
           spotifyVolume={spotifyVolume}
           onSpotifyVolumeChange={setSpotifyVolume}
@@ -1349,6 +1385,7 @@ export function Kiosk() {
           onCatalogChanged={() => setCatalogReloadKey((k) => k + 1)}
           onClose={() => setSettingsOpen(false)}
           onChanged={refreshConfig}
+          onMdnsUpdated={handleMdnsUpdated}
           run={run}
         />
       )}
@@ -1497,6 +1534,7 @@ interface HostPanelProps {
   onCatalogChanged: () => void;
   onClose: () => void;
   onChanged: () => void;
+  onMdnsUpdated: (mdns: MdnsStatus) => void;
   run: RunFn;
 }
 
@@ -1528,6 +1566,7 @@ function HostPanel({
   onCatalogChanged,
   onClose,
   onChanged,
+  onMdnsUpdated,
   run,
 }: HostPanelProps) {
   const [pin, setPin] = useState(getHostPin());
@@ -1546,23 +1585,29 @@ function HostPanel({
   const activePlaylistId = config?.autoDjPlaylistId ?? '';
   const activeCategoryObj = categories.find((c) => c.name.toLowerCase() === activeCategoryName.toLowerCase());
 
-  const loadCategories = useCallback(() => {
+  const loadCategories = useCallback((signal?: AbortSignal) => {
     api
-      .catalogCategories()
-      .then((res) => setCategories(res.categories))
+      .catalogCategories(signal)
+      .then((res) => {
+        if (!signal?.aborted) setCategories(res.categories);
+      })
       .catch(() => {});
   }, []);
 
-  const loadPlaylists = useCallback(() => {
+  const loadPlaylists = useCallback((signal?: AbortSignal) => {
     api
-      .playlists()
-      .then((res) => setPlaylists(res.playlists))
+      .playlists(undefined, signal)
+      .then((res) => {
+        if (!signal?.aborted) setPlaylists(res.playlists);
+      })
       .catch(() => {});
   }, []);
 
   useEffect(() => {
-    loadCategories();
-    loadPlaylists();
+    const controller = new AbortController();
+    loadCategories(controller.signal);
+    loadPlaylists(controller.signal);
+    return () => controller.abort();
   }, [loadCategories, loadPlaylists, reloadKey]);
 
   return (
@@ -1597,6 +1642,8 @@ function HostPanel({
             <p className="text-xs text-accent-2 [overflow-wrap:anywhere]">{qrUrl}</p>
           </div>
         </section>
+
+        <MdnsHostnamePanel mdns={config?.mdns} onUpdated={onMdnsUpdated} onToast={onToast} />
 
         {config?.hostPinRequired && (
           <section className="glass flex flex-col gap-2 p-4">
@@ -1699,51 +1746,51 @@ function HostPanel({
                   onClick={() => {
                     if (!config) return;
                     if (option.id === 'category') {
-                      setPickingPlaylist(false);
                       const targetCat = activeCategoryName || categories[0]?.name || '';
                       if (!targetCat) {
+                        setPickingPlaylist(false);
                         setPickingCategory(true);
                         onToast('Nenhuma categoria no acervo ainda — auto-categorize ou edite uma faixa.', true);
                         return;
                       }
-                      setPickingCategory(true);
-                      void run(
-                        () =>
-                          api.updateAutoDjConfig({
-                            mode: 'category',
-                            category: targetCat,
-                            subgenre: activeCategoryName ? activeSubcategoryName || null : null,
-                          }),
-                        `Auto-DJ travado em ${targetCat}`,
-                      ).then(onChanged);
+                      void run(async () => {
+                        await api.updateAutoDjConfig({
+                          mode: 'category',
+                          category: targetCat,
+                          subgenre: activeCategoryName ? activeSubcategoryName || null : null,
+                        });
+                        setPickingPlaylist(false);
+                        setPickingCategory(true);
+                        onChanged();
+                      }, `Auto-DJ travado em ${targetCat}`);
                       return;
                     }
                     if (option.id === 'playlist') {
-                      setPickingCategory(false);
                       const targetPlaylist =
                         playlists.find((p) => p.id === activePlaylistId) ?? playlists[0] ?? null;
                       if (!targetPlaylist) {
+                        setPickingCategory(false);
                         setPickingPlaylist(true);
                         onToast('Nenhuma playlist interna criada ainda — crie uma abaixo.', true);
                         return;
                       }
-                      setPickingPlaylist(true);
-                      void run(
-                        () =>
-                          api.updateAutoDjConfig({
-                            mode: 'playlist',
-                            playlistId: targetPlaylist.id,
-                          }),
-                        `Auto-DJ travado na playlist ${targetPlaylist.name}`,
-                      ).then(onChanged);
+                      void run(async () => {
+                        await api.updateAutoDjConfig({
+                          mode: 'playlist',
+                          playlistId: targetPlaylist.id,
+                        });
+                        setPickingCategory(false);
+                        setPickingPlaylist(true);
+                        onChanged();
+                      }, `Auto-DJ travado na playlist ${targetPlaylist.name}`);
                       return;
                     }
-                    setPickingCategory(false);
-                    setPickingPlaylist(false);
-                    void run(
-                      () => api.updateAutoDjConfig({ mode: option.id }),
-                      `Modo Auto-DJ: ${option.label}`,
-                    ).then(onChanged);
+                    void run(async () => {
+                      await api.updateAutoDjConfig({ mode: option.id });
+                      setPickingCategory(false);
+                      setPickingPlaylist(false);
+                      onChanged();
+                    }, `Modo Auto-DJ: ${option.label}`);
                   }}
                   className={`flex flex-col rounded-xl border px-3 py-2 text-left transition ${
                     selected

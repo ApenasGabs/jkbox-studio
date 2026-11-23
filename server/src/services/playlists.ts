@@ -87,12 +87,39 @@ const SUMMARY_SELECT = `
   LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
 `;
 
+function isSqliteConstraintError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { code?: unknown; errcode?: unknown; message?: unknown };
+  if (typeof e.code === 'string' && e.code.startsWith('SQLITE_CONSTRAINT')) return true;
+  if (typeof e.errcode === 'number' && (e.errcode & 0xff) === 19) return true;
+  return (
+    typeof e.message === 'string' &&
+    /UNIQUE constraint failed|PRIMARY KEY constraint failed|SQLITE_CONSTRAINT/i.test(e.message)
+  );
+}
+
 /** Manages internal themed playlists and their N:N relationship with tracks. */
 export class PlaylistRepository {
   constructor(
     private readonly db: Db,
     private readonly tracks: TrackRepository,
   ) {}
+
+  private runInTransaction<T>(fn: () => T): T {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = fn();
+      this.db.exec('COMMIT');
+      return result;
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        // Ignore rollback failure when no transaction is active.
+      }
+      throw err;
+    }
+  }
 
   list(trackId?: string): PlaylistSummary[] {
     const rows = this.db
@@ -149,42 +176,60 @@ export class PlaylistRepository {
   create(input: { name: unknown; description?: unknown }): PlaylistSummary {
     const name = normalizeName(input.name);
     const description = normalizeDescription(input.description);
-    const existing = this.findByName(name);
-    if (existing) {
-      throw new PlaylistError('Já existe uma playlist com esse nome', 409);
-    }
-    const id = randomUUID();
-    const now = Date.now();
-    this.db
-      .prepare('INSERT INTO playlists (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
-      .run(id, name, description, now, now);
-    return this.get(id)!;
+    return this.runInTransaction(() => {
+      const existing = this.findByName(name);
+      if (existing) {
+        throw new PlaylistError('Já existe uma playlist com esse nome', 409);
+      }
+      const id = randomUUID();
+      const now = Date.now();
+      try {
+        this.db
+          .prepare('INSERT INTO playlists (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+          .run(id, name, description, now, now);
+      } catch (err) {
+        if (isSqliteConstraintError(err)) {
+          throw new PlaylistError('Já existe uma playlist com esse nome', 409);
+        }
+        throw err;
+      }
+      return this.get(id)!;
+    });
   }
 
   update(id: string, input: { name?: unknown; description?: unknown }): PlaylistSummary {
-    const current = this.get(id);
-    if (!current) throw new PlaylistError('Playlist não encontrada', 404);
-
     const hasName = input.name !== undefined;
     const hasDesc = input.description !== undefined;
     if (!hasName && !hasDesc) {
       throw new PlaylistError('Nenhuma alteração informada', 400);
     }
 
-    const nextName = hasName ? normalizeName(input.name) : current.name;
-    const nextDescription = hasDesc ? normalizeDescription(input.description) : current.description;
+    return this.runInTransaction(() => {
+      const current = this.get(id);
+      if (!current) throw new PlaylistError('Playlist não encontrada', 404);
 
-    if (hasName) {
-      const conflict = this.findByName(nextName, current.id);
-      if (conflict) {
-        throw new PlaylistError('Já existe outra playlist com esse nome', 409);
+      const nextName = hasName ? normalizeName(input.name) : current.name;
+      const nextDescription = hasDesc ? normalizeDescription(input.description) : current.description;
+
+      if (hasName) {
+        const conflict = this.findByName(nextName, current.id);
+        if (conflict) {
+          throw new PlaylistError('Já existe outra playlist com esse nome', 409);
+        }
       }
-    }
 
-    this.db
-      .prepare('UPDATE playlists SET name = ?, description = ?, updated_at = ? WHERE id = ?')
-      .run(nextName, nextDescription, Date.now(), current.id);
-    return this.get(current.id)!;
+      try {
+        this.db
+          .prepare('UPDATE playlists SET name = ?, description = ?, updated_at = ? WHERE id = ?')
+          .run(nextName, nextDescription, Date.now(), current.id);
+      } catch (err) {
+        if (isSqliteConstraintError(err)) {
+          throw new PlaylistError('Já existe outra playlist com esse nome', 409);
+        }
+        throw err;
+      }
+      return this.get(current.id)!;
+    });
   }
 
   delete(id: string): boolean {
@@ -195,47 +240,65 @@ export class PlaylistRepository {
   }
 
   addTrack(playlistId: string, rawTrackId: unknown): { added: boolean; duplicate: boolean; playlist: PlaylistSummary } {
-    const playlist = this.get(playlistId);
-    if (!playlist) throw new PlaylistError('Playlist não encontrada', 404);
     if (typeof rawTrackId !== 'string' || !rawTrackId.trim()) {
       throw new PlaylistError('trackId obrigatório', 400);
     }
     const trackId = rawTrackId.trim();
-    const track = this.tracks.get(trackId);
-    if (!track) throw new PlaylistError('Faixa não encontrada', 404);
 
-    const existing = this.db
-      .prepare('SELECT 1 FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?')
-      .get(playlist.id, track.id);
-    if (existing) {
-      return { added: false, duplicate: true, playlist };
-    }
+    return this.runInTransaction(() => {
+      const playlist = this.get(playlistId);
+      if (!playlist) throw new PlaylistError('Playlist não encontrada', 404);
+      const track = this.tracks.get(trackId);
+      if (!track) throw new PlaylistError('Faixa não encontrada', 404);
 
-    const maxRow = this.db
-      .prepare('SELECT COALESCE(MAX(position), 0) AS maxPos FROM playlist_tracks WHERE playlist_id = ?')
-      .get(playlist.id) as { maxPos: number };
-    const now = Date.now();
-    this.db
-      .prepare('INSERT INTO playlist_tracks (playlist_id, track_id, position, added_at) VALUES (?, ?, ?, ?)')
-      .run(playlist.id, track.id, maxRow.maxPos + 1, now);
-    this.db.prepare('UPDATE playlists SET updated_at = ? WHERE id = ?').run(now, playlist.id);
-    return { added: true, duplicate: false, playlist: this.get(playlist.id)! };
+      const existing = this.db
+        .prepare('SELECT 1 FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?')
+        .get(playlist.id, track.id);
+      if (existing) {
+        return { added: false, duplicate: true, playlist };
+      }
+
+      const maxRow = this.db
+        .prepare('SELECT COALESCE(MAX(position), 0) AS maxPos FROM playlist_tracks WHERE playlist_id = ?')
+        .get(playlist.id) as { maxPos: number };
+      const now = Date.now();
+      try {
+        this.db
+          .prepare('INSERT INTO playlist_tracks (playlist_id, track_id, position, added_at) VALUES (?, ?, ?, ?)')
+          .run(playlist.id, track.id, maxRow.maxPos + 1, now);
+      } catch (err) {
+        if (isSqliteConstraintError(err)) {
+          const alreadyInserted = this.db
+            .prepare('SELECT 1 FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?')
+            .get(playlist.id, track.id);
+          if (alreadyInserted) {
+            return { added: false, duplicate: true, playlist: this.get(playlist.id)! };
+          }
+          throw new PlaylistError('Não foi possível vincular a faixa à playlist', 409);
+        }
+        throw err;
+      }
+      this.db.prepare('UPDATE playlists SET updated_at = ? WHERE id = ?').run(now, playlist.id);
+      return { added: true, duplicate: false, playlist: this.get(playlist.id)! };
+    });
   }
 
   removeTrack(playlistId: string, rawTrackId: unknown): void {
-    const playlist = this.get(playlistId);
-    if (!playlist) throw new PlaylistError('Playlist não encontrada', 404);
     if (typeof rawTrackId !== 'string' || !rawTrackId.trim()) {
       throw new PlaylistError('trackId obrigatório', 400);
     }
     const trackId = rawTrackId.trim();
-    const result = this.db
-      .prepare('DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?')
-      .run(playlist.id, trackId);
-    if (result.changes === 0) {
-      throw new PlaylistError('Faixa não encontrada nesta playlist', 404);
-    }
-    this.db.prepare('UPDATE playlists SET updated_at = ? WHERE id = ?').run(Date.now(), playlist.id);
+    this.runInTransaction(() => {
+      const playlist = this.get(playlistId);
+      if (!playlist) throw new PlaylistError('Playlist não encontrada', 404);
+      const result = this.db
+        .prepare('DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?')
+        .run(playlist.id, trackId);
+      if (result.changes === 0) {
+        throw new PlaylistError('Faixa não encontrada nesta playlist', 404);
+      }
+      this.db.prepare('UPDATE playlists SET updated_at = ? WHERE id = ?').run(Date.now(), playlist.id);
+    });
   }
 
   private findByName(name: string, excludeId?: string): { id: string } | undefined {

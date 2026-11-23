@@ -1,4 +1,4 @@
-import { type FormEvent, useCallback, useEffect, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { formatTrackCount, type PlaylistPickerTrack } from '../lib/catalog';
 import type { PlaylistSummary } from '../lib/types';
@@ -18,33 +18,50 @@ export function AddToPlaylistModal({ track, onClose, onChanged, onToast }: Props
   const [newName, setNewName] = useState('');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const activeTrackIdRef = useRef<string | null>(null);
+  const loadControllerRef = useRef<AbortController | null>(null);
 
-  const load = useCallback(
-    async (signal?: AbortSignal) => {
-      if (!track) return;
-      setLoading(true);
-      setError(null);
-      try {
-        const res = await api.playlists(track.id, signal);
-        setPlaylists(res.playlists);
-      } catch (err) {
-        if ((err as Error).name !== 'AbortError') {
-          setError((err as Error).message);
-        }
-      } finally {
-        if (!signal?.aborted) setLoading(false);
+  const load = useCallback(async (targetTrackId: string) => {
+    loadControllerRef.current?.abort();
+    const controller = new AbortController();
+    loadControllerRef.current = controller;
+    const { signal } = controller;
+
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await api.playlists(targetTrackId, signal);
+      if (signal.aborted || activeTrackIdRef.current !== targetTrackId) return;
+      setPlaylists(res.playlists);
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError' && !signal.aborted && activeTrackIdRef.current === targetTrackId) {
+        setError((err as Error).message);
       }
-    },
-    [track],
-  );
+    } finally {
+      if (!signal.aborted && activeTrackIdRef.current === targetTrackId) {
+        setLoading(false);
+      }
+      if (loadControllerRef.current === controller) {
+        loadControllerRef.current = null;
+      }
+    }
+  }, []);
 
   useEffect(() => {
+    activeTrackIdRef.current = track?.id ?? null;
+    loadControllerRef.current?.abort();
+    loadControllerRef.current = null;
+    setBusyId(null);
+    setCreating(false);
     if (!track) return;
     setNewName('');
     setError(null);
-    const controller = new AbortController();
-    void load(controller.signal);
-    return () => controller.abort();
+    void load(track.id);
+    return () => {
+      activeTrackIdRef.current = null;
+      loadControllerRef.current?.abort();
+      loadControllerRef.current = null;
+    };
   }, [track, load]);
 
   useEffect(() => {
@@ -59,29 +76,32 @@ export function AddToPlaylistModal({ track, onClose, onChanged, onToast }: Props
   if (!track) return null;
 
   const togglePlaylist = async (playlist: PlaylistSummary) => {
+    const targetTrackId = track.id;
     setBusyId(playlist.id);
     setError(null);
     try {
       if (playlist.containsTrack) {
-        await api.removeTrackFromPlaylist(playlist.id, track.id);
+        await api.removeTrackFromPlaylist(playlist.id, targetTrackId);
         onToast(`Removida de "${playlist.name}"`);
       } else {
-        await api.addTrackToPlaylist(playlist.id, track.id);
+        await api.addTrackToPlaylist(playlist.id, targetTrackId);
         onToast(`Adicionada em "${playlist.name}"`);
       }
-      await load();
       onChanged();
+      if (activeTrackIdRef.current !== targetTrackId) return;
+      await load(targetTrackId);
     } catch (err) {
       const msg = (err as Error).message;
-      setError(msg);
+      if (activeTrackIdRef.current === targetTrackId) setError(msg);
       onToast(msg, true);
     } finally {
-      setBusyId(null);
+      if (activeTrackIdRef.current === targetTrackId) setBusyId(null);
     }
   };
 
   const handleCreateAndAdd = async (e: FormEvent) => {
     e.preventDefault();
+    const targetTrackId = track.id;
     const trimmed = newName.trim();
     if (!trimmed) {
       setError('Informe um nome para a nova playlist.');
@@ -91,17 +111,18 @@ export function AddToPlaylistModal({ track, onClose, onChanged, onToast }: Props
     setError(null);
     try {
       const created = await api.createPlaylist({ name: trimmed });
-      await api.addTrackToPlaylist(created.id, track.id);
-      setNewName('');
+      await api.addTrackToPlaylist(created.id, targetTrackId);
       onToast(`Playlist "${created.name}" criada com a faixa`);
-      await load();
       onChanged();
+      if (activeTrackIdRef.current !== targetTrackId) return;
+      setNewName('');
+      await load(targetTrackId);
     } catch (err) {
       const msg = (err as Error).message;
-      setError(msg);
+      if (activeTrackIdRef.current === targetTrackId) setError(msg);
       onToast(msg, true);
     } finally {
-      setCreating(false);
+      if (activeTrackIdRef.current === targetTrackId) setCreating(false);
     }
   };
 
@@ -133,7 +154,6 @@ export function AddToPlaylistModal({ track, onClose, onChanged, onToast }: Props
           </div>
           <button
             type="button"
-            data-kiosk-default={playlists.length === 0 ? 'true' : undefined}
             onClick={onClose}
             disabled={creating || Boolean(busyId)}
             aria-label="Fechar"
@@ -194,6 +214,7 @@ export function AddToPlaylistModal({ track, onClose, onChanged, onToast }: Props
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
               maxLength={80}
+              data-kiosk-default={playlists.length === 0 ? 'true' : undefined}
               placeholder="Ex.: Churrasco, Festa, Esquenta"
               className="min-w-0 flex-1 rounded-xl bg-white/10 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-accent"
             />

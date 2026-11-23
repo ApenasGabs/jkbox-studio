@@ -108,7 +108,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     readonly spotify: SpotifyService,
     readonly lyrics: LyricsService,
     private readonly log: (msg: string) => void = console.log,
-    private readonly settings?: Settings,
+    readonly settings?: Settings,
     readonly classifier?: ClassifierService,
     readonly playlists?: PlaylistRepository,
   ) {
@@ -863,15 +863,25 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     let enqueued = 0;
     let duplicates = 0;
     const queuedItems: QueueEntryView[] = [];
+    const tracksToSync: Track[] = [];
     for (const entry of selected) {
       const outcome = this.enqueue({
         result: this.trackToResult(entry.track),
         requesterId,
         requesterName,
+        syncSpotify: false,
       });
       if (outcome.duplicate) duplicates += 1;
-      else enqueued += 1;
+      else {
+        enqueued += 1;
+        const freshTrack = this.tracks.get(entry.track.id);
+        if (freshTrack) tracksToSync.push(freshTrack);
+      }
       queuedItems.push(outcome.item);
+    }
+
+    if (tracksToSync.length > 0 && this.spotify.connected) {
+      void this.syncBatchToSpotify(tracksToSync);
     }
 
     return {
@@ -882,6 +892,25 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       duplicates,
       items: queuedItems,
     };
+  }
+
+  /** Mirrors a batch of newly enqueued playlist tracks to Spotify without concurrent bursts. */
+  private async syncBatchToSpotify(tracks: Track[]): Promise<void> {
+    if (!this.spotify.connected || tracks.length === 0) return;
+    try {
+      const uris: string[] = [];
+      for (const track of tracks) {
+        let uri = track.spotifyUri;
+        if (!uri) {
+          const [match] = await this.spotify.search(`${track.title} ${track.artist}`.trim(), 1);
+          uri = match?.spotifyUri ?? null;
+        }
+        if (uri) uris.push(uri);
+      }
+      if (uris.length > 0) await this.spotify.addToPlaylist(uris);
+    } catch (err) {
+      this.log(`[spotify] falha ao sincronizar playlist em lote: ${errorMessage(err)}`);
+    }
   }
 
   /** Best-effort: mirror enqueued songs into the shared Spotify playlist. */

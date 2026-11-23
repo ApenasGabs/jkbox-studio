@@ -24,6 +24,7 @@ describe('Phase 2 Etapa 3 OS scripts & manifests', () => {
       'os/jkbox-usb-mount.sh',
       'os/jkbox-wifi-fallback.sh',
       'os/jkbox-kiosk-browser.sh',
+      'os/jkbox-hostname.sh',
     ];
     for (const rel of scripts) {
       const full = path.join(REPO_ROOT, rel);
@@ -52,6 +53,24 @@ describe('Phase 2 Etapa 3 OS scripts & manifests', () => {
         'short',
       ]),
     ).rejects.toThrow();
+
+    await expect(
+      execFileAsync('bash', [path.join(REPO_ROOT, 'os', 'install-kiosk.sh'), '--dry-run', '--hostname', 'a']),
+    ).rejects.toThrow();
+
+    await expect(
+      execFileAsync('bash', [path.join(REPO_ROOT, 'os', 'install-kiosk.sh'), '--dry-run', '--hostname', '-bad']),
+    ).rejects.toThrow();
+
+    const { stdout: normalizedOut } = await execFileAsync('bash', [
+      path.join(REPO_ROOT, 'os', 'install-kiosk.sh'),
+      '--dry-run',
+      '--hostname',
+      'Gabisa.local',
+      '--port',
+      '3000',
+    ]);
+    expect(normalizedOut).toContain('http://gabisa.local:3000');
   });
 
   it('automounts USB drive read-only into /data/music/usb-* and triggers /api/library/rescan with HOST_PIN', async () => {
@@ -207,5 +226,13 @@ exit 0
     expect(buttonsCfg.profiles['zero-delay-arcade']).toBeTruthy();
     expect(readme).toContain('--calibrate');
     expect(readme).toContain('/data/music/usb-');
+  });
+
+  it('rejects invalid or command-injection hostnames in os/jkbox-hostname.sh', async () => {
+    const script = path.join(REPO_ROOT, 'os', 'jkbox-hostname.sh');
+    for (const bad of ['', 'a', '-bad', 'bad-', 'foo;id', 'foo$(whoami)', 'sub.domain']) {
+      await expect(execFileAsync('bash', [script, bad])).rejects.toThrow();
+    }
+    await expect(execFileAsync('bash', [script])).rejects.toThrow();
   });
 });

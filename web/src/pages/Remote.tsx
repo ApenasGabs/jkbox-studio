@@ -4,6 +4,7 @@ import { CatalogBrowser } from '../components/CatalogBrowser';
 import { Cover } from '../components/Cover';
 import { GenreBadges } from '../components/GenreBadges';
 import { LyricsView } from '../components/LyricsView';
+import { MdnsHostnamePanel } from '../components/MdnsHostnamePanel';
 import { PlaylistManagerPanel } from '../components/PlaylistManagerPanel';
 import { QueueList } from '../components/QueueList';
 import { SourceBadge } from '../components/SourceBadge';
@@ -73,7 +74,7 @@ function formatPlayedAt(finishedAt: number | null | undefined): string | null {
 }
 
 export function Remote() {
-  const { state, playbackOutput, position, downloads, lyricsOffset, notice, connected, send } = useJukebox();
+  const { state, playbackOutput, position, downloads, lyricsOffset, mdns, setMdns, notice, connected, send } = useJukebox();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [view, setView] = useState<'search' | 'queue' | 'lyrics' | 'history'>('search');
   const [name, setNameState] = useState(getName());
@@ -149,17 +150,20 @@ export function Remote() {
     };
   }, []);
 
-  const loadHostPlaylists = useCallback(() => {
+  const loadHostPlaylists = useCallback((signal?: AbortSignal) => {
     api
-      .playlists()
-      .then((res) => setHostPlaylists(res.playlists))
+      .playlists(undefined, signal)
+      .then((res) => {
+        if (!signal?.aborted) setHostPlaylists(res.playlists);
+      })
       .catch(() => {});
   }, []);
 
   useEffect(() => {
-    if (hostPanelOpen && canEditMetadata) {
-      loadHostPlaylists();
-    }
+    if (!hostPanelOpen || !canEditMetadata) return;
+    const controller = new AbortController();
+    loadHostPlaylists(controller.signal);
+    return () => controller.abort();
   }, [hostPanelOpen, canEditMetadata, catalogReloadKey, loadHostPlaylists]);
 
   const loadHistory = useCallback(async () => {
@@ -908,6 +912,14 @@ export function Remote() {
                 setCatalogTab('playlists');
                 setCatalogHistory([{ kind: 'root' }]);
               }}
+            />
+            <MdnsHostnamePanel
+              mdns={mdns ?? config?.mdns}
+              onUpdated={(nextMdns) => {
+                setMdns(nextMdns);
+                setConfig((prev) => (prev ? { ...prev, mdns: nextMdns } : prev));
+              }}
+              onToast={toast.show}
             />
           </div>
         </div>

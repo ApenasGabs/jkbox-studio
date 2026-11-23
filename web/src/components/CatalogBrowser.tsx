@@ -125,14 +125,16 @@ export function CatalogBrowser({
   };
 
   useEffect(() => {
-    const controller = new AbortController();
-    const { signal } = controller;
     const categoryKey = route.kind === 'category' ? (route.uncategorized ? '__uncategorized__' : route.name) : null;
     if (prevCategoryKeyRef.current !== categoryKey) {
       prevCategoryKeyRef.current = categoryKey;
       setDetailSubcategories([]);
       if (route.kind === 'category') setDetailTracks([]);
     }
+    if (route.kind === 'root' && (tab === 'albums' || tab === 'all')) return;
+
+    const controller = new AbortController();
+    const { signal } = controller;
 
     const load = async () => {
       setLoading(true);
@@ -173,7 +175,7 @@ export function CatalogBrowser({
           return;
         }
 
-        // Root sub-tabs
+        // Root sub-tabs with local filtering
         if (tab === 'categories') {
           const [catRes, libRes] = await Promise.all([api.catalogCategories(signal), api.library('', signal)]);
           const uncat = splitUncategorizedTracks(libRes.results);
@@ -184,12 +186,35 @@ export function CatalogBrowser({
           const res = await api.playlists(undefined, signal);
           setPlaylists(res.playlists);
           onPlaylistsLoaded?.(res.playlists);
-        } else if (tab === 'albums') {
-          const res = await api.catalogAlbums({ q: filterQuery }, signal);
-          setAlbums(res.albums);
         } else if (tab === 'artists') {
           const res = await api.catalogArtists(signal);
           setArtists(res.artists);
+        }
+      } catch (err) {
+        if ((err as Error).name !== 'AbortError') {
+          setError((err as Error).message);
+        }
+      } finally {
+        if (!signal.aborted) setLoading(false);
+      }
+    };
+
+    void load();
+    return () => controller.abort();
+  }, [route, tab, reloadKey]);
+
+  useEffect(() => {
+    if (route.kind !== 'root' || (tab !== 'albums' && tab !== 'all')) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+
+    const load = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        if (tab === 'albums') {
+          const res = await api.catalogAlbums({ q: filterQuery }, signal);
+          setAlbums(res.albums);
         } else {
           const q = karaoke ? applyKaraokeFilter(filterQuery, true) : filterQuery;
           const res = await api.library(q, signal);
@@ -206,7 +231,7 @@ export function CatalogBrowser({
 
     void load();
     return () => controller.abort();
-  }, [route, tab, filterQuery, karaoke, reloadKey]);
+  }, [route.kind, tab, filterQuery, karaoke, reloadKey]);
 
   const filterTracksLocally = (items: SearchResult[]) => {
     if (!normalizedFilter) return items;
@@ -309,7 +334,13 @@ export function CatalogBrowser({
     const key = `${result.source}:${result.sourceId}`;
     const editable = canEditMetadata ? editableFromResult(result) : null;
     const playlistTrack = canEditMetadata && onAddToPlaylist ? playlistTrackFromResult(result) : null;
-    const orderNum = showTrackNumber ? (result.trackNumber ?? (index != null ? index + 1 : null)) : null;
+    const orderNum = showTrackNumber
+      ? removePlaylistId
+        ? index != null
+          ? index + 1
+          : null
+        : (result.trackNumber ?? (index != null ? index + 1 : null))
+      : null;
 
     return (
       <li key={key} className="flex items-center gap-2.5 rounded-xl bg-white/5 p-2 sm:gap-3">
@@ -725,7 +756,9 @@ export function CatalogBrowser({
           ) : (
             (() => {
               const totalSec = playlistDetail.tracks.reduce((sum, t) => sum + (t.durationSec ?? 0), 0);
-              const filtered = filterTracksLocally(playlistDetail.tracks);
+              const indexedTracks = playlistDetail.tracks.map((item, idx) => ({ item, playlistIndex: idx }));
+              const filteredSet = new Set(filterTracksLocally(playlistDetail.tracks));
+              const filtered = indexedTracks.filter(({ item }) => filteredSet.has(item));
               const triggerPlaylistEnqueue = async (shuffle: boolean) => {
                 if (!onAddPlaylist) return;
                 setAddingPlaylistMode(shuffle ? 'shuffle' : 'order');
@@ -890,7 +923,9 @@ export function CatalogBrowser({
                     </div>
                   ) : (
                     <ol className="flex flex-col gap-2">
-                      {filtered.map((item, idx) => renderTrackRow(item, idx, true, playlistDetail.id))}
+                      {filtered.map(({ item, playlistIndex }) =>
+                        renderTrackRow(item, playlistIndex, true, playlistDetail.id),
+                      )}
                     </ol>
                   )}
                 </>

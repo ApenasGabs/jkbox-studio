@@ -129,8 +129,9 @@ if ! printf '%s' "$JKBOX_USER" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$'; then
   exit 2
 fi
 
-if ! printf '%s' "$JKBOX_HOSTNAME" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$'; then
-  err "Hostname inválido: ${JKBOX_HOSTNAME}"
+JKBOX_HOSTNAME="$(printf '%s' "$JKBOX_HOSTNAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/\.local\.?$//')"
+if [ "${#JKBOX_HOSTNAME}" -lt 2 ] || [ "${#JKBOX_HOSTNAME}" -gt 63 ] || ! printf '%s' "$JKBOX_HOSTNAME" | grep -Eq '^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$'; then
+  err "Hostname inválido (use 2-63 caracteres RFC 1123 lowercase): ${JKBOX_HOSTNAME}"
   exit 2
 fi
 
@@ -344,6 +345,8 @@ AUDIO_FORMAT=m4a
 VIDEO_MODE=cache
 VIDEO_MAX_HEIGHT=720
 YTDLP_AUTO_UPDATE=false
+MDNS_HOSTNAME=${JKBOX_HOSTNAME}
+JKBOX_HOSTNAME_HELPER=/usr/local/bin/jkbox-hostname
 JKBOX_HOTSPOT_SSID=${JKBOX_HOTSPOT_SSID}
 JKBOX_HOTSPOT_PASSWORD=${JKBOX_HOTSPOT_PASSWORD}
 EOF
@@ -440,6 +443,30 @@ configure_network_mdns() {
 [ifupdown]
 managed=true
 EOF
+
+  write_file /etc/avahi/services/jkbox.service <<EOF
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name replace-wildcards="yes">jkbox-studio (%h)</name>
+  <service>
+    <type>_http._tcp</type>
+    <port>${JKBOX_PORT}</port>
+    <txt-record>path=/</txt-record>
+    <txt-record>app=jkbox</txt-record>
+  </service>
+</service-group>
+EOF
+
+  if [ -f "${SCRIPT_DIR}/jkbox-hostname.sh" ]; then
+    if [ "$DRY_RUN" -eq 0 ]; then
+      install -m 0755 -o root -g root "${SCRIPT_DIR}/jkbox-hostname.sh" /usr/local/bin/jkbox-hostname
+      printf '%s ALL=(root) NOPASSWD: /usr/local/bin/jkbox-hostname *\n' "$JKBOX_USER" > /etc/sudoers.d/jkbox-hostname
+      chmod 0440 /etc/sudoers.d/jkbox-hostname
+    else
+      log "[dry-run] Instalaria /usr/local/bin/jkbox-hostname e /etc/sudoers.d/jkbox-hostname"
+    fi
+  fi
 
   if [ "$DRY_RUN" -eq 0 ]; then
     systemctl enable NetworkManager.service avahi-daemon.service >/dev/null 2>&1 || true

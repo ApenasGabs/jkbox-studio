@@ -1,10 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
 import { createJukebox } from '../src/container.js';
+import type { Db } from '../src/db.js';
+import { PlaylistError, PlaylistRepository } from '../src/services/playlists.js';
 import { FakeMedia, setup } from './helpers.js';
 
 function makeApp(env: Record<string, string> = {}) {
@@ -228,5 +230,81 @@ describe('internal playlists API & Auto-DJ', () => {
     await request(app).delete(`/api/playlists/${pl.id}`).set('x-host-pin', '9999').expect(204);
     const cfg = await request(app).get('/api/config').expect(200);
     expect(cfg.body).toMatchObject({ autoDjEnabled: true, autoDjMode: 'vibe', autoDjPlaylistId: null });
+  });
+
+  it('batches Spotify sync on enqueuePlaylist instead of firing N parallel syncToSpotify calls', async () => {
+    const { app, addLocal, jukebox } = makeApp();
+    const t1 = addLocal('Spotify 1');
+    const t2 = addLocal('Spotify 2');
+    jukebox.tracks.update(t1.id, { spotifyUri: 'spotify:track:111' });
+    jukebox.tracks.update(t2.id, { spotifyUri: 'spotify:track:222' });
+
+    const pl = (await request(app).post('/api/playlists').send({ name: 'Batch Test' }).expect(201)).body;
+    await request(app).post(`/api/playlists/${pl.id}/tracks`).send({ trackId: t1.id }).expect(201);
+    await request(app).post(`/api/playlists/${pl.id}/tracks`).send({ trackId: t2.id }).expect(201);
+
+    const spotifyAny = jukebox.spotify as unknown as {
+      connected: boolean;
+      addToPlaylist: (uris: string[]) => Promise<void>;
+    };
+    Object.defineProperty(spotifyAny, 'connected', { value: true, configurable: true });
+    const addSpy = vi.spyOn(spotifyAny, 'addToPlaylist').mockResolvedValue(undefined);
+    const singleSyncSpy = vi.spyOn(jukebox, 'syncToSpotify');
+
+    await request(app).post(`/api/playlists/${pl.id}/enqueue`).send({}).expect(200);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(singleSyncSpy).not.toHaveBeenCalled();
+    expect(addSpy).toHaveBeenCalledTimes(1);
+    expect(addSpy).toHaveBeenCalledWith(['spotify:track:111', 'spotify:track:222']);
+  });
+
+  it('maps SQLITE_CONSTRAINT collisions to 409 or idempotent duplicate inside transactions', () => {
+    const { addLocal, jukebox } = makeApp();
+    const t1 = addLocal('Constraint Track');
+    const repo = jukebox.playlists as PlaylistRepository;
+
+    const created = repo.create({ name: 'Rock' });
+    // Simulate a race where findByName didn't see the conflicting row before INSERT
+    const findSpy = vi
+      .spyOn(repo as unknown as { findByName: () => undefined }, 'findByName')
+      .mockReturnValue(undefined);
+    expect(() => repo.create({ name: 'rock' })).toThrow(PlaylistError);
+    try {
+      repo.create({ name: 'rock' });
+    } catch (err) {
+      expect(err).toBeInstanceOf(PlaylistError);
+      expect((err as PlaylistError).status).toBe(409);
+    }
+
+    const second = repo.create({ name: 'Pop' });
+    try {
+      repo.update(second.id, { name: 'rock' });
+    } catch (err) {
+      expect(err).toBeInstanceOf(PlaylistError);
+      expect((err as PlaylistError).status).toBe(409);
+    }
+    findSpy.mockRestore();
+
+    // Add track normally, then simulate race where SELECT 1 missed existing PK
+    const firstAdd = repo.addTrack(created.id, t1.id);
+    expect(firstAdd).toMatchObject({ added: true, duplicate: false });
+
+    const repoDb = (repo as unknown as { db: Db }).db;
+    const origPrepare = repoDb.prepare.bind(repoDb);
+    let selectChecked = 0;
+    const prepSpy = vi.spyOn(repoDb, 'prepare').mockImplementation(((sql: string) => {
+      if (sql.includes('SELECT 1 FROM playlist_tracks')) {
+        selectChecked += 1;
+        if (selectChecked === 1) {
+          return { get: () => undefined } as unknown as ReturnType<typeof origPrepare>;
+        }
+      }
+      return origPrepare(sql);
+    }) as typeof repoDb.prepare);
+
+    const dupOutcome = repo.addTrack(created.id, t1.id);
+    expect(dupOutcome).toMatchObject({ added: false, duplicate: true });
+    prepSpy.mockRestore();
   });
 });
