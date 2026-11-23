@@ -7,6 +7,7 @@ export type ParsedInput =
   | { kind: 'query'; query: string };
 
 const YT_ID = /^[\w-]{11}$/;
+const YT_PLAYLIST_ID = /^[\w-]{1,128}$/;
 
 /** Detects YouTube / Spotify links (or URIs) pasted in the search box. */
 export function parseInput(raw: string): ParsedInput {
@@ -21,6 +22,9 @@ export function parseInput(raw: string): ParsedInput {
   } catch {
     return { kind: 'query', query: input };
   }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return { kind: 'query', query: input };
+  }
   const host = url.hostname.replace(/^(www\.|m\.|music\.)/, '');
 
   if (host === 'youtu.be') {
@@ -33,7 +37,7 @@ export function parseInput(raw: string): ParsedInput {
     const pathMatch = url.pathname.match(/^\/(?:shorts|embed|live|v)\/([\w-]{11})/);
     if (pathMatch) return { kind: 'youtube', videoId: pathMatch[1] };
     const list = url.searchParams.get('list');
-    if (list) return { kind: 'youtube-playlist', playlistId: list, url: input };
+    if (list && YT_PLAYLIST_ID.test(list)) return { kind: 'youtube-playlist', playlistId: list, url: input };
   }
   if (host === 'open.spotify.com') {
     // e.g. /track/<id>, /intl-pt/track/<id>, /playlist/<id>

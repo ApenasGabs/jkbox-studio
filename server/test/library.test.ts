@@ -161,9 +161,11 @@ describe('migration v4', () => {
     raw.close();
 
     const db = openDb(file);
-    expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(6);
+    expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(7);
     const cols = (db.prepare('PRAGMA table_info(tracks)').all() as { name: string }[]).map((c) => c.name);
     expect(cols).toEqual(expect.arrayContaining(['genre', 'subgenre', 'genre_manual', 'year', 'track_number', 'video_path']));
+    const playlistCols = (db.prepare('PRAGMA table_info(playlists)').all() as { name: string }[]).map((c) => c.name);
+    expect(playlistCols).toEqual(expect.arrayContaining(['source', 'source_id', 'thumbnail']));
     const indexes = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as { name: string }[]).map((r) => r.name);
     expect(indexes).toEqual(expect.arrayContaining(['idx_tracks_album', 'idx_tracks_artist', 'idx_tracks_genre', 'idx_tracks_subgenre']));
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((r) => r.name);

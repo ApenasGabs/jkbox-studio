@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest';
-import { buildVideoFormatSelector, entryToResult, parseProgressLine } from '../src/services/ytdlp.js';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { describe, expect, it, vi } from 'vitest';
+import { buildVideoFormatSelector, entryToResult, parseProgressLine, YtDlp } from '../src/services/ytdlp.js';
 
 describe('yt-dlp helpers', () => {
   it('builds lightweight mp4 format selector using max height', () => {
@@ -41,5 +43,45 @@ describe('yt-dlp helpers', () => {
       durationSec: 214,
       thumbnail: 'big.jpg',
     });
+  });
+
+  it('extracts playlist metadata and tracks via getPlaylistDetails', async () => {
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const child = Object.assign(new EventEmitter(), { stdout, stderr });
+    const ytdlp = new YtDlp('yt-dlp', 'm4a');
+    const runSpy = vi
+      .spyOn(ytdlp as unknown as { run: (args: string[]) => Promise<string> }, 'run')
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          id: 'PLabc123',
+          title: 'Sertanejo Top',
+          description: 'Modão e universitário',
+          playlist_count: 2,
+          thumbnails: [{ url: 'https://img.test/pl-sm.jpg', width: 120 }, { url: 'https://img.test/pl-lg.jpg', width: 640 }],
+          entries: [
+            { id: 'aaaaaaaaaaa', title: 'Evidências', channel: 'Chitãozinho', duration: 279 },
+            { id: 'bbbbbbbbbbb', title: 'Boate Azul', channel: 'Bruno & Marrone', duration: 210 },
+          ],
+        }),
+      );
+    void child;
+
+    const details = await ytdlp.getPlaylistDetails('https://www.youtube.com/playlist?list=PLabc123', 50);
+    expect(runSpy).toHaveBeenCalledWith([
+      'https://www.youtube.com/playlist?list=PLabc123',
+      '--flat-playlist',
+      '-J',
+      '--playlist-end',
+      '51',
+    ]);
+    expect(details).toMatchObject({
+      title: 'Sertanejo Top',
+      description: 'Modão e universitário',
+      thumbnail: 'https://img.test/pl-lg.jpg',
+      totalCount: 2,
+    });
+    expect(details.tracks).toHaveLength(2);
+    expect(details.tracks[0]).toMatchObject({ source: 'youtube', sourceId: 'aaaaaaaaaaa', title: 'Evidências' });
   });
 });

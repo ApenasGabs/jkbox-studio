@@ -7,9 +7,12 @@ import type {
   AutoDjConfig,
   AutoDjMode,
   PlaybackOutput,
+  PlaylistImportResult,
+  PlaylistSource,
   QueueEntryView,
   SearchResult,
   SpotifyDevice,
+  SpotifyPlaybackState,
   Track,
   TrackSource,
 } from '../types.js';
@@ -19,9 +22,15 @@ import type { DownloadManager } from './downloads.js';
 import type { LyricsService } from './lyrics.js';
 import { PlaylistError, type PlaylistRepository } from './playlists.js';
 import { QueueError, type QueueService } from './queue.js';
-import { SpotifyError, youtubeQueryFor, type SpotifyService } from './spotify.js';
+import {
+  pickYoutubeVideoCandidate,
+  stripTitleBrackets,
+  youtubeQueryFor,
+  youtubeVideoQueryFor,
+} from '../lib/youtubeMatch.js';
+import { SpotifyError, type SpotifyService } from './spotify.js';
 import type { TrackRepository } from './tracks.js';
-import type { MediaProvider } from './ytdlp.js';
+import type { ExtractedPlaylist, MediaProvider } from './ytdlp.js';
 
 export type SearchSource = 'all' | TrackSource;
 
@@ -47,6 +56,7 @@ export interface JukeboxEvents {
 const MAX_BATCH = 50;
 const DEFAULT_SPOTIFY_POLL_MS = 2500;
 const SPOTIFY_START_GRACE_MS = 5000;
+const PLAYLIST_NOT_FOUND_RE = /private|privad|does not exist|not exist|not found|404|unavailable|inacess|incomplete/i;
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -68,14 +78,6 @@ function normalizePlaybackOutput(raw: unknown, spotifyConnected: boolean): Playb
   return { type: 'local' };
 }
 
-function cleanTrackTitleForSpotify(title: string): string {
-  return title
-    .replace(/\([^)]*\)/g, ' ')
-    .replace(/\[[^\]]*\]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
 /** Orchestrates search, cache, downloads, queue and the Spotify shared playlist / Connect playback. */
 export class Jukebox extends EventEmitter<JukeboxEvents> {
   private importTimer: NodeJS.Timeout | null = null;
@@ -88,6 +90,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
   private readonly spotifyUnavailableTrackIds = new Set<string>();
   private activeSpotifyQueueId: number | null = null;
   private activeSpotifyTrackUri: string | null = null;
+  private suppressedSpotifyUri: string | null = null;
   private spotifyStartedAtMs = 0;
   private spotifySeenPlaying = false;
   private spotifyLastProgressMs = 0;
@@ -100,6 +103,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
   private _playbackOutput: PlaybackOutput;
   private autocategorizeInFlight: Promise<AutocategorizeSummary> | null = null;
   private readonly classifyingTrackIds = new Set<string>();
+  private readonly pendingClassifications = new Set<Promise<void>>();
 
   constructor(
     readonly tracks: TrackRepository,
@@ -136,19 +140,30 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     });
     queue.on('started', (entry) => {
       if (this._playbackOutput.type === 'spotify') {
+        if (this.activeSpotifyTrackUri) {
+          this.suppressedSpotifyUri = this.activeSpotifyTrackUri;
+        }
+        this.resetSpotifyActiveState();
         void this.playCurrentOnSpotify(entry);
+      }
+    });
+    queue.on('ended', (entry) => {
+      const latest = this.tracks.get(entry.trackId);
+      if (!latest || this.tracks.isCached(latest)) return;
+      try {
+        this.downloads.ensure(latest.id);
+      } catch (err) {
+        this.log(`[downloads] falha ao baixar faixa finalizada (${latest.title}): ${errorMessage(err)}`);
       }
     });
     queue.on('drained', () => {
       const autoAdded = this.maybeEnqueueAutoDj();
-      if (!autoAdded && this._playbackOutput.type === 'spotify' && this.activeSpotifyQueueId !== null) {
-        const deviceId = this._playbackOutput.deviceId;
-        this.stopSpotifyPolling();
-        this.activeSpotifyQueueId = null;
-        this.activeSpotifyTrackUri = null;
-        void this.spotify.pausePlayback(deviceId).catch((err) => {
-          this.log(`[spotify-connect] falha ao pausar ao esvaziar fila: ${errorMessage(err)}`);
-        });
+      if (!autoAdded && this._playbackOutput.type === 'spotify') {
+        if (this.activeSpotifyTrackUri) {
+          this.suppressedSpotifyUri = this.activeSpotifyTrackUri;
+        }
+        this.resetSpotifyActiveState();
+        this.startSpotifyPolling();
       }
     });
   }
@@ -182,9 +197,16 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
   private commitSpotifyOutput(device: Pick<SpotifyDevice, 'id' | 'name'>): void {
     this._playbackOutput = { type: 'spotify', deviceId: device.id, deviceName: device.name };
     this.settings?.set('playback_output', this._playbackOutput);
+    this.suppressedSpotifyUri = null;
     this.consecutiveSpotifyMisses = 0;
     this.emit('output', this._playbackOutput);
     this.queue.emit('change');
+  }
+
+  private resetSpotifyActiveState(): void {
+    this.activeSpotifyQueueId = null;
+    this.activeSpotifyTrackUri = null;
+    this.spotifySeenPlaying = false;
   }
 
   private resetToLocalOutput(pauseDeviceId?: string): PlaybackOutput {
@@ -193,9 +215,8 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     this.stopSpotifyPolling();
     this._playbackOutput = { type: 'local' };
     this.settings?.set('playback_output', this._playbackOutput);
-    this.activeSpotifyQueueId = null;
-    this.activeSpotifyTrackUri = null;
-    this.spotifySeenPlaying = false;
+    this.resetSpotifyActiveState();
+    this.suppressedSpotifyUri = null;
     this.consecutiveSpotifyMisses = 0;
     if (pauseDeviceId) {
       void this.spotify.pausePlayback(pauseDeviceId).catch((err) => {
@@ -218,6 +239,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
   private markSpotifyTrackPlaying(queueId: number, uri: string, positionMs: number): void {
     this.activeSpotifyQueueId = queueId;
     this.activeSpotifyTrackUri = uri;
+    this.suppressedSpotifyUri = null;
     this.spotifyStartedAtMs = Date.now();
     this.spotifySeenPlaying = false;
     this.spotifyLastProgressMs = positionMs;
@@ -330,6 +352,9 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       if (!this.queue.state().nowPlaying) {
         this.queue.advanceIfIdle();
       }
+      if (!this.queue.state().nowPlaying) {
+        this.startSpotifyPolling();
+      }
       return this._playbackOutput;
     } catch (err) {
       if (seq === this.spotifyPlaySeq && gen === this.outputGen) {
@@ -384,7 +409,11 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
   syncStartupPlayback(): void {
     if (this._playbackOutput.type !== 'spotify') return;
     const current = this.queue.state().nowPlaying;
-    if (!current || this.activeSpotifyQueueId === current.item.id) return;
+    if (!current) {
+      this.startSpotifyPolling();
+      return;
+    }
+    if (this.activeSpotifyQueueId === current.item.id) return;
     void this.playCurrentOnSpotify(current.item, Math.round(current.positionSec * 1000));
   }
 
@@ -399,7 +428,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
         return match.spotifyUri;
       }
     }
-    const cleanedTitle = cleanTrackTitleForSpotify(track.title);
+    const cleanedTitle = stripTitleBrackets(track.title);
     const fallbackQuery = `${cleanedTitle} ${track.artist}`.trim();
     if (fallbackQuery && fallbackQuery !== primaryQuery) {
       const [match] = await this.spotify.search(fallbackQuery, 1);
@@ -473,38 +502,81 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     }
   }
 
+  private adoptSpotifyTrack(playback: SpotifyPlaybackState): void {
+    if (this._playbackOutput.type !== 'spotify' || this._autoDjEnabled) return;
+    if (!playback.isPlaying || !playback.track) return;
+    if (playback.device?.id && playback.device.id !== this._playbackOutput.deviceId) return;
+    const uri = playback.trackUri ?? playback.track.spotifyUri ?? `spotify:track:${playback.track.sourceId}`;
+    if (this.suppressedSpotifyUri && uri === this.suppressedSpotifyUri) return;
+    const { nowPlaying, queue: queued } = this.queue.state();
+    if (nowPlaying || queued.length > 0) return;
+
+    const track = this.tracks.upsertFromResult(playback.track);
+    if (!track.spotifyUri && uri) {
+      this.tracks.update(track.id, { spotifyUri: uri });
+    }
+    const adopted = this.queue.adoptPlaying(track.id, 'spotify-autoplay', 'Spotify Auto-DJ', playback.progressMs / 1000);
+    if (!adopted) return;
+
+    this.suppressedSpotifyUri = null;
+    this.activeSpotifyQueueId = adopted.id;
+    this.activeSpotifyTrackUri = uri;
+    this.spotifyStartedAtMs = Date.now();
+    this.spotifySeenPlaying = true;
+    this.spotifyLastProgressMs = playback.progressMs;
+  }
+
+  private finishActiveSpotifyTrack(queueId: number): void {
+    this.resetSpotifyActiveState();
+    this.queue.ended(queueId);
+  }
+
   async pollSpotifyPlayback(): Promise<void> {
     if (this.spotifyPollInFlight) return;
     if (this._playbackOutput.type !== 'spotify') {
       this.stopSpotifyPolling();
       return;
     }
+
     const current = this.queue.state().nowPlaying;
-    if (!current || current.item.id !== this.activeSpotifyQueueId || !this.activeSpotifyTrackUri) {
-      this.stopSpotifyPolling();
+    if (current && (current.item.id !== this.activeSpotifyQueueId || !this.activeSpotifyTrackUri)) {
       return;
     }
 
     const seq = this.spotifyPlaySeq;
+    const gen = this.outputGen;
     const deviceId = this._playbackOutput.deviceId;
+    const expectedQueueId = current?.item.id ?? null;
     this.spotifyPollInFlight = true;
     try {
       const playback = await this.spotify.getPlaybackState();
       if (
         seq !== this.spotifyPlaySeq ||
+        gen !== this.outputGen ||
         this._playbackOutput.type !== 'spotify' ||
         this._playbackOutput.deviceId !== deviceId ||
-        this.queue.state().nowPlaying?.item.id !== current.item.id
+        (this.queue.state().nowPlaying?.item.id ?? null) !== expectedQueueId
       ) {
         return;
       }
+
+      if (!current) {
+        const matchesSelectedDevice = !playback?.device?.id || playback.device.id === this._playbackOutput.deviceId;
+        if (matchesSelectedDevice && playback?.trackUri && playback.trackUri !== this.suppressedSpotifyUri) {
+          this.suppressedSpotifyUri = null;
+        }
+        if (playback) {
+          this.adoptSpotifyTrack(playback);
+        }
+        return;
+      }
+
       const inGrace = !this.spotifySeenPlaying && Date.now() - this.spotifyStartedAtMs < SPOTIFY_START_GRACE_MS;
 
       if (!playback) {
         if (inGrace) return;
         if (this.spotifySeenPlaying) {
-          this.stopSpotifyPolling();
-          this.queue.ended(current.item.id);
+          this.finishActiveSpotifyTrack(current.item.id);
         }
         return;
       }
@@ -512,8 +584,10 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       if (playback.trackUri && playback.trackUri !== this.activeSpotifyTrackUri) {
         if (inGrace) return;
         if (this.spotifySeenPlaying) {
-          this.stopSpotifyPolling();
-          this.queue.ended(current.item.id);
+          this.finishActiveSpotifyTrack(current.item.id);
+          if (!this.queue.state().nowPlaying && playback.isPlaying && playback.track) {
+            this.adoptSpotifyTrack(playback);
+          }
         }
         return;
       }
@@ -526,8 +600,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       }
 
       if (this.spotifySeenPlaying && playback.progressMs === 0 && this.spotifyLastProgressMs > 3000) {
-        this.stopSpotifyPolling();
-        this.queue.ended(current.item.id);
+        this.finishActiveSpotifyTrack(current.item.id);
         return;
       }
 
@@ -639,6 +712,27 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       this.log(`[classifier] falha em segundo plano (${track.title}): ${errorMessage(err)}`);
     } finally {
       this.classifyingTrackIds.delete(trackId);
+    }
+  }
+
+  private scheduleBatchClassification(trackIds: string[]): void {
+    if (!this.classifier || trackIds.length === 0) return;
+    const ids = [...new Set(trackIds)];
+    const task = (async () => {
+      for (const id of ids) {
+        await this.classifyTrackInBackground(id);
+      }
+    })();
+    this.pendingClassifications.add(task);
+    void task.finally(() => {
+      this.pendingClassifications.delete(task);
+    });
+  }
+
+  /** Resolves once any background track classification tasks triggered by imports have settled. */
+  async classificationIdle(): Promise<void> {
+    while (this.pendingClassifications.size > 0) {
+      await Promise.all([...this.pendingClassifications]);
     }
   }
 
@@ -818,8 +912,18 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     }
   }
 
-  /** Resolves the YouTube video for a Spotify track (spotDL-style "artist - title audio" match). */
+  /**
+   * Resolves the YouTube video for a Spotify track, prioritizing an official music video
+   * with compatible duration and falling back to spotDL-style audio matching.
+   */
   async resolveYoutubeId(track: Track): Promise<string | null> {
+    try {
+      const candidates = await this.media.search(youtubeVideoQueryFor(track), 5);
+      const videoMatch = pickYoutubeVideoCandidate(candidates, track);
+      if (videoMatch) return videoMatch.sourceId;
+    } catch (err) {
+      this.log(`[youtube] falha na busca de clipe para "${track.title}": ${errorMessage(err)}`);
+    }
     const [best] = await this.media.search(youtubeQueryFor(track), 1);
     return best?.sourceId ?? null;
   }
@@ -901,6 +1005,163 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     if (tracks.length > 0 && this.spotify.connected) {
       void this.syncBatchToSpotify(tracks);
     }
+  }
+
+  private async extractYoutubePlaylist(playlistId: string): Promise<ExtractedPlaylist> {
+    const canonicalUrl = `https://www.youtube.com/playlist?list=${playlistId}`;
+    try {
+      if (this.media.getPlaylistDetails) {
+        return await this.media.getPlaylistDetails(canonicalUrl, MAX_BATCH);
+      }
+      const tracks = await this.media.getPlaylist(canonicalUrl, MAX_BATCH + 1);
+      return {
+        title: `Playlist YouTube (${playlistId})`,
+        description: null,
+        thumbnail: tracks[0]?.thumbnail ?? null,
+        totalCount: tracks.length,
+        tracks,
+      };
+    } catch (err) {
+      const msg = errorMessage(err);
+      if (PLAYLIST_NOT_FOUND_RE.test(msg)) {
+        throw new PlaylistError('Playlist do YouTube não encontrada, privada ou inacessível', 404);
+      }
+      throw new PlaylistError(`Falha ao ler playlist do YouTube: ${msg}`, 502);
+    }
+  }
+
+  private async extractSpotifyPlaylist(playlistId: string): Promise<ExtractedPlaylist> {
+    try {
+      return await this.spotify.getPlaylistDetails(playlistId, MAX_BATCH);
+    } catch (err) {
+      if (
+        err instanceof SpotifyError &&
+        (err.status === 404 || (err.status === 403 && err.code !== 'INSUFFICIENT_SCOPE'))
+      ) {
+        throw new PlaylistError('Playlist do Spotify não encontrada, privada ou inacessível', 404);
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Imports a YouTube or Spotify playlist by URL:
+   * persists tracks + playlist idempotently by `(source, sourceId)`,
+   * enqueues tracks with deduplication, triggers video-first background downloads,
+   * and runs background auto-categorization without overwriting manual genres.
+   */
+  async importPlaylist(input: {
+    url: unknown;
+    requesterId?: string;
+    requesterName?: string;
+    enqueue?: unknown;
+  }): Promise<PlaylistImportResult> {
+    if (!this.playlists) throw new PlaylistError('Serviço de playlists indisponível', 500);
+    if (typeof input.url !== 'string' || !input.url.trim()) {
+      throw new PlaylistError('Informe a URL da playlist do YouTube ou Spotify', 400);
+    }
+    if (input.enqueue !== undefined && typeof input.enqueue !== 'boolean') {
+      throw new PlaylistError('enqueue deve ser booleano', 400);
+    }
+    const shouldEnqueue = input.enqueue ?? true;
+
+    const parsed = parseInput(input.url);
+    if (parsed.kind !== 'youtube-playlist' && parsed.kind !== 'spotify-playlist') {
+      throw new PlaylistError('URL inválida ou não suportada. Cole um link de playlist do YouTube ou Spotify.', 400);
+    }
+
+    const source: PlaylistSource = parsed.kind === 'youtube-playlist' ? 'youtube' : 'spotify';
+    const sourceId = parsed.kind === 'youtube-playlist' ? parsed.playlistId : parsed.id;
+    const extracted =
+      parsed.kind === 'youtube-playlist'
+        ? await this.extractYoutubePlaylist(parsed.playlistId)
+        : await this.extractSpotifyPlaylist(parsed.id);
+
+    const totalRemote = extracted.totalCount ?? extracted.tracks.length;
+    if (totalRemote > MAX_BATCH || extracted.tracks.length > MAX_BATCH) {
+      throw new PlaylistError(`A playlist ultrapassa o limite máximo de ${MAX_BATCH} faixas por importação`, 422);
+    }
+
+    const validResults: SearchResult[] = [];
+    const seenKeys = new Set<string>();
+    let skipped = 0;
+    for (const candidate of extracted.tracks) {
+      const clean = sanitizeResult(candidate);
+      if (!clean || /^\[(Private|Deleted) video\]$/i.test(clean.title)) {
+        skipped += 1;
+        continue;
+      }
+      const key = `${clean.source}:${clean.sourceId}`;
+      if (seenKeys.has(key)) {
+        skipped += 1;
+        continue;
+      }
+      seenKeys.add(key);
+      validResults.push(clean);
+    }
+
+    if (extracted.tracks.length === 0 || validResults.length === 0) {
+      throw new PlaylistError('A playlist está vazia ou não possui faixas importáveis', 422);
+    }
+
+    const persistedTracks: Track[] = validResults.map((res) => {
+      const track = this.tracks.upsertFromResult(res);
+      const patch: Partial<Pick<Track, 'thumbnail' | 'spotifyUri' | 'durationSec' | 'album'>> = {};
+      if (!track.thumbnail && res.thumbnail) patch.thumbnail = res.thumbnail;
+      if (!track.spotifyUri && res.spotifyUri) patch.spotifyUri = res.spotifyUri;
+      if (track.durationSec === null && res.durationSec != null) patch.durationSec = res.durationSec;
+      if (!track.album && res.album) patch.album = res.album;
+      if (Object.keys(patch).length > 0) {
+        this.tracks.update(track.id, patch);
+        return this.tracks.get(track.id)!;
+      }
+      return track;
+    });
+
+    const { playlist, created } = this.playlists.upsertImported({
+      source,
+      sourceId,
+      name: extracted.title,
+      description: extracted.description ?? null,
+      thumbnail: extracted.thumbnail ?? persistedTracks.find((t) => t.thumbnail)?.thumbnail ?? null,
+      trackIds: persistedTracks.map((t) => t.id),
+    });
+
+    const requesterId = input.requesterId?.trim() || 'playlist-import';
+    const requesterName = input.requesterName?.trim() || playlist.name;
+    let alreadyCached = 0;
+    let downloading = 0;
+    let queued = 0;
+
+    for (const track of persistedTracks) {
+      const cached = this.downloads.ensure(track.id);
+      if (cached) alreadyCached += 1;
+      else downloading += 1;
+
+      if (shouldEnqueue) {
+        const outcome = this.queue.enqueue(track.id, requesterId, requesterName);
+        if (outcome.duplicate) skipped += 1;
+        else queued += 1;
+      }
+    }
+
+    this.scheduleBatchClassification(persistedTracks.map((t) => t.id));
+
+    const detail = this.playlists.getDetail(playlist.id)!;
+    return {
+      playlist: detail.summary,
+      created,
+      imported: persistedTracks.length,
+      alreadyCached,
+      queued,
+      downloading,
+      skipped,
+      tracks: detail.items.map((item) => ({
+        ...this.trackToResult(item.track),
+        position: item.position,
+        addedAt: item.addedAt,
+      })),
+    };
   }
 
   /** Mirrors a batch of newly enqueued playlist tracks to Spotify without concurrent bursts. */

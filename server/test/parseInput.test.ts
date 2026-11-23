@@ -34,5 +34,7 @@ describe('parseInput', () => {
   it('treats everything else as a text query', () => {
     expect(parseInput('  never gonna give you up ')).toEqual({ kind: 'query', query: 'never gonna give you up' });
     expect(parseInput('https://example.com/song')).toMatchObject({ kind: 'query' });
+    expect(parseInput('javascript:alert(1)')).toMatchObject({ kind: 'query' });
+    expect(parseInput('https://www.youtube.com/playlist?list=PL%20invalid')).toMatchObject({ kind: 'query' });
   });
 });

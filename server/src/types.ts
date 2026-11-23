@@ -84,10 +84,15 @@ export interface AutoDjConfig {
   playlistId: string | null;
 }
 
+export type PlaylistSource = 'youtube' | 'spotify';
+
 export interface PlaylistSummary {
   id: string;
   name: string;
   description: string | null;
+  source?: PlaylistSource | null;
+  sourceId?: string | null;
+  thumbnail?: string | null;
   trackCount: number;
   cover: string | null;
   createdAt: number;
@@ -101,6 +106,17 @@ export interface PlaylistTrackResult extends SearchResult {
 }
 
 export interface PlaylistDetail extends PlaylistSummary {
+  tracks: PlaylistTrackResult[];
+}
+
+export interface PlaylistImportResult {
+  playlist: PlaylistSummary;
+  created: boolean;
+  imported: number;
+  alreadyCached: number;
+  queued: number;
+  downloading: number;
+  skipped: number;
   tracks: PlaylistTrackResult[];
 }
 
@@ -176,6 +192,7 @@ export interface SpotifyPlaybackState {
   trackUri: string | null;
   trackId: string | null;
   durationMs: number | null;
+  track: SearchResult | null;
 }
 
 export type PlaybackOutput =
