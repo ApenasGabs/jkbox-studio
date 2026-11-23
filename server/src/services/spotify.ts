@@ -2,21 +2,24 @@ import { randomBytes } from 'node:crypto';
 import type { Config } from '../config.js';
 import type { Settings } from '../db.js';
 import { SPOTIFY_ID_RE } from '../lib/validate.js';
-import type { SearchResult } from '../types.js';
+import type { SearchResult, SpotifyDevice, SpotifyPlaybackState } from '../types.js';
 
 const ACCOUNTS = 'https://accounts.spotify.com';
 const API = 'https://api.spotify.com/v1';
+const PLAYBACK_SCOPES = ['user-read-playback-state', 'user-modify-playback-state'] as const;
 const SCOPES = [
   'playlist-read-private',
   'playlist-read-collaborative',
   'playlist-modify-public',
   'playlist-modify-private',
+  ...PLAYBACK_SCOPES,
 ];
 
 interface UserTokens {
   accessToken: string;
   refreshToken: string;
   expiresAt: number;
+  scope?: string;
 }
 
 interface SpotifyTrack {
@@ -29,21 +32,60 @@ interface SpotifyTrack {
   type?: string;
 }
 
+interface SpotifyApiDevice {
+  id: string | null;
+  is_active: boolean;
+  is_private_session?: boolean;
+  is_restricted: boolean;
+  name: string;
+  type: string;
+  volume_percent: number | null;
+  supports_volume?: boolean;
+}
+
+interface SpotifyApiPlaybackState {
+  device?: SpotifyApiDevice | null;
+  is_playing?: boolean;
+  progress_ms?: number | null;
+  item?: SpotifyTrack | null;
+}
+
 interface PlaylistEntry {
   item?: SpotifyTrack | null;
   track?: SpotifyTrack | null;
 }
 
+export type SpotifyErrorCode = 'PREMIUM_REQUIRED' | 'NO_ACTIVE_DEVICE' | 'INSUFFICIENT_SCOPE' | (string & {});
+
 export class SpotifyError extends Error {
   constructor(
     message: string,
     readonly status = 502,
+    readonly code?: SpotifyErrorCode,
   ) {
     super(message);
   }
 }
 
 export type FetchFn = typeof fetch;
+
+function mapDevice(device: SpotifyApiDevice): SpotifyDevice {
+  return {
+    id: device.id ?? '',
+    name: device.name,
+    type: device.type,
+    isActive: Boolean(device.is_active),
+    isRestricted: Boolean(device.is_restricted),
+    volumePercent: typeof device.volume_percent === 'number' ? device.volume_percent : null,
+    supportsVolume: device.supports_volume ?? true,
+  };
+}
+
+function hasPlaybackScopes(tokens: UserTokens | null): boolean {
+  if (!tokens?.scope) return false;
+  const granted = new Set(tokens.scope.split(/\s+/).filter(Boolean));
+  return PLAYBACK_SCOPES.every((scope) => granted.has(scope));
+}
 
 export function spotifyTrackToResult(track: SpotifyTrack): SearchResult {
   const images = track.album?.images ?? [];
@@ -86,6 +128,10 @@ export class SpotifyService {
     return this.configured && !!this.settings.get<UserTokens>('spotify_tokens');
   }
 
+  get playbackAuthorized(): boolean {
+    return this.configured && hasPlaybackScopes(this.settings.get<UserTokens>('spotify_tokens'));
+  }
+
   get playlistId(): string | null {
     return this.settings.get<string>('spotify_playlist_id');
   }
@@ -95,6 +141,7 @@ export class SpotifyService {
     return {
       configured: this.configured,
       connected: this.connected,
+      playbackAuthorized: this.playbackAuthorized,
       playlistId,
       playlistUrl: playlistId ? `https://open.spotify.com/playlist/${playlistId}` : null,
       redirectUri: this.configured ? this.config.redirectUri : null,
@@ -175,6 +222,75 @@ export class SpotifyService {
       path = page.next ? page.next.replace(API, '') : null;
     }
     return results.slice(0, limit);
+  }
+
+  async getDevices(): Promise<SpotifyDevice[]> {
+    this.requireConfigured();
+    const data = await this.api<{ devices?: SpotifyApiDevice[] }>('/me/player/devices', {}, 'user');
+    return (data?.devices ?? []).filter((d) => Boolean(d.id)).map(mapDevice);
+  }
+
+  async getPlaybackState(): Promise<SpotifyPlaybackState | null> {
+    this.requireConfigured();
+    const data = await this.api<SpotifyApiPlaybackState | undefined>('/me/player', {}, 'user');
+    if (!data) return null;
+    return {
+      isPlaying: Boolean(data.is_playing),
+      progressMs: typeof data.progress_ms === 'number' ? Math.max(0, data.progress_ms) : 0,
+      device: data.device?.id ? mapDevice(data.device) : null,
+      trackUri: data.item?.uri ?? null,
+      trackId: data.item?.id ?? null,
+      durationMs: typeof data.item?.duration_ms === 'number' ? data.item.duration_ms : null,
+    };
+  }
+
+  async transferPlayback(deviceId: string, play = false): Promise<void> {
+    this.requireConfigured();
+    await this.api(
+      '/me/player',
+      {
+        method: 'PUT',
+        body: JSON.stringify({ device_ids: [deviceId], play }),
+      },
+      'user',
+    );
+  }
+
+  async playTrack(uri: string, deviceId?: string, positionMs?: number): Promise<void> {
+    this.requireConfigured();
+    const query = deviceId ? `?${new URLSearchParams({ device_id: deviceId })}` : '';
+    const body: { uris: string[]; position_ms?: number } = { uris: [uri] };
+    if (typeof positionMs === 'number' && Number.isFinite(positionMs) && positionMs > 0) {
+      body.position_ms = Math.round(positionMs);
+    }
+    await this.api(
+      `/me/player/play${query}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      },
+      'user',
+    );
+  }
+
+  async pausePlayback(deviceId?: string): Promise<void> {
+    this.requireConfigured();
+    const query = deviceId ? `?${new URLSearchParams({ device_id: deviceId })}` : '';
+    await this.api(`/me/player/pause${query}`, { method: 'PUT' }, 'user');
+  }
+
+  async resumePlayback(deviceId?: string): Promise<void> {
+    this.requireConfigured();
+    const query = deviceId ? `?${new URLSearchParams({ device_id: deviceId })}` : '';
+    await this.api(`/me/player/play${query}`, { method: 'PUT' }, 'user');
+  }
+
+  async setVolume(volumePercent: number, deviceId?: string): Promise<void> {
+    this.requireConfigured();
+    const clamped = Math.max(0, Math.min(100, Math.round(volumePercent)));
+    const params = new URLSearchParams({ volume_percent: String(clamped) });
+    if (deviceId) params.set('device_id', deviceId);
+    await this.api(`/me/player/volume?${params}`, { method: 'PUT' }, 'user');
   }
 
   /** Creates (or reuses) the shared collaborative playlist for the jukebox session. */
@@ -259,20 +375,22 @@ export class SpotifyService {
     this.settings.set('spotify_seen_uris', [...seen].slice(-5000));
   }
 
-  private saveUserTokens(data: { access_token: string; refresh_token?: string; expires_in: number }): void {
+  private saveUserTokens(data: { access_token: string; refresh_token?: string; expires_in: number; scope?: string }): void {
     const previous = this.settings.get<UserTokens>('spotify_tokens');
     const refreshToken = data.refresh_token ?? previous?.refreshToken;
     if (!refreshToken) throw new SpotifyError('Spotify não retornou refresh_token');
+    const scope = data.scope ?? previous?.scope;
     this.settings.set('spotify_tokens', {
       accessToken: data.access_token,
       refreshToken,
       expiresAt: Date.now() + (data.expires_in - 60) * 1000,
+      ...(scope ? { scope } : {}),
     } satisfies UserTokens);
   }
 
   private async tokenRequest(
     body: Record<string, string>,
-  ): Promise<{ access_token: string; refresh_token?: string; expires_in: number }> {
+  ): Promise<{ access_token: string; refresh_token?: string; expires_in: number; scope?: string }> {
     const basic = Buffer.from(`${this.config.clientId}:${this.config.clientSecret}`).toString('base64');
     const res = await this.fetchFn(`${ACCOUNTS}/api/token`, {
       method: 'POST',
@@ -280,7 +398,7 @@ export class SpotifyService {
       body: new URLSearchParams(body).toString(),
     });
     if (!res.ok) throw new SpotifyError(`Falha na autenticação Spotify (${res.status})`, res.status === 400 ? 401 : 502);
-    return (await res.json()) as { access_token: string; refresh_token?: string; expires_in: number };
+    return (await res.json()) as { access_token: string; refresh_token?: string; expires_in: number; scope?: string };
   }
 
   private async accessToken(kind: 'app' | 'user' | 'any'): Promise<string> {
@@ -299,16 +417,45 @@ export class SpotifyService {
 
   private async api<T>(path: string, init: RequestInit = {}, kind: 'app' | 'user' | 'any' = 'any'): Promise<T> {
     const token = await this.accessToken(kind);
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+      ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      ...(init.headers as Record<string, string> | undefined),
+    };
     const res = await this.fetchFn(`${API}${path}`, {
       ...init,
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...init.headers },
+      headers,
     });
     if (!res.ok) {
       let detail = '';
+      let reason = '';
       try {
-        detail = ((await res.json()) as { error?: { message?: string } }).error?.message ?? '';
+        const body = (await res.json()) as { error?: { message?: string; reason?: string } };
+        detail = body.error?.message ?? '';
+        reason = body.error?.reason ?? '';
       } catch {
         /* ignore */
+      }
+      if (reason === 'PREMIUM_REQUIRED' || (res.status === 403 && /premium/i.test(detail))) {
+        throw new SpotifyError(
+          'Conta Spotify Premium necessária para controlar dispositivos Spotify Connect',
+          403,
+          'PREMIUM_REQUIRED',
+        );
+      }
+      if (reason === 'NO_ACTIVE_DEVICE' || (res.status === 404 && /no active device|device not found/i.test(detail))) {
+        throw new SpotifyError(
+          'Nenhum dispositivo Spotify Connect ativo encontrado. Abra o Spotify na caixa de som ou TV.',
+          404,
+          'NO_ACTIVE_DEVICE',
+        );
+      }
+      if (res.status === 403 && /scope/i.test(detail)) {
+        throw new SpotifyError(
+          'Permissão de playback ausente no token. Clique em Reconectar Spotify.',
+          403,
+          'INSUFFICIENT_SCOPE',
+        );
       }
       throw new SpotifyError(`Spotify API ${res.status}${detail ? `: ${detail}` : ''}`, res.status);
     }

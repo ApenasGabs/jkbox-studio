@@ -5,8 +5,10 @@ import type {
   CatalogArtistDetail,
   CatalogCategory,
   JukeboxState,
+  PlaybackOutput,
   QueueEntry,
   SearchResult,
+  SpotifyDevice,
   SpotifyStatus,
   Track,
   TrackLyrics,
@@ -40,6 +42,7 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly code?: string,
   ) {
     super(message);
   }
@@ -52,7 +55,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(path, { ...init, headers: { ...headers, ...(init.headers as Record<string, string>) } });
   if (res.status === 204) return undefined as T;
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(body.error ?? `Erro ${res.status}`, res.status);
+  if (!res.ok) throw new ApiError(body.error ?? `Erro ${res.status}`, res.status, body.code);
   return body as T;
 }
 
@@ -131,6 +134,12 @@ export const api = {
   spotifyLinkPlaylist: (playlist: string) => post<SpotifyStatus>('/api/spotify/playlist', { playlist }),
   spotifyImport: () => post<{ imported: number }>('/api/spotify/import'),
   spotifyDisconnect: () => post<SpotifyStatus>('/api/spotify/disconnect'),
+  spotifyDevices: () => request<{ devices: SpotifyDevice[]; playbackOutput: PlaybackOutput }>('/api/spotify/devices'),
+  setSpotifyDevice: (deviceId: string | null) =>
+    post<{ playbackOutput: PlaybackOutput }>('/api/spotify/device', { deviceId }),
+  spotifyPause: () => post<{ ok: boolean; paused: boolean }>('/api/spotify/player/pause'),
+  spotifyResume: () => post<{ ok: boolean; paused: boolean }>('/api/spotify/player/resume'),
+  spotifySetVolume: (volume: number) => post<{ ok: boolean; volume: number }>('/api/spotify/player/volume', { volume }),
   streamUrl: (trackId: string) => `/api/tracks/${encodeURIComponent(trackId)}/stream`,
   videoUrl: (trackId: string) => `/api/tracks/${encodeURIComponent(trackId)}/video`,
   spotifyAuthUrl: () => {

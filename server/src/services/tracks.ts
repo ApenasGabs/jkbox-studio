@@ -170,7 +170,10 @@ export class TrackRepository {
   update(
     id: string,
     patch: Partial<
-      Pick<Track, 'status' | 'progress' | 'error' | 'filePath' | 'videoPath' | 'youtubeId' | 'durationSec' | 'thumbnail'>
+      Pick<
+        Track,
+        'status' | 'progress' | 'error' | 'filePath' | 'videoPath' | 'youtubeId' | 'spotifyUri' | 'durationSec' | 'thumbnail'
+      >
     > &
       TrackMetadataPatch,
   ): void {
@@ -181,6 +184,7 @@ export class TrackRepository {
       filePath: 'file_path',
       videoPath: 'video_path',
       youtubeId: 'youtube_id',
+      spotifyUri: 'spotify_uri',
       durationSec: 'duration_sec',
       thumbnail: 'thumbnail',
       title: 'title',

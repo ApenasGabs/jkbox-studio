@@ -1,7 +1,7 @@
 import type { IncomingMessage, Server } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { Jukebox } from './services/jukebox.js';
-import { REACTION_EMOJIS, type ReactionEmoji } from './types.js';
+import { type PlaybackOutput, REACTION_EMOJIS, type ReactionEmoji } from './types.js';
 
 export const KIOSK_COMMANDS = ['UP', 'DOWN', 'LEFT', 'RIGHT', 'SELECT', 'PLAY', 'BACK', 'MENU', 'SKIP'] as const;
 export type KioskCommand = (typeof KIOSK_COMMANDS)[number];
@@ -25,11 +25,12 @@ export interface RealtimeOptions {
 }
 
 export type ServerMessage =
-  | { type: 'state'; state: ReturnType<Jukebox['queue']['state']> }
+  | { type: 'state'; state: ReturnType<Jukebox['queue']['state']>; playbackOutput: PlaybackOutput }
   | { type: 'progress'; positionSec: number; paused: boolean }
   | { type: 'download'; trackId: string; status: string; progress: number; error: string | null }
   | { type: 'lyrics_offset'; trackId: string; offsetMs: number }
   | { type: 'reaction'; emoji: ReactionEmoji; senderName?: string }
+  | { type: 'notice'; message: string; error?: boolean }
   | { type: 'input'; command: KioskCommand; phase: KioskInputPhase; source?: string };
 
 export type ClientMessage =
@@ -125,11 +126,13 @@ export function attachRealtime(server: Server, jukebox: Jukebox, options: Realti
     if (pending) return;
     pending = setImmediate(() => {
       pending = null;
-      broadcast({ type: 'state', state: queue.state() });
+      broadcast({ type: 'state', state: queue.state(), playbackOutput: jukebox.playbackOutput });
     });
   };
 
   queue.on('change', pushState);
+  jukebox.on('output', pushState);
+  jukebox.on('notice', (message, error) => broadcast({ type: 'notice', message, error }));
   queue.on('progress', (positionSec, paused) => broadcast({ type: 'progress', positionSec, paused }));
   const onDownload = (track: { id: string; status: string; progress: number; error: string | null }) =>
     broadcast({ type: 'download', trackId: track.id, status: track.status, progress: track.progress, error: track.error });
@@ -146,7 +149,9 @@ export function attachRealtime(server: Server, jukebox: Jukebox, options: Realti
 
   wss.on('connection', (socket, req) => {
     const localInputAllowed = isLocalInputConnection(req);
-    socket.send(JSON.stringify({ type: 'state', state: queue.state() } satisfies ServerMessage));
+    socket.send(
+      JSON.stringify({ type: 'state', state: queue.state(), playbackOutput: jukebox.playbackOutput } satisfies ServerMessage),
+    );
     socket.on('message', (raw) => {
       let msg: ClientMessage;
       try {

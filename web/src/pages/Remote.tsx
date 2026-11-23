@@ -4,6 +4,7 @@ import { Cover } from '../components/Cover';
 import { LyricsView } from '../components/LyricsView';
 import { QueueList } from '../components/QueueList';
 import { SourceBadge } from '../components/SourceBadge';
+import { SpotifyConnectSelector } from '../components/SpotifyConnectSelector';
 import { useToast } from '../components/Toast';
 import { TrackMetadataModal } from '../components/TrackMetadataModal';
 import { api, getClientId, getHostPin, getName, type SearchSource, setHostPin, setName } from '../lib/api';
@@ -18,6 +19,7 @@ import {
 } from '../lib/catalog';
 import { formatTime } from '../lib/format';
 import { applyKaraokeFilter } from '../lib/karaoke';
+import { formatSpotifyOutputBadge } from '../lib/spotifyConnect';
 import { type AppConfig, type QueueEntry, REACTION_EMOJIS, type ReactionEmoji, type SearchResult, type Track } from '../lib/types';
 import { useInterpolatedTime } from '../lib/useInterpolatedTime';
 import { useJukebox } from '../lib/useJukebox';
@@ -56,7 +58,7 @@ function formatPlayedAt(finishedAt: number | null | undefined): string | null {
 }
 
 export function Remote() {
-  const { state, position, downloads, lyricsOffset, connected, send } = useJukebox();
+  const { state, playbackOutput, position, downloads, lyricsOffset, notice, connected, send } = useJukebox();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [view, setView] = useState<'search' | 'queue' | 'lyrics' | 'history'>('search');
   const [name, setNameState] = useState(getName());
@@ -79,6 +81,9 @@ export function Remote() {
   const [editingTrack, setEditingTrack] = useState<EditableTrack | null>(null);
   const [hostVerified, setHostVerified] = useState(false);
   const [hostPinOpen, setHostPinOpen] = useState(false);
+  const [hostPanelOpen, setHostPanelOpen] = useState(false);
+  const [spotifyVolume, setSpotifyVolume] = useState(80);
+  const [playbackBusy, setPlaybackBusy] = useState(false);
   const [pinInput, setPinInput] = useState('');
   const [pinBusy, setPinBusy] = useState(false);
   const [pinError, setPinError] = useState<string | null>(null);
@@ -95,6 +100,7 @@ export function Remote() {
     lyricsOffset,
   );
   const canEditMetadata = Boolean(config && (!config.hostPinRequired || hostVerified));
+  const spotifyBadge = formatSpotifyOutputBadge(playbackOutput);
 
   useEffect(() => {
     api
@@ -115,6 +121,10 @@ export function Remote() {
     const timer = setTimeout(() => setCatalogFilter(query), 250);
     return () => clearTimeout(timer);
   }, [query]);
+
+  useEffect(() => {
+    if (notice) toast.show(notice.message, notice.error);
+  }, [notice, toast.show]);
 
   useEffect(() => {
     return () => {
@@ -279,6 +289,20 @@ export function Remote() {
             jkbox<span className="text-accent">studio</span>
           </span>
           <div className="flex items-center gap-2">
+            {canEditMetadata && (
+              <button
+                type="button"
+                onClick={() => setHostPanelOpen(true)}
+                title="Escolher onde tocar (Player Local ou Spotify Connect) e controles do host"
+                className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition ${
+                  spotifyBadge
+                    ? 'border-green-400/50 bg-green-500/20 text-green-200 hover:bg-green-500/30'
+                    : 'border-white/10 bg-white/5 text-zinc-200 hover:bg-white/15'
+                }`}
+              >
+                {spotifyBadge ? '🔊 Spotify Connect' : '🎛 Saída'}
+              </button>
+            )}
             {config?.hostPinRequired && (
               <button
                 type="button"
@@ -286,6 +310,7 @@ export function Remote() {
                   if (hostVerified) {
                     setHostPin('');
                     setHostVerified(false);
+                    setHostPanelOpen(false);
                     toast.show('Modo host bloqueado');
                   } else {
                     setPinInput('');
@@ -293,7 +318,7 @@ export function Remote() {
                     setHostPinOpen(true);
                   }
                 }}
-                title={hostVerified ? 'Modo host ativo (clique para bloquear)' : 'Entrar no modo host para editar metadados'}
+                title={hostVerified ? 'Modo host ativo (clique para bloquear)' : 'Entrar no modo host para editar metadados e escolher saída'}
                 className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition ${
                   hostVerified
                     ? 'border-accent/50 bg-accent/20 text-purple-100 hover:bg-accent/30'
@@ -321,6 +346,9 @@ export function Remote() {
                   {position.paused ? '⏸' : '▶'} {current.track.title}
                 </p>
                 <p className="truncate text-xs text-zinc-400">{current.track.artist}</p>
+                {spotifyBadge && (
+                  <p className="mt-0.5 truncate text-[11px] font-medium text-green-300">{spotifyBadge}</p>
+                )}
                 <div className="mt-1 h-1 overflow-hidden rounded-full bg-white/10">
                   <div className="h-full bg-accent" style={{ width: `${duration ? Math.min(100, (livePositionSec / duration) * 100) : 0}%` }} />
                 </div>
@@ -660,7 +688,7 @@ export function Remote() {
               </button>
             </div>
             <p className="text-xs text-zinc-400">
-              Informe o PIN do host para editar categorias, álbuns e metadados das músicas.
+              Informe o PIN do host para editar categorias, álbuns, metadados e escolher o dispositivo de áudio.
             </p>
             <form onSubmit={submitHostPin} className="flex flex-col gap-3">
               <input
@@ -691,6 +719,81 @@ export function Remote() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      {hostPanelOpen && canEditMetadata && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+          onClick={() => setHostPanelOpen(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="remote-host-panel-title"
+            onClick={(e) => e.stopPropagation()}
+            className="flex max-h-[85vh] w-full max-w-md flex-col gap-4 overflow-y-auto rounded-3xl border border-white/15 bg-panel p-5 shadow-2xl"
+          >
+            <div className="flex items-center justify-between">
+              <h2 id="remote-host-panel-title" className="text-base font-bold">
+                Saída de áudio e Playback
+              </h2>
+              <button
+                type="button"
+                onClick={() => setHostPanelOpen(false)}
+                aria-label="Fechar controles do host"
+                className="rounded-lg px-2 py-1 text-zinc-400 hover:bg-white/10 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+
+            {current && (
+              <div className="glass flex flex-col gap-2 p-3">
+                <p className="truncate text-xs text-zinc-400">
+                  Tocando agora: <span className="font-semibold text-white">{current.track.title}</span>
+                </p>
+                <div className="flex items-center gap-2">
+                  {playbackOutput.type === 'spotify' && (
+                    <button
+                      type="button"
+                      disabled={playbackBusy}
+                      onClick={() => {
+                        setPlaybackBusy(true);
+                        void (position.paused ? api.spotifyResume() : api.spotifyPause())
+                          .catch((err) => toast.show((err as Error).message, true))
+                          .finally(() => setPlaybackBusy(false));
+                      }}
+                      className="flex-1 rounded-xl bg-white px-3 py-2 text-xs font-semibold text-zinc-900 disabled:opacity-50"
+                    >
+                      {position.paused ? '▶ Tocar no Spotify' : '❚❚ Pausar Spotify'}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    disabled={playbackBusy}
+                    onClick={() => {
+                      setPlaybackBusy(true);
+                      void api
+                        .skip()
+                        .catch((err) => toast.show((err as Error).message, true))
+                        .finally(() => setPlaybackBusy(false));
+                    }}
+                    className="flex-1 rounded-xl bg-white/10 px-3 py-2 text-xs font-semibold text-white hover:bg-white/20 disabled:opacity-50"
+                  >
+                    ⏭ Pular faixa
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <SpotifyConnectSelector
+              config={config}
+              playbackOutput={playbackOutput}
+              volume={spotifyVolume}
+              onVolumeChange={setSpotifyVolume}
+              onToast={toast.show}
+            />
           </div>
         </div>
       )}
