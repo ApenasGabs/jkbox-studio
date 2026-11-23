@@ -344,6 +344,8 @@ AUDIO_FORMAT=m4a
 VIDEO_MODE=cache
 VIDEO_MAX_HEIGHT=720
 YTDLP_AUTO_UPDATE=false
+MDNS_HOSTNAME=${JKBOX_HOSTNAME}
+JKBOX_HOSTNAME_HELPER=/usr/local/bin/jkbox-hostname
 JKBOX_HOTSPOT_SSID=${JKBOX_HOTSPOT_SSID}
 JKBOX_HOTSPOT_PASSWORD=${JKBOX_HOTSPOT_PASSWORD}
 EOF
@@ -440,6 +442,16 @@ configure_network_mdns() {
 [ifupdown]
 managed=true
 EOF
+
+  if [ -f "${SCRIPT_DIR}/jkbox-hostname.sh" ]; then
+    if [ "$DRY_RUN" -eq 0 ]; then
+      install -m 0755 -o root -g root "${SCRIPT_DIR}/jkbox-hostname.sh" /usr/local/bin/jkbox-hostname
+      printf '%s ALL=(root) NOPASSWD: /usr/local/bin/jkbox-hostname *\n' "$JKBOX_USER" > /etc/sudoers.d/jkbox-hostname
+      chmod 0440 /etc/sudoers.d/jkbox-hostname
+    else
+      log "[dry-run] Instalaria /usr/local/bin/jkbox-hostname e /etc/sudoers.d/jkbox-hostname"
+    fi
+  fi
 
   if [ "$DRY_RUN" -eq 0 ]; then
     systemctl enable NetworkManager.service avahi-daemon.service >/dev/null 2>&1 || true

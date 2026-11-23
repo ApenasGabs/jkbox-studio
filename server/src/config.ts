@@ -17,6 +17,9 @@ export interface Config {
   hostPin: string;
   ytdlpPath: string;
   ytdlpExtraArgs: string[];
+  mdnsHostname: string;
+  mdnsEnabled: boolean;
+  hostnameHelper: string;
   spotify: {
     clientId: string;
     clientSecret: string;
@@ -64,6 +67,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     hostPin: env.HOST_PIN ?? '',
     ytdlpPath: env.YTDLP_PATH || 'yt-dlp',
     ytdlpExtraArgs: splitArgs(env.YTDLP_EXTRA_ARGS),
+    mdnsHostname: (env.MDNS_HOSTNAME || 'jkbox').trim(),
+    mdnsEnabled: (env.MDNS_ENABLED ?? 'true').toLowerCase() !== 'false',
+    hostnameHelper: (env.JKBOX_HOSTNAME_HELPER ?? '').trim(),
     spotify: {
       clientId: env.SPOTIFY_CLIENT_ID ?? '',
       clientSecret: env.SPOTIFY_CLIENT_SECRET ?? '',

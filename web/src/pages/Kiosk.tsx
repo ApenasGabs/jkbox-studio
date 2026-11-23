@@ -3,6 +3,7 @@ import { type RefObject, useCallback, useEffect, useRef, useState } from 'react'
 import { CatalogBrowser } from '../components/CatalogBrowser';
 import { Cover } from '../components/Cover';
 import { LyricsView } from '../components/LyricsView';
+import { MdnsHostnamePanel } from '../components/MdnsHostnamePanel';
 import { QueueList } from '../components/QueueList';
 import { SourceBadge } from '../components/SourceBadge';
 import { SpotifyConnectSelector } from '../components/SpotifyConnectSelector';
@@ -423,7 +424,8 @@ export function Kiosk() {
     void persistLyricsOffset(0);
   };
 
-  const url = remoteUrl(config?.publicUrl ?? null);
+  const qrBaseUrl = config?.mdns?.useForQr && config.mdns.url ? config.mdns.url : (config?.publicUrl ?? null);
+  const url = remoteUrl(qrBaseUrl);
   const effectiveDuration = isSpotifyOutput ? current?.track.durationSec || 0 : time.duration || current?.track.durationSec || 0;
   const progressPct = effectiveDuration > 0 ? Math.min(100, (effectiveCurrentSec / effectiveDuration) * 100) : 0;
   const remainingSec = effectiveDuration > 0 ? Math.max(0, effectiveDuration - effectiveCurrentSec) : Number.POSITIVE_INFINITY;
@@ -1487,6 +1489,8 @@ function HostPanel({
             <p className="text-xs text-accent-2 [overflow-wrap:anywhere]">{qrUrl}</p>
           </div>
         </section>
+
+        <MdnsHostnamePanel mdns={config?.mdns} onUpdated={() => onChanged()} onToast={onToast} />
 
         {config?.hostPinRequired && (
           <section className="glass flex flex-col gap-2 p-4">

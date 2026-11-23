@@ -8,6 +8,7 @@ import { SPOTIFY_ID_RE } from './lib/validate.js';
 import type { Jukebox, SearchSource } from './services/jukebox.js';
 import { scanLibrary } from './services/library.js';
 import { LyricsError } from './services/lyrics.js';
+import { MdnsError, type MdnsService } from './services/mdns.js';
 import { QueueError } from './services/queue.js';
 import { SpotifyError } from './services/spotify.js';
 import type { Track } from './types.js';
@@ -17,6 +18,7 @@ const SEARCH_SOURCES = new Set<SearchSource>(['all', 'youtube', 'spotify', 'loca
 export interface AppDeps {
   config: Config;
   jukebox: Jukebox;
+  mdns?: MdnsService;
   version?: string;
 }
 
@@ -24,7 +26,7 @@ function str(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
-export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): express.Express {
+export function createApp({ config, jukebox, mdns, version = '0.1.0' }: AppDeps): express.Express {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', true);
@@ -56,7 +58,25 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
       autoDjEnabled: jukebox.autoDjEnabled,
       playbackOutput: jukebox.playbackOutput,
       spotify: spotify.status(),
+      mdns: mdns?.status() ?? null,
     });
+  });
+
+  api.patch('/config/hostname', requireHost, async (req, res, next) => {
+    try {
+      if (!mdns) return void res.status(503).json({ error: 'Serviço mDNS não inicializado' });
+      const { hostname, useForQr } = req.body ?? {};
+      if (hostname === undefined && useForQr === undefined) {
+        return void res.status(400).json({ error: 'Informe hostname ou useForQr' });
+      }
+      const status = await mdns.update({ hostname, useForQr });
+      res.json({ mdns: status });
+    } catch (err) {
+      if (err instanceof MdnsError) {
+        return void res.status(err.status).json({ error: err.message });
+      }
+      next(err);
+    }
   });
 
   api.post('/host/verify', (req, res) => {

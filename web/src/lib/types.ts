@@ -127,6 +127,20 @@ export interface SpotifyStatus {
   redirectUri: string | null;
 }
 
+export type MdnsMode = 'os-helper' | 'embedded' | 'disabled';
+
+export interface MdnsStatus {
+  hostname: string;
+  fqdn: string;
+  url: string;
+  enabled: boolean;
+  active: boolean;
+  mode: MdnsMode;
+  useForQr: boolean;
+  dockerBridgeHint: boolean;
+  lastError: string | null;
+}
+
 export interface AppConfig {
   publicUrl: string | null;
   hostPinRequired: boolean;
@@ -135,6 +149,7 @@ export interface AppConfig {
   autoDjEnabled: boolean;
   playbackOutput: PlaybackOutput;
   spotify: SpotifyStatus;
+  mdns?: MdnsStatus | null;
 }
 
 export type LyricsSource = 'lrclib' | 'local' | 'none';

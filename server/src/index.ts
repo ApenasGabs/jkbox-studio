@@ -5,6 +5,7 @@ import { loadConfig } from './config.js';
 import { createJukebox } from './container.js';
 import { attachRealtime } from './realtime.js';
 import { scanLibrary } from './services/library.js';
+import { MdnsService } from './services/mdns.js';
 
 const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
 
@@ -25,11 +26,20 @@ async function main() {
   jukebox.syncStartupPlayback();
   jukebox.startSpotifyImport(config.spotify.importIntervalSec);
 
-  const app = createApp({ config, jukebox, version: pkg.version });
+  const mdns = new MdnsService({
+    port: config.port,
+    defaultHostname: config.mdnsHostname,
+    enabled: config.mdnsEnabled,
+    hostnameHelper: config.hostnameHelper,
+    settings: jukebox.settings,
+  });
+
+  const app = createApp({ config, jukebox, mdns, version: pkg.version });
   const server = http.createServer(app);
   attachRealtime(server, jukebox);
 
   server.listen(config.port, () => {
+    mdns.start();
     console.log(`[jkbox] ouvindo em http://0.0.0.0:${config.port}`);
     console.log(`[jkbox] dados em ${config.dataDir}`);
     console.log(
@@ -39,6 +49,7 @@ async function main() {
 
   const shutdown = () => {
     console.log('[jkbox] encerrando...');
+    mdns.stop();
     jukebox.stop();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 3000).unref();

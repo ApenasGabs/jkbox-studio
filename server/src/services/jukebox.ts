@@ -91,7 +91,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     readonly spotify: SpotifyService,
     readonly lyrics: LyricsService,
     private readonly log: (msg: string) => void = console.log,
-    private readonly settings?: Settings,
+    readonly settings?: Settings,
   ) {
     super();
     this._autoDjEnabled = this.settings?.get<boolean>('autoDjEnabled') ?? false;

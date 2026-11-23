@@ -5,6 +5,7 @@ import type {
   CatalogArtistDetail,
   CatalogCategory,
   JukeboxState,
+  MdnsStatus,
   PlaybackOutput,
   QueueEntry,
   SearchResult,
@@ -128,6 +129,11 @@ export const api = {
     request<{ autoDjEnabled: boolean }>('/api/host/settings', {
       method: 'PATCH',
       body: JSON.stringify(settings),
+    }),
+  updateHostname: (patch: { hostname?: string; useForQr?: boolean }) =>
+    request<{ mdns: MdnsStatus }>('/api/config/hostname', {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
     }),
   rescanLibrary: () => post<{ added: number }>('/api/library/rescan'),
   spotifySync: () => post<SpotifyStatus & { synced: number }>('/api/spotify/sync'),

@@ -2,6 +2,7 @@ import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { CatalogBrowser } from '../components/CatalogBrowser';
 import { Cover } from '../components/Cover';
 import { LyricsView } from '../components/LyricsView';
+import { MdnsHostnamePanel } from '../components/MdnsHostnamePanel';
 import { QueueList } from '../components/QueueList';
 import { SourceBadge } from '../components/SourceBadge';
 import { SpotifyConnectSelector } from '../components/SpotifyConnectSelector';
@@ -792,6 +793,12 @@ export function Remote() {
               playbackOutput={playbackOutput}
               volume={spotifyVolume}
               onVolumeChange={setSpotifyVolume}
+              onToast={toast.show}
+            />
+
+            <MdnsHostnamePanel
+              mdns={config?.mdns}
+              onUpdated={(mdns) => setConfig((prev) => (prev ? { ...prev, mdns } : prev))}
               onToast={toast.show}
             />
           </div>
