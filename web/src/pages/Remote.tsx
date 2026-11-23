@@ -19,7 +19,7 @@ import {
 } from '../lib/catalog';
 import { formatTime } from '../lib/format';
 import { applyKaraokeFilter } from '../lib/karaoke';
-import { formatSpotifyOutputBadge } from '../lib/spotifyConnect';
+import { describeSpotifyConnectError, formatSpotifyOutputBadge } from '../lib/spotifyConnect';
 import { type AppConfig, type QueueEntry, REACTION_EMOJIS, type ReactionEmoji, type SearchResult, type Track } from '../lib/types';
 import { useInterpolatedTime } from '../lib/useInterpolatedTime';
 import { useJukebox } from '../lib/useJukebox';
@@ -761,7 +761,7 @@ export function Remote() {
                       onClick={() => {
                         setPlaybackBusy(true);
                         void (position.paused ? api.spotifyResume() : api.spotifyPause())
-                          .catch((err) => toast.show((err as Error).message, true))
+                          .catch((err) => toast.show(describeSpotifyConnectError(err).message, true))
                           .finally(() => setPlaybackBusy(false));
                       }}
                       className="flex-1 rounded-xl bg-white px-3 py-2 text-xs font-semibold text-zinc-900 disabled:opacity-50"
@@ -776,7 +776,7 @@ export function Remote() {
                       setPlaybackBusy(true);
                       void api
                         .skip()
-                        .catch((err) => toast.show((err as Error).message, true))
+                        .catch((err) => toast.show(describeSpotifyConnectError(err).message, true))
                         .finally(() => setPlaybackBusy(false));
                     }}
                     className="flex-1 rounded-xl bg-white/10 px-3 py-2 text-xs font-semibold text-white hover:bg-white/20 disabled:opacity-50"

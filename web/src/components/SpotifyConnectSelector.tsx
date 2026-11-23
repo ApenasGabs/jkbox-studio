@@ -6,13 +6,13 @@ import {
   spotifyDeviceLabel,
 } from '../lib/spotifyConnect';
 import type { AppConfig, PlaybackOutput, SpotifyDevice } from '../lib/types';
+import { useSpotifyVolumeControl } from '../lib/useSpotifyVolume';
 
 interface SpotifyConnectSelectorProps {
   config: AppConfig | null;
   playbackOutput: PlaybackOutput;
   volume: number;
   onVolumeChange: (volume: number) => void;
-  onOutputChanged?: (output: PlaybackOutput) => void;
   onToast?: (message: string, error?: boolean) => void;
 }
 
@@ -21,19 +21,29 @@ export function SpotifyConnectSelector({
   playbackOutput,
   volume,
   onVolumeChange,
-  onOutputChanged,
   onToast,
 }: SpotifyConnectSelectorProps) {
   const [devices, setDevices] = useState<SpotifyDevice[]>([]);
   const [loading, setLoading] = useState(false);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [errorInfo, setErrorInfo] = useState<{ message: string; code?: string } | null>(null);
-  const volumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(true);
+  const loadSeqRef = useRef(0);
+  const onVolumeChangeRef = useRef(onVolumeChange);
+  onVolumeChangeRef.current = onVolumeChange;
 
   const spotify = config?.spotify;
   const canQueryDevices = Boolean(spotify?.configured && spotify.connected && spotify.playbackAuthorized);
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const loadDevices = useCallback(async () => {
+    const reqSeq = ++loadSeqRef.current;
     if (!canQueryDevices) {
       setDevices([]);
       return;
@@ -42,40 +52,37 @@ export function SpotifyConnectSelector({
     setErrorInfo(null);
     try {
       const res = await api.spotifyDevices();
+      if (!mountedRef.current || reqSeq !== loadSeqRef.current) return;
       setDevices(res.devices);
       const outputDeviceId = res.playbackOutput.type === 'spotify' ? res.playbackOutput.deviceId : null;
       if (outputDeviceId) {
         const active = res.devices.find((d) => d.id === outputDeviceId);
         if (active?.volumePercent != null) {
-          onVolumeChange(active.volumePercent);
+          onVolumeChangeRef.current(active.volumePercent);
         }
       }
     } catch (err) {
+      if (!mountedRef.current || reqSeq !== loadSeqRef.current) return;
       setErrorInfo(describeSpotifyConnectError(err));
     } finally {
-      setLoading(false);
+      if (mountedRef.current && reqSeq === loadSeqRef.current) {
+        setLoading(false);
+      }
     }
-  }, [canQueryDevices, onVolumeChange]);
+  }, [canQueryDevices]);
 
   useEffect(() => {
     void loadDevices();
   }, [loadDevices]);
-
-  useEffect(() => {
-    return () => {
-      if (volumeTimerRef.current) clearTimeout(volumeTimerRef.current);
-    };
-  }, []);
 
   const selectDevice = async (deviceId: string | null, label: string) => {
     setSwitchingId(deviceId ?? 'local');
     setErrorInfo(null);
     try {
       const res = await api.setSpotifyDevice(deviceId);
-      onOutputChanged?.(res.playbackOutput);
       const selected = deviceId ? devices.find((d) => d.id === deviceId) : null;
       if (selected?.volumePercent != null) {
-        onVolumeChange(selected.volumePercent);
+        onVolumeChangeRef.current(selected.volumePercent);
       }
       onToast?.(
         res.playbackOutput.type === 'local'
@@ -94,20 +101,14 @@ export function SpotifyConnectSelector({
     }
   };
 
-  const applyVolume = (nextVolume: number, immediate: boolean) => {
-    const clamped = Math.max(0, Math.min(100, Math.round(nextVolume)));
-    onVolumeChange(clamped);
-    if (volumeTimerRef.current) clearTimeout(volumeTimerRef.current);
-    const send = () => {
-      api.spotifySetVolume(clamped).catch((err) => {
-        const info = describeSpotifyConnectError(err);
-        setErrorInfo(info);
-        onToast?.(info.message, true);
-      });
-    };
-    if (immediate) send();
-    else volumeTimerRef.current = setTimeout(send, 150);
-  };
+  const handleVolumeError = useCallback(
+    (info: { message: string; code?: string }) => {
+      setErrorInfo(info);
+      onToast?.(info.message, true);
+    },
+    [onToast],
+  );
+  const applyVolume = useSpotifyVolumeControl(onVolumeChange, handleVolumeError);
 
   const activeSpotifyDevice =
     playbackOutput.type === 'spotify' ? devices.find((d) => d.id === playbackOutput.deviceId) : undefined;

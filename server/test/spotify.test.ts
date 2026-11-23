@@ -64,8 +64,8 @@ function fakeSpotify(options: FakeSpotifyOptions = {}) {
   const fetchFn = vi.fn(async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = String(input);
     const method = init.method ?? 'GET';
-    const headers = (init.headers ?? {}) as Record<string, string>;
-    calls.push({ method, url, body: init.body as string | undefined, auth: headers.Authorization });
+    const headers = new Headers(init.headers);
+    calls.push({ method, url, body: init.body as string | undefined, auth: headers.get('Authorization') ?? undefined });
     if (url.endsWith('/api/token')) {
       const params = new URLSearchParams(init.body as string);
       if (params.get('grant_type') === 'client_credentials') return json({ access_token: 'app-token', expires_in: 3600 });
@@ -391,6 +391,116 @@ describe('Spotify integration', () => {
     );
 
     await jukebox.downloads.idle();
+    jukebox.stop();
+  });
+
+  it('propagates 403/404 on Local -> Spotify switch while playing and keeps output local', async () => {
+    const fake = fakeSpotify();
+    const { config, jukebox } = setup(SPOTIFY_ENV, fake.fetchFn);
+    const app = createApp({ config, jukebox });
+    const state = new URL((await request(app).get('/api/spotify/auth')).headers.location).searchParams.get('state');
+    await request(app).get('/api/spotify/callback').query({ code: 'c', state });
+
+    const spotifyResult = (await request(app).get('/api/search').query({ q: 'https://open.spotify.com/track/t2' })).body.results[0];
+    await request(app).post('/api/queue').send({ result: spotifyResult, clientId: 'a' }).expect(201);
+    await jukebox.downloads.idle();
+    expect(jukebox.queue.state().nowPlaying?.item.track.sourceId).toBe('t2');
+
+    fake.setPlayerError({ status: 403, reason: 'PREMIUM_REQUIRED', message: 'Premium required' });
+    const res = await request(app).post('/api/spotify/device').send({ deviceId: 'spk-sala' }).expect(403);
+    expect(res.body.code).toBe('PREMIUM_REQUIRED');
+    expect(jukebox.playbackOutput).toEqual({ type: 'local' });
+
+    fake.setPlayerError({ status: 404, reason: 'NO_ACTIVE_DEVICE', message: 'No active device' });
+    const res404 = await request(app).post('/api/spotify/device').send({ deviceId: 'spk-sala' }).expect(404);
+    expect(res404.body.code).toBe('NO_ACTIVE_DEVICE');
+    expect(jukebox.playbackOutput).toEqual({ type: 'local' });
+    jukebox.stop();
+  });
+
+  it('does not falsely skip on Spotify -> Spotify transfer handoff and starts unstarted tracks', async () => {
+    const fake = fakeSpotify();
+    const { config, jukebox } = setup(SPOTIFY_ENV, fake.fetchFn);
+    const app = createApp({ config, jukebox });
+    const state = new URL((await request(app).get('/api/spotify/auth')).headers.location).searchParams.get('state');
+    await request(app).get('/api/spotify/callback').query({ code: 'c', state });
+
+    await request(app).post('/api/spotify/device').send({ deviceId: 'spk-sala' }).expect(200);
+    const t2 = (await request(app).get('/api/search').query({ q: 'https://open.spotify.com/track/t2' })).body.results[0];
+    const t3 = (await request(app).get('/api/search').query({ q: 'https://open.spotify.com/track/t3' })).body.results[0];
+    await request(app).post('/api/queue').send({ result: t2, clientId: 'a' }).expect(201);
+    await request(app).post('/api/queue').send({ result: t3, clientId: 'b' }).expect(201);
+
+    await vi.waitFor(() =>
+      expect(fake.calls.some((c) => c.url.includes('/v1/me/player/play?device_id=spk-sala'))).toBe(true),
+    );
+    // Simulate track t2 was actively playing before transfer
+    fake.setPlaybackState({ is_playing: true, progress_ms: 20_000, item: track('t2', 'Digital Love') });
+    await jukebox.pollSpotifyPlayback();
+
+    // During transfer to tv-quarto, Spotify briefly reports null (204): must NOT skip t2!
+    fake.setPlaybackState(null);
+    await request(app).post('/api/spotify/device').send({ deviceId: 'tv-quarto' }).expect(200);
+    await jukebox.pollSpotifyPlayback();
+    expect(jukebox.queue.state().nowPlaying?.item.track.sourceId).toBe('t2');
+    expect(jukebox.playbackOutput).toEqual({ type: 'spotify', deviceId: 'tv-quarto', deviceName: 'TV Quarto' });
+
+    // Serialized concurrent switches settle cleanly on the final requested output
+    const [r1, r2] = await Promise.all([
+      request(app).post('/api/spotify/device').send({ deviceId: 'spk-sala' }),
+      request(app).post('/api/spotify/device').send({ deviceId: null }),
+    ]);
+    expect(r1.status).toBe(200);
+    expect(r2.status).toBe(200);
+    expect(jukebox.playbackOutput).toEqual({ type: 'local' });
+
+    await jukebox.downloads.idle();
+    jukebox.stop();
+  });
+
+  it('starts pending YouTube tracks immediately in Spotify mode and ensures download on disconnectSpotify', async () => {
+    const fake = fakeSpotify();
+    const { config, jukebox } = setup(SPOTIFY_ENV, fake.fetchFn);
+    const ensureSpy = vi.spyOn(jukebox.downloads, 'ensure');
+    const app = createApp({ config, jukebox });
+    const state = new URL((await request(app).get('/api/spotify/auth')).headers.location).searchParams.get('state');
+    await request(app).get('/api/spotify/callback').query({ code: 'c', state });
+
+    await request(app).post('/api/spotify/device').send({ deviceId: 'spk-sala' }).expect(200);
+
+    // Manually insert pending YouTube track (simulating slow yt-dlp download)
+    const pendingTrack = jukebox.tracks.upsertFromResult(ytResult('slowyt00001', 'One More Time', 'Daft Punk'));
+    expect(pendingTrack.status).toBe('pending');
+    jukebox.queue.enqueue(pendingTrack.id, 'u1', 'Ana');
+
+    // Starts immediately on Spotify without waiting for track.status === 'ready'
+    expect(jukebox.queue.state().nowPlaying?.item.track.id).toBe(pendingTrack.id);
+    await vi.waitFor(() =>
+      expect(fake.calls.some((c) => c.url.includes('/v1/me/player/play') && c.body?.includes('spotify:track:t1'))).toBe(true),
+    );
+
+    ensureSpy.mockClear();
+    jukebox.disconnectSpotify();
+    expect(jukebox.playbackOutput).toEqual({ type: 'local' });
+    expect(ensureSpy).toHaveBeenCalledWith(pendingTrack.id);
+    await jukebox.downloads.idle();
+    jukebox.stop();
+  });
+
+  it('preserves Headers instances and tuple headers in SpotifyService api requests', async () => {
+    const fake = fakeSpotify();
+    const { jukebox } = setup(SPOTIFY_ENV, fake.fetchFn);
+    await jukebox.spotify['api']('/tracks/t2', { headers: new Headers({ 'X-Custom': 'yes' }) }, 'app');
+    const lastFetchCall = vi.mocked(fake.fetchFn).mock.calls.at(-1)!;
+    const passedHeaders = new Headers(lastFetchCall[1]?.headers);
+    expect(passedHeaders.get('Authorization')).toBe('Bearer app-token');
+    expect(passedHeaders.get('X-Custom')).toBe('yes');
+
+    await jukebox.spotify['api']('/tracks/t2', { headers: [['X-Tuple', 'ok']] }, 'app');
+    const tupleCall = vi.mocked(fake.fetchFn).mock.calls.at(-1)!;
+    const tupleHeaders = new Headers(tupleCall[1]?.headers);
+    expect(tupleHeaders.get('Authorization')).toBe('Bearer app-token');
+    expect(tupleHeaders.get('X-Tuple')).toBe('ok');
     jukebox.stop();
   });
 });

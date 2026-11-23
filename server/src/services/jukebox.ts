@@ -71,6 +71,9 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
   private spotifyPollIntervalMs = DEFAULT_SPOTIFY_POLL_MS;
   private spotifyPollInFlight = false;
   private spotifyPlaySeq = 0;
+  private outputGen = 0;
+  private outputSwitchChain: Promise<unknown> = Promise.resolve();
+  private readonly spotifyUnavailableTrackIds = new Set<string>();
   private activeSpotifyQueueId: number | null = null;
   private activeSpotifyTrackUri: string | null = null;
   private spotifyStartedAtMs = 0;
@@ -93,9 +96,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     super();
     this._autoDjEnabled = this.settings?.get<boolean>('autoDjEnabled') ?? false;
     this._playbackOutput = normalizePlaybackOutput(this.settings?.get<unknown>('playback_output'), spotify.connected);
-    queue.setPlayablePredicate(
-      (track) => track.status === 'ready' || (this._playbackOutput.type === 'spotify' && Boolean(track.spotifyUri)),
-    );
+    queue.setPlayablePredicate((track) => track.status === 'ready' || this._playbackOutput.type === 'spotify');
     downloads.on('ready', () => queue.advanceIfIdle());
     queue.on('started', (entry) => {
       if (this._playbackOutput.type === 'spotify') {
@@ -109,7 +110,9 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
         this.stopSpotifyPolling();
         this.activeSpotifyQueueId = null;
         this.activeSpotifyTrackUri = null;
-        void this.spotify.pausePlayback(deviceId).catch(() => {});
+        void this.spotify.pausePlayback(deviceId).catch((err) => {
+          this.log(`[spotify-connect] falha ao pausar ao esvaziar fila: ${errorMessage(err)}`);
+        });
       }
     });
   }
@@ -131,70 +134,173 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     return { devices, playbackOutput: this._playbackOutput };
   }
 
-  async setPlaybackOutput(deviceId: string | null): Promise<PlaybackOutput> {
-    const prev = this._playbackOutput;
-    if (deviceId === null) {
-      this.spotifyPlaySeq += 1;
-      this.stopSpotifyPolling();
-      this._playbackOutput = { type: 'local' };
-      this.settings?.set('playback_output', this._playbackOutput);
-      this.activeSpotifyQueueId = null;
-      this.activeSpotifyTrackUri = null;
-      this.consecutiveSpotifyMisses = 0;
-      if (prev.type === 'spotify') {
-        void this.spotify.pausePlayback(prev.deviceId).catch(() => {});
-        const current = this.queue.state().nowPlaying;
-        if (current) {
-          try {
-            this.downloads.ensure(current.item.trackId);
-          } catch {
-            /* ignore */
-          }
-        }
-      }
-      this.emit('output', this._playbackOutput);
-      this.queue.emit('change');
-      return this._playbackOutput;
-    }
+  setPlaybackOutput(deviceId: string | null): Promise<PlaybackOutput> {
+    const run = this.outputSwitchChain.then(
+      () => this.applyPlaybackOutput(deviceId),
+      () => this.applyPlaybackOutput(deviceId),
+    );
+    this.outputSwitchChain = run.catch(() => {});
+    return run;
+  }
 
-    const devices = await this.spotify.getDevices();
-    const device = devices.find((d) => d.id === deviceId);
-    if (!device) {
-      throw new SpotifyError('Dispositivo Spotify Connect não encontrado ou indisponível', 404, 'NO_ACTIVE_DEVICE');
-    }
-
-    const nowPlaying = this.queue.state().nowPlaying;
-    if (prev.type === 'spotify' && prev.deviceId === device.id) {
-      if (prev.deviceName !== device.name) {
-        this._playbackOutput = { type: 'spotify', deviceId: device.id, deviceName: device.name };
-        this.settings?.set('playback_output', this._playbackOutput);
-        this.emit('output', this._playbackOutput);
-        this.queue.emit('change');
-      }
-      return this._playbackOutput;
-    }
-
-    if (prev.type === 'spotify') {
-      await this.spotify.transferPlayback(device.id, Boolean(nowPlaying && !nowPlaying.paused));
-    } else if (!nowPlaying || nowPlaying.paused) {
-      await this.spotify.transferPlayback(device.id, false);
-    }
-
+  private commitSpotifyOutput(device: Pick<SpotifyDevice, 'id' | 'name'>): void {
     this._playbackOutput = { type: 'spotify', deviceId: device.id, deviceName: device.name };
     this.settings?.set('playback_output', this._playbackOutput);
     this.consecutiveSpotifyMisses = 0;
     this.emit('output', this._playbackOutput);
     this.queue.emit('change');
+  }
 
-    if (prev.type === 'local' && nowPlaying && !nowPlaying.paused) {
-      await this.playCurrentOnSpotify(nowPlaying.item, Math.round(nowPlaying.positionSec * 1000));
-    } else if (prev.type === 'spotify' && nowPlaying && !nowPlaying.paused) {
-      this.startSpotifyPolling();
-    } else if (!nowPlaying) {
-      this.queue.advanceIfIdle();
+  private resetToLocalOutput(pauseDeviceId?: string): PlaybackOutput {
+    this.outputGen += 1;
+    this.spotifyPlaySeq += 1;
+    this.stopSpotifyPolling();
+    this._playbackOutput = { type: 'local' };
+    this.settings?.set('playback_output', this._playbackOutput);
+    this.activeSpotifyQueueId = null;
+    this.activeSpotifyTrackUri = null;
+    this.spotifySeenPlaying = false;
+    this.consecutiveSpotifyMisses = 0;
+    if (pauseDeviceId) {
+      void this.spotify.pausePlayback(pauseDeviceId).catch((err) => {
+        this.log(`[spotify-connect] falha ao pausar dispositivo anterior: ${errorMessage(err)}`);
+      });
+    }
+    const current = this.queue.state().nowPlaying;
+    if (current) {
+      try {
+        this.downloads.ensure(current.item.trackId);
+      } catch (err) {
+        this.log(`[spotify-connect] falha ao garantir download local: ${errorMessage(err)}`);
+      }
+    }
+    this.emit('output', this._playbackOutput);
+    this.queue.emit('change');
+    return this._playbackOutput;
+  }
+
+  private markSpotifyTrackPlaying(queueId: number, uri: string, positionMs: number): void {
+    this.activeSpotifyQueueId = queueId;
+    this.activeSpotifyTrackUri = uri;
+    this.spotifyStartedAtMs = Date.now();
+    this.spotifySeenPlaying = false;
+    this.spotifyLastProgressMs = positionMs;
+    this.queue.reportProgress(positionMs / 1000, false);
+    this.startSpotifyPolling();
+  }
+
+  private async applyPlaybackOutput(deviceId: string | null): Promise<PlaybackOutput> {
+    const prev = this._playbackOutput;
+    if (deviceId === null) {
+      return this.resetToLocalOutput(prev.type === 'spotify' ? prev.deviceId : undefined);
     }
 
-    return this._playbackOutput;
+    const gen = ++this.outputGen;
+    const devices = await this.spotify.getDevices();
+    if (gen !== this.outputGen || !this.spotify.connected) {
+      return this._playbackOutput;
+    }
+
+    const device = devices.find((d) => d.id === deviceId);
+    if (!device) {
+      throw new SpotifyError('Dispositivo Spotify Connect não encontrado ou indisponível', 404, 'NO_ACTIVE_DEVICE');
+    }
+
+    if (prev.type === 'spotify' && prev.deviceId === device.id) {
+      if (prev.deviceName !== device.name) {
+        this.commitSpotifyOutput(device);
+      }
+      return this._playbackOutput;
+    }
+
+    const nowPlaying = this.queue.state().nowPlaying;
+    const shouldPlay = Boolean(nowPlaying && !nowPlaying.paused);
+    const seq = ++this.spotifyPlaySeq;
+    this.stopSpotifyPolling();
+
+    const restorePrevPollingIfNeeded = () => {
+      const current = this.queue.state().nowPlaying;
+      if (
+        this._playbackOutput.type === 'spotify' &&
+        current &&
+        !current.paused &&
+        this.activeSpotifyQueueId === current.item.id
+      ) {
+        this.startSpotifyPolling();
+      }
+    };
+
+    try {
+      if (prev.type === 'spotify' && shouldPlay && nowPlaying && this.activeSpotifyQueueId === nowPlaying.item.id) {
+        await this.spotify.transferPlayback(device.id, true);
+        if (seq !== this.spotifyPlaySeq || gen !== this.outputGen || this._playbackOutput.type !== 'spotify') {
+          return this._playbackOutput;
+        }
+        const positionMs = Math.round(nowPlaying.positionSec * 1000);
+        this.spotifyStartedAtMs = Date.now();
+        this.spotifySeenPlaying = false;
+        this.spotifyLastProgressMs = positionMs;
+        this.commitSpotifyOutput(device);
+        this.startSpotifyPolling();
+        return this._playbackOutput;
+      }
+
+      if (shouldPlay && nowPlaying) {
+        const positionMs = Math.round(nowPlaying.positionSec * 1000);
+        const uri = await this.resolveSpotifyUri(nowPlaying.item.track);
+        if (seq !== this.spotifyPlaySeq || gen !== this.outputGen) {
+          return this._playbackOutput;
+        }
+
+        if (!uri) {
+          // Validate account/device permissions (e.g. 403 PREMIUM_REQUIRED / 404 NO_ACTIVE_DEVICE) before switching.
+          await this.spotify.transferPlayback(device.id, false);
+          if (seq !== this.spotifyPlaySeq || gen !== this.outputGen) {
+            return this._playbackOutput;
+          }
+          this.commitSpotifyOutput(device);
+          if (this.queue.state().nowPlaying?.item.id === nowPlaying.item.id) {
+            this.spotifyUnavailableTrackIds.add(nowPlaying.item.trackId);
+            this.consecutiveSpotifyMisses += 1;
+            const msg = `Faixa "${nowPlaying.item.track.title}" não encontrada no Spotify — pulando para a próxima.`;
+            this.log(`[spotify-connect] ${msg}`);
+            this.emit('notice', msg, true);
+            this.queue.skip();
+          }
+          return this._playbackOutput;
+        }
+
+        await this.spotify.playTrack(uri, device.id, positionMs);
+        if (seq !== this.spotifyPlaySeq || gen !== this.outputGen) {
+          return this._playbackOutput;
+        }
+        this.commitSpotifyOutput(device);
+        const latest = this.queue.state().nowPlaying;
+        if (latest?.item.id === nowPlaying.item.id) {
+          this.markSpotifyTrackPlaying(nowPlaying.item.id, uri, positionMs);
+        } else if (latest && !latest.paused) {
+          void this.playCurrentOnSpotify(latest.item, Math.round(latest.positionSec * 1000));
+        } else if (!latest) {
+          this.queue.advanceIfIdle();
+        }
+        return this._playbackOutput;
+      }
+
+      await this.spotify.transferPlayback(device.id, false);
+      if (seq !== this.spotifyPlaySeq || gen !== this.outputGen) {
+        return this._playbackOutput;
+      }
+      this.commitSpotifyOutput(device);
+      if (!this.queue.state().nowPlaying) {
+        this.queue.advanceIfIdle();
+      }
+      return this._playbackOutput;
+    } catch (err) {
+      if (seq === this.spotifyPlaySeq && gen === this.outputGen) {
+        restorePrevPollingIfNeeded();
+      }
+      throw err;
+    }
   }
 
   async pauseSpotifyPlayback(): Promise<void> {
@@ -234,15 +340,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
   disconnectSpotify(): void {
     this.spotify.disconnect();
     if (this._playbackOutput.type === 'spotify') {
-      this.spotifyPlaySeq += 1;
-      this.stopSpotifyPolling();
-      this._playbackOutput = { type: 'local' };
-      this.settings?.set('playback_output', this._playbackOutput);
-      this.activeSpotifyQueueId = null;
-      this.activeSpotifyTrackUri = null;
-      this.consecutiveSpotifyMisses = 0;
-      this.emit('output', this._playbackOutput);
-      this.queue.emit('change');
+      this.resetToLocalOutput();
     }
   }
 
@@ -294,6 +392,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       }
 
       if (!uri) {
+        this.spotifyUnavailableTrackIds.add(entry.track.id);
         this.consecutiveSpotifyMisses += 1;
         const msg = `Faixa "${entry.track.title}" não encontrada no Spotify — pulando para a próxima.`;
         this.log(`[spotify-connect] ${msg}`);
@@ -312,13 +411,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
         return;
       }
 
-      this.activeSpotifyQueueId = entry.id;
-      this.activeSpotifyTrackUri = uri;
-      this.spotifyStartedAtMs = Date.now();
-      this.spotifySeenPlaying = false;
-      this.spotifyLastProgressMs = positionMs;
-      this.queue.reportProgress(positionMs / 1000, false);
-      this.startSpotifyPolling();
+      this.markSpotifyTrackPlaying(entry.id, uri, positionMs);
     } catch (err) {
       if (seq !== this.spotifyPlaySeq) return;
       const msg = errorMessage(err);
@@ -356,11 +449,15 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       return;
     }
 
+    const seq = this.spotifyPlaySeq;
+    const deviceId = this._playbackOutput.deviceId;
     this.spotifyPollInFlight = true;
     try {
       const playback = await this.spotify.getPlaybackState();
       if (
+        seq !== this.spotifyPlaySeq ||
         this._playbackOutput.type !== 'spotify' ||
+        this._playbackOutput.deviceId !== deviceId ||
         this.queue.state().nowPlaying?.item.id !== current.item.id
       ) {
         return;
@@ -424,7 +521,9 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     const { nowPlaying, queue: queued } = this.queue.state();
     if (nowPlaying || queued.length > 0) return null;
 
-    const cached = this.tracks.listCached();
+    const cached = this.tracks
+      .listCached()
+      .filter((t) => this._playbackOutput.type !== 'spotify' || !this.spotifyUnavailableTrackIds.has(t.id));
     if (cached.length === 0) return null;
 
     const recentIds = this.queue.recentTrackIds(DEFAULT_AUTO_DJ_RECENT_WINDOW * 3);

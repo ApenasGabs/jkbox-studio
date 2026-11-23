@@ -417,11 +417,11 @@ export class SpotifyService {
 
   private async api<T>(path: string, init: RequestInit = {}, kind: 'app' | 'user' | 'any' = 'any'): Promise<T> {
     const token = await this.accessToken(kind);
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${token}`,
-      ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-      ...(init.headers as Record<string, string> | undefined),
-    };
+    const headers = new Headers(init.headers);
+    headers.set('Authorization', `Bearer ${token}`);
+    if (init.body !== undefined && !headers.has('Content-Type')) {
+      headers.set('Content-Type', 'application/json');
+    }
     const res = await this.fetchFn(`${API}${path}`, {
       ...init,
       headers,

@@ -20,11 +20,12 @@ import {
 } from '../lib/catalog';
 import { cssImageUrl, formatTime, isLoopback, remoteUrl } from '../lib/format';
 import { activateFocusedElement, findNextSpatialCandidate, getFocusableElements } from '../lib/spatialNav';
-import { describeSpotifyConnectError, formatSpotifyOutputBadge } from '../lib/spotifyConnect';
+import { formatSpotifyOutputBadge } from '../lib/spotifyConnect';
 import type { AppConfig, KioskCommand, PlaybackOutput, QueueEntry, SearchResult, Track } from '../lib/types';
 import { useInterpolatedTime } from '../lib/useInterpolatedTime';
 import { useJukebox } from '../lib/useJukebox';
 import { useKioskInput } from '../lib/useKioskInput';
+import { useSpotifyVolumeControl } from '../lib/useSpotifyVolume';
 import { useTrackLyrics } from '../lib/useTrackLyrics';
 
 type StageMode = 'cover' | 'lyrics' | 'video';
@@ -139,7 +140,8 @@ export function Kiosk() {
   const pendingSeek = useRef<number | null>(null);
   const resumePlayRef = useRef(false);
   const pendingOffsetRef = useRef<number | null>(null);
-  const spotifyVolumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestEmbedStartSecRef = useRef(0);
+  const latestEmbedPlayingRef = useRef(false);
   const toast = useToast();
 
   const isSpotifyOutput = playbackOutput.type === 'spotify';
@@ -154,6 +156,8 @@ export function Kiosk() {
   );
   const effectivePlaying = isSpotifyOutput ? !position.paused : playing;
   const effectiveCurrentSec = isSpotifyOutput ? spotifyTimeSec : time.current;
+  latestEmbedStartSecRef.current = isSpotifyOutput ? spotifyTimeSec : (audioRef.current?.currentTime ?? 0);
+  latestEmbedPlayingRef.current = isSpotifyOutput ? !position.paused : (audioRef.current ? !audioRef.current.paused : playing);
   const videoAvailableInCache =
     !isSpotifyOutput && config?.videoMode === 'cache' && Boolean(current?.track.videoPath) && videoFailedQueueId !== current?.id;
   const videoAvailableInEmbed = config?.videoMode === 'embed' && Boolean(current?.track.youtubeId);
@@ -192,12 +196,6 @@ export function Kiosk() {
   useEffect(() => {
     if (notice) toast.show(notice.message, notice.error);
   }, [notice, toast.show]);
-
-  useEffect(() => {
-    return () => {
-      if (spotifyVolumeTimerRef.current) clearTimeout(spotifyVolumeTimerRef.current);
-    };
-  }, []);
 
   useEffect(() => {
     setVideoFailedQueueId(null);
@@ -242,6 +240,15 @@ export function Kiosk() {
       return;
     }
 
+    // Do not point <audio>/<video> to /stream before local download finishes (avoids 409 Conflict skip).
+    if (current.track.status !== 'ready') {
+      clearEl(audio);
+      clearEl(video);
+      loadedTarget.current = null;
+      setPlaying(false);
+      return;
+    }
+
     if (!config) return;
     if (activeMediaKind === 'video' && !video) return;
 
@@ -256,7 +263,8 @@ export function Kiosk() {
         resumePlayRef.current = !prevEl.paused || unlocked;
       }
     } else {
-      pendingSeek.current = firstLoad.current && nowPlaying && nowPlaying.positionSec > 0 ? nowPlaying.positionSec : null;
+      pendingSeek.current =
+        (firstLoad.current || prev === null) && nowPlaying && nowPlaying.positionSec > 0 ? nowPlaying.positionSec : null;
       resumePlayRef.current = unlocked;
     }
 
@@ -304,9 +312,9 @@ export function Kiosk() {
   // Manage YouTube embed URL only when entering/leaving Clipe mode in embed mode (never on time ticks).
   useEffect(() => {
     if (effectiveStageMode === 'video' && !videoAvailableInCache && videoAvailableInEmbed && current?.track.youtubeId) {
-      const startSec = isSpotifyOutput ? spotifyTimeSec : (audioRef.current?.currentTime ?? 0);
-      const isPlaying = isSpotifyOutput ? !position.paused : (audioRef.current ? !audioRef.current.paused : playing);
-      setEmbedSrc(youtubeEmbedUrl(current.track.youtubeId, startSec, isPlaying));
+      setEmbedSrc(
+        youtubeEmbedUrl(current.track.youtubeId, latestEmbedStartSecRef.current, latestEmbedPlayingRef.current),
+      );
     } else {
       setEmbedSrc(null);
     }
@@ -360,18 +368,11 @@ export function Kiosk() {
     else media.pause();
   };
 
-  const applyStageSpotifyVolume = (nextVolume: number, immediate: boolean) => {
-    const clamped = Math.max(0, Math.min(100, Math.round(nextVolume)));
-    setSpotifyVolume(clamped);
-    if (spotifyVolumeTimerRef.current) clearTimeout(spotifyVolumeTimerRef.current);
-    const sendVol = () => {
-      api.spotifySetVolume(clamped).catch((err) => {
-        toast.show(describeSpotifyConnectError(err).message, true);
-      });
-    };
-    if (immediate) sendVol();
-    else spotifyVolumeTimerRef.current = setTimeout(sendVol, 150);
-  };
+  const handleStageVolumeError = useCallback(
+    (info: { message: string }) => toast.show(info.message, true),
+    [toast.show],
+  );
+  const applyStageSpotifyVolume = useSpotifyVolumeControl(setSpotifyVolume, handleStageVolumeError);
 
   const handleDefaultViewChange = (next: DefaultStageView) => {
     setDefaultView(next);
@@ -427,7 +428,10 @@ export function Kiosk() {
   const progressPct = effectiveDuration > 0 ? Math.min(100, (effectiveCurrentSec / effectiveDuration) * 100) : 0;
   const remainingSec = effectiveDuration > 0 ? Math.max(0, effectiveDuration - effectiveCurrentSec) : Number.POSITIVE_INFINITY;
   const queueRemainingSec = current ? (effectiveDuration > 0 ? Math.max(0, effectiveDuration - effectiveCurrentSec) : null) : 0;
-  const nextUp = state.queue.find((entry) => entry.track.status === 'ready') ?? state.queue[0] ?? null;
+  const nextUp =
+    (isSpotifyOutput
+      ? state.queue[0]
+      : state.queue.find((entry) => entry.track.status === 'ready') ?? state.queue[0]) ?? null;
   const showUpNextBanner = Boolean(
     current && nextUp && effectiveDuration > 0 && remainingSec <= UP_NEXT_WINDOW_SEC && dismissedUpNextId !== current.id,
   );
@@ -750,7 +754,9 @@ export function Kiosk() {
         onTimeUpdate={(e) => handleTimeUpdate('audio', e.currentTarget)}
         onEnded={() => handleMediaEnded('audio')}
         onError={() => {
-          if (isSpotifyOutput || activeMediaKind !== 'audio' || !current || !audioRef.current?.src) return;
+          if (isSpotifyOutput || activeMediaKind !== 'audio' || !current || current.track.status !== 'ready' || !audioRef.current?.src) {
+            return;
+          }
           toast.show(`Não foi possível tocar "${current.track.title}". Pulando…`, true);
           const id = current.id;
           window.setTimeout(() => api.ended(id).catch(() => {}), 2000);
@@ -903,14 +909,12 @@ export function Kiosk() {
                 </button>
               )}
               {spotifyBadge && (
-                <button
-                  type="button"
+                <SpotifyOutputBadge
+                  label={spotifyBadge}
                   onClick={() => setSettingsOpen(true)}
-                  className="rounded-full border border-green-400/40 bg-green-500/15 px-3 py-1.5 text-xs font-semibold text-green-200 transition hover:bg-green-500/25"
+                  className="px-3 py-1.5"
                   title="Alterar saída de áudio ou volume no painel do Host"
-                >
-                  {spotifyBadge}
-                </button>
+                />
               )}
             </div>
 
@@ -1025,7 +1029,9 @@ export function Kiosk() {
                 onTimeUpdate={(e) => handleTimeUpdate('video', e.currentTarget)}
                 onEnded={() => handleMediaEnded('video')}
                 onError={() => {
-                  if (isSpotifyOutput || activeMediaKind !== 'video' || !current || !videoRef.current?.src) return;
+                  if (isSpotifyOutput || activeMediaKind !== 'video' || !current || current.track.status !== 'ready' || !videoRef.current?.src) {
+                    return;
+                  }
                   setVideoFailedQueueId(current.id);
                   toast.show('Videoclipe indisponível — reproduzindo áudio.', true);
                 }}
@@ -1123,13 +1129,11 @@ export function Kiosk() {
         ) : (
           <div className="flex flex-col items-center text-center">
             {spotifyBadge && (
-              <button
-                type="button"
+              <SpotifyOutputBadge
+                label={spotifyBadge}
                 onClick={() => setSettingsOpen(true)}
-                className="mb-4 rounded-full border border-green-400/40 bg-green-500/15 px-3 py-1 text-xs font-semibold text-green-200 transition hover:bg-green-500/25"
-              >
-                {spotifyBadge}
-              </button>
+                className="mb-4 px-3 py-1"
+              />
             )}
             <p className="text-6xl">🎶</p>
             <h1 className="mt-4 text-4xl font-bold">Nada tocando ainda</h1>
@@ -1384,6 +1388,29 @@ export function Kiosk() {
 }
 
 type RunFn = <T>(action: () => Promise<T>, ok?: string | ((result: T) => string)) => Promise<void>;
+
+function SpotifyOutputBadge({
+  label,
+  onClick,
+  className = '',
+  title,
+}: {
+  label: string;
+  onClick: () => void;
+  className?: string;
+  title?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-full border border-green-400/40 bg-green-500/15 text-xs font-semibold text-green-200 transition hover:bg-green-500/25 ${className}`}
+      title={title}
+    >
+      {label}
+    </button>
+  );
+}
 
 interface HostPanelProps {
   panelRef: RefObject<HTMLDivElement | null>;
