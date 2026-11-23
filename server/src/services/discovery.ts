@@ -135,6 +135,9 @@ interface DedupeIndex {
   sourceKeys: Set<string>;
   spotifyUris: Set<string>;
   normalizedKeys: Set<string>;
+  trackIdBySource: Map<string, string>;
+  trackIdBySpotifyUri: Map<string, string>;
+  trackIdByNormalized: Map<string, string>;
 }
 
 function createDedupeIndex(): DedupeIndex {
@@ -142,17 +145,32 @@ function createDedupeIndex(): DedupeIndex {
     sourceKeys: new Set(),
     spotifyUris: new Set(),
     normalizedKeys: new Set(),
+    trackIdBySource: new Map(),
+    trackIdBySpotifyUri: new Map(),
+    trackIdByNormalized: new Map(),
   };
 }
 
 function addToDedupeIndex(
   index: DedupeIndex,
-  entry: { source: string; sourceId: string; title: string; artist: string; spotifyUri?: string | null },
+  entry: { id?: string; source: string; sourceId: string; title: string; artist: string; spotifyUri?: string | null },
 ): void {
-  index.sourceKeys.add(`${entry.source}:${entry.sourceId}`);
-  if (entry.spotifyUri) index.spotifyUris.add(entry.spotifyUri);
+  const sourceKey = `${entry.source}:${entry.sourceId}`;
+  index.sourceKeys.add(sourceKey);
+  if (entry.id && !index.trackIdBySource.has(sourceKey)) index.trackIdBySource.set(sourceKey, entry.id);
+  if (entry.spotifyUri) {
+    index.spotifyUris.add(entry.spotifyUri);
+    if (entry.id && !index.trackIdBySpotifyUri.has(entry.spotifyUri)) {
+      index.trackIdBySpotifyUri.set(entry.spotifyUri, entry.id);
+    }
+  }
   const norm = normalizeTrackDedupeKey(entry.artist, entry.title);
-  if (norm !== '::') index.normalizedKeys.add(norm);
+  if (norm !== '::') {
+    index.normalizedKeys.add(norm);
+    if (entry.id && !index.trackIdByNormalized.has(norm)) {
+      index.trackIdByNormalized.set(norm, entry.id);
+    }
+  }
 }
 
 function hasInDedupeIndex(index: DedupeIndex, result: SearchResult): boolean {
@@ -160,6 +178,43 @@ function hasInDedupeIndex(index: DedupeIndex, result: SearchResult): boolean {
   if (result.spotifyUri && index.spotifyUris.has(result.spotifyUri)) return true;
   const norm = normalizeTrackDedupeKey(result.artist, result.title);
   return norm !== '::' && index.normalizedKeys.has(norm);
+}
+
+function findTrackIdInDedupeIndex(index: DedupeIndex, result: SearchResult): string | null {
+  const bySource = index.trackIdBySource.get(`${result.source}:${result.sourceId}`);
+  if (bySource) return bySource;
+  if (result.spotifyUri) {
+    const bySpotify = index.trackIdBySpotifyUri.get(result.spotifyUri);
+    if (bySpotify) return bySpotify;
+  }
+  const norm = normalizeTrackDedupeKey(result.artist, result.title);
+  if (norm !== '::') {
+    const byNorm = index.trackIdByNormalized.get(norm);
+    if (byNorm) return byNorm;
+  }
+  return null;
+}
+
+/**
+ * Determines whether a playlist enforces Gospel (`true`), secular (`false`), or neutral (`null`) isolation.
+ * A Gospel-named playlist or a playlist with a majority of Gospel tracks enforces Gospel-only isolation even
+ * when some existing tracks are uncategorized.
+ */
+function resolvePlaylistGospelScope(name: string, tracks: readonly Track[]): boolean | null {
+  if (isGospelGenre(name)) return true;
+  const gospelCount = tracks.filter((t) => isGospelGenre(t.genre)).length;
+  const nonGospelCount = tracks.filter((t) => Boolean(t.genre?.trim()) && !isGospelGenre(t.genre)).length;
+  if (gospelCount > 0 && gospelCount > nonGospelCount) return true;
+  if (nonGospelCount > 0 && gospelCount === 0) return false;
+  return null;
+}
+
+function resolveQueueGospelScope(tracks: readonly Track[]): boolean | null {
+  const gospelCount = tracks.filter((t) => isGospelGenre(t.genre)).length;
+  const nonGospelCount = tracks.filter((t) => Boolean(t.genre?.trim()) && !isGospelGenre(t.genre)).length;
+  if (gospelCount > 0 && gospelCount >= nonGospelCount) return true;
+  if (nonGospelCount > 0 && gospelCount === 0) return false;
+  return null;
 }
 
 /**
@@ -285,6 +340,24 @@ export class DiscoveryService {
     return { results, used };
   }
 
+  private async classifyCandidate(candidate: SearchResult) {
+    const context = {
+      title: candidate.title,
+      artist: candidate.artist,
+      album: candidate.album,
+      year: candidate.year ?? null,
+    };
+    const rawGenres = candidate.genre?.trim() ? [candidate.genre.trim()] : [];
+    return this.classifier
+      ? await this.classifier.classifyMetadata({
+          ...context,
+          source: candidate.source,
+          sourceId: candidate.sourceId,
+          rawGenres,
+        })
+      : normalizeGenreAndSubgenre(rawGenres, context);
+  }
+
   private async evaluateCandidate(
     candidate: SearchResult,
     isGospelSeed: boolean,
@@ -294,25 +367,11 @@ export class DiscoveryService {
     if (!candidate.title.trim() || !candidate.sourceId.trim()) return null;
     if (hasInDedupeIndex(existing, candidate) || hasInDedupeIndex(accepted, candidate)) return null;
 
-    const context = {
-      title: candidate.title,
-      artist: candidate.artist,
-      album: candidate.album,
-      year: candidate.year ?? null,
-    };
-    const rawGenres = candidate.genre?.trim() ? [candidate.genre.trim()] : [];
-    const outcome = this.classifier
-      ? await this.classifier.classifyMetadata({
-          ...context,
-          source: candidate.source,
-          sourceId: candidate.sourceId,
-          rawGenres,
-        })
-      : normalizeGenreAndSubgenre(rawGenres, context);
+    const outcome = await this.classifyCandidate(candidate);
 
     if (isGospelSeed) {
-      if (outcome !== null && outcome.genre !== 'Gospel') return null;
-      if (candidate.genre && !isGospelGenre(candidate.genre) && outcome === null) return null;
+      // Fail closed: unknown/unclassified candidates must not leak into Gospel seeds.
+      if (outcome !== null ? outcome.genre !== 'Gospel' : !isGospelGenre(candidate.genre)) return null;
     } else {
       if (outcome?.genre === 'Gospel' || isGospelGenre(candidate.genre)) return null;
     }
@@ -369,9 +428,7 @@ export class DiscoveryService {
       const detail = this.playlists.getDetail(playlistId);
       if (!detail) throw new DiscoveryError('Playlist não encontrada', 404);
       const seedTracks = detail.items.map((item) => item.track);
-      const hasGospelTrack = seedTracks.some((t) => isGospelGenre(t.genre));
-      const hasNonGospelTrack = seedTracks.some((t) => Boolean(t.genre?.trim()) && !isGospelGenre(t.genre));
-      const isGospelSeed = isGospelGenre(detail.summary.name) || (hasGospelTrack && !hasNonGospelTrack);
+      const isGospelSeed = resolvePlaylistGospelScope(detail.summary.name, seedTracks) === true;
       return {
         seedTracks,
         isGospelSeed,
@@ -567,11 +624,32 @@ export class DiscoveryService {
     }
 
     let playlistId: string | undefined;
+    let targetGospelScope: boolean | null = null;
+    const targetNormalizedKeys = new Set<string>();
+
     if (input.target === 'playlist') {
       playlistId = input.playlistId?.trim();
       if (!playlistId) throw new DiscoveryError('playlistId obrigatório para target=playlist', 400);
       if (!this.playlists) throw new DiscoveryError('Serviço de playlists indisponível', 500);
-      if (!this.playlists.get(playlistId)) throw new DiscoveryError('Playlist não encontrada', 404);
+      const detail = this.playlists.getDetail(playlistId);
+      if (!detail) throw new DiscoveryError('Playlist não encontrada', 404);
+      const playlistTracks = detail.items.map((item) => item.track);
+      targetGospelScope = resolvePlaylistGospelScope(detail.summary.name, playlistTracks);
+      for (const track of playlistTracks) {
+        const norm = normalizeTrackDedupeKey(track.artist, track.title);
+        if (norm !== '::') targetNormalizedKeys.add(norm);
+      }
+    } else if (input.target === 'queue') {
+      const state = this.queue.state();
+      const activeTracks: Track[] = [
+        ...(state.nowPlaying ? [state.nowPlaying.item.track] : []),
+        ...state.queue.map((q) => q.track),
+      ];
+      targetGospelScope = resolveQueueGospelScope(activeTracks);
+      for (const track of activeTracks) {
+        const norm = normalizeTrackDedupeKey(track.artist, track.title);
+        if (norm !== '::') targetNormalizedKeys.add(norm);
+      }
     }
 
     const sanitized: SearchResult[] = [];
@@ -583,6 +661,11 @@ export class DiscoveryService {
       throw new DiscoveryError('Nenhuma faixa válida informada', 400);
     }
 
+    const libraryIndex = createDedupeIndex();
+    for (const entry of this.tracks.listDedupeEntries()) {
+      addToDedupeIndex(libraryIndex, entry);
+    }
+
     const requesterId = input.requesterId?.trim() || 'discovery';
     const requesterName = input.requesterName?.trim() || 'Descoberta';
     let added = 0;
@@ -592,8 +675,26 @@ export class DiscoveryService {
     const queuedForSync: Track[] = [];
 
     for (const item of sanitized) {
-      const existedBefore = Boolean(this.tracks.findBySource(item.source, item.sourceId));
-      let track = this.tracks.upsertFromResult(item);
+      const exactTrack = this.tracks.findBySource(item.source, item.sourceId);
+      const matchedId = exactTrack ? exactTrack.id : findTrackIdInDedupeIndex(libraryIndex, item);
+      const existingTrack = exactTrack ?? (matchedId ? this.tracks.get(matchedId) : null);
+
+      if (targetGospelScope !== null) {
+        let itemIsGospel: boolean;
+        if (existingTrack?.genre?.trim()) {
+          itemIsGospel = isGospelGenre(existingTrack.genre);
+        } else {
+          const outcome = await this.classifyCandidate(item);
+          itemIsGospel =
+            outcome !== null ? outcome.genre === 'Gospel' : isGospelGenre(item.genre);
+        }
+        if (targetGospelScope && !itemIsGospel) continue;
+        if (!targetGospelScope && itemIsGospel) continue;
+      }
+
+      const existedBefore = Boolean(existingTrack);
+      let track = existingTrack ?? this.tracks.upsertFromResult(item);
+      addToDedupeIndex(libraryIndex, track);
 
       if (
         this.classifier &&
@@ -608,24 +709,44 @@ export class DiscoveryService {
         }
       }
 
+      const normKey = normalizeTrackDedupeKey(track.artist || item.artist, track.title || item.title);
+      let isDuplicate = false;
+
       if (input.target === 'playlist') {
-        const res = this.playlists!.addTrack(playlistId!, track.id);
-        if (res.duplicate) duplicates += 1;
-        else added += 1;
+        if (normKey !== '::' && targetNormalizedKeys.has(normKey)) {
+          isDuplicate = true;
+          duplicates += 1;
+        } else {
+          const res = this.playlists!.addTrack(playlistId!, track.id);
+          isDuplicate = res.duplicate;
+          if (res.duplicate) duplicates += 1;
+          else {
+            added += 1;
+            if (normKey !== '::') targetNormalizedKeys.add(normKey);
+          }
+        }
       } else if (input.target === 'queue') {
-        const res = this.queue.enqueue(track.id, requesterId, requesterName);
-        if (res.duplicate) duplicates += 1;
-        else {
-          added += 1;
-          queuedForSync.push(track);
+        if (normKey !== '::' && targetNormalizedKeys.has(normKey)) {
+          isDuplicate = true;
+          duplicates += 1;
+        } else {
+          const res = this.queue.enqueue(track.id, requesterId, requesterName);
+          isDuplicate = res.duplicate;
+          if (res.duplicate) duplicates += 1;
+          else {
+            added += 1;
+            queuedForSync.push(track);
+            if (normKey !== '::') targetNormalizedKeys.add(normKey);
+          }
         }
       } else {
+        isDuplicate = existedBefore;
         if (existedBefore) duplicates += 1;
         else added += 1;
       }
 
       const cached = this.downloads.ensure(track.id, 'low');
-      if (!cached) queuedDownloads += 1;
+      if (!cached && !isDuplicate) queuedDownloads += 1;
       resultingTracks.push(this.tracks.get(track.id) ?? track);
     }
 

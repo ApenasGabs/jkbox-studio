@@ -3,6 +3,7 @@ import { api } from '../lib/api';
 import {
   type CatalogRoute,
   type CatalogTab,
+  type DiscoverSimilarRequest,
   type EditableTrack,
   editableFromResult,
   formatAlbumCount,
@@ -36,13 +37,7 @@ const SUB_TABS: { id: CatalogTab; label: string }[] = [
   { id: 'all', label: 'Todas' },
 ];
 
-export interface DiscoverSimilarRequest {
-  mode: 'category' | 'playlist';
-  category?: string;
-  subgenre?: string | null;
-  playlistId?: string;
-  label: string;
-}
+export type { DiscoverSimilarRequest };
 
 interface Props {
   tab: CatalogTab;

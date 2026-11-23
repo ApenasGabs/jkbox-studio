@@ -1,33 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
+import type { DiscoveryRequestContext } from '../lib/catalog';
 import { formatTime } from '../lib/format';
 import type {
-  DiscoveryMode,
   DiscoveryPopulateResponse,
   DiscoverySeedSummary,
   DiscoverySource,
-  DiscoveryTarget,
   SearchResult,
 } from '../lib/types';
 import { Cover } from './Cover';
 import { GenreBadges } from './GenreBadges';
 import { SourceBadge } from './SourceBadge';
 
-export interface DiscoveryRequestContext {
-  mode: DiscoveryMode;
-  target: DiscoveryTarget;
-  title: string;
-  subtitle?: string;
-  playlistId?: string;
-  category?: string;
-  subgenre?: string | null;
-}
+export type { DiscoveryRequestContext };
 
 interface Props {
   context: DiscoveryRequestContext | null;
   onClose: () => void;
   onPopulated: (result: DiscoveryPopulateResponse) => void;
   onToast: (message: string, error?: boolean) => void;
+  onSuggestionsLoaded?: () => void;
 }
 
 const LIMITS = [5, 10, 20] as const;
@@ -42,9 +34,49 @@ function trackKey(item: SearchResult): string {
   return `${item.source}:${item.sourceId}`;
 }
 
-export function DiscoveryModal({ context, onClose, onPopulated, onToast }: Props) {
+function discoveryContextKey(ctx: DiscoveryRequestContext): string {
+  return [
+    ctx.mode,
+    ctx.target,
+    ctx.playlistId ?? '',
+    ctx.category ?? '',
+    ctx.subgenre ?? '',
+    ctx.title,
+    ctx.subtitle ?? '',
+  ].join('::');
+}
+
+export function DiscoveryModal({ context, onClose, onPopulated, onToast, onSuggestionsLoaded }: Props) {
+  if (!context) return null;
+  return (
+    <DiscoveryModalContent
+      key={discoveryContextKey(context)}
+      context={context}
+      onClose={onClose}
+      onPopulated={onPopulated}
+      onToast={onToast}
+      onSuggestionsLoaded={onSuggestionsLoaded}
+    />
+  );
+}
+
+interface ContentProps {
+  context: DiscoveryRequestContext;
+  onClose: () => void;
+  onPopulated: (result: DiscoveryPopulateResponse) => void;
+  onToast: (message: string, error?: boolean) => void;
+  onSuggestionsLoaded?: () => void;
+}
+
+function DiscoveryModalContent({
+  context,
+  onClose,
+  onPopulated,
+  onToast,
+  onSuggestionsLoaded,
+}: ContentProps) {
   const [limit, setLimit] = useState<5 | 10 | 20>(10);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<SearchResult[]>([]);
@@ -52,6 +84,8 @@ export function DiscoveryModal({ context, onClose, onPopulated, onToast }: Props
   const [sourcesUsed, setSourcesUsed] = useState<DiscoverySource[]>([]);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(() => new Set());
   const abortRef = useRef<AbortController | null>(null);
+  const onSuggestionsLoadedRef = useRef(onSuggestionsLoaded);
+  onSuggestionsLoadedRef.current = onSuggestionsLoaded;
 
   const loadSuggestions = useCallback(
     async (ctx: DiscoveryRequestContext, requestedLimit: number) => {
@@ -61,6 +95,10 @@ export function DiscoveryModal({ context, onClose, onPopulated, onToast }: Props
 
       setLoading(true);
       setError(null);
+      setSuggestions([]);
+      setSeeds([]);
+      setSourcesUsed([]);
+      setSelectedKeys(new Set());
       try {
         const res = await api.discoverySuggest(
           {
@@ -77,8 +115,15 @@ export function DiscoveryModal({ context, onClose, onPopulated, onToast }: Props
         setSeeds(res.seeds);
         setSourcesUsed(res.sourcesUsed);
         setSelectedKeys(new Set(res.suggestions.map(trackKey)));
+        if (res.suggestions.length > 0) {
+          onSuggestionsLoadedRef.current?.();
+        }
       } catch (err) {
         if ((err as Error).name !== 'AbortError' && !controller.signal.aborted) {
+          setSuggestions([]);
+          setSeeds([]);
+          setSourcesUsed([]);
+          setSelectedKeys(new Set());
           setError((err as Error).message);
         }
       } finally {
@@ -90,18 +135,6 @@ export function DiscoveryModal({ context, onClose, onPopulated, onToast }: Props
   );
 
   useEffect(() => {
-    if (!context) {
-      abortRef.current?.abort();
-      abortRef.current = null;
-      setSuggestions([]);
-      setSeeds([]);
-      setSourcesUsed([]);
-      setSelectedKeys(new Set());
-      setError(null);
-      setLoading(false);
-      setSubmitting(false);
-      return;
-    }
     void loadSuggestions(context, limit);
     return () => {
       abortRef.current?.abort();
@@ -110,15 +143,12 @@ export function DiscoveryModal({ context, onClose, onPopulated, onToast }: Props
   }, [context, limit, loadSuggestions]);
 
   useEffect(() => {
-    if (!context) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && !submitting) onClose();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [context, submitting, onClose]);
-
-  if (!context) return null;
+  }, [submitting, onClose]);
 
   const selectedTracks = suggestions.filter((item) => selectedKeys.has(trackKey(item)));
   const allSelected = suggestions.length > 0 && selectedTracks.length === suggestions.length;
@@ -290,7 +320,7 @@ export function DiscoveryModal({ context, onClose, onPopulated, onToast }: Props
               <p className="text-sm font-medium text-zinc-300">Buscando faixas na mesma vibe…</p>
               <p className="text-xs text-zinc-500">Consultando Deezer, Spotify e YouTube sem repetir o acervo.</p>
             </div>
-          ) : suggestions.length === 0 ? (
+          ) : error && suggestions.length === 0 ? null : suggestions.length === 0 ? (
             <div className="glass flex flex-col items-center gap-2 px-5 py-8 text-center">
               <span className="text-3xl">🎧</span>
               <p className="text-sm font-semibold">Nenhuma recomendação nova encontrada</p>

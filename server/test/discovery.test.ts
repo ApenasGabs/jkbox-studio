@@ -491,4 +491,197 @@ describe('DiscoveryService & /api/discovery', () => {
       .send({ target: 'playlist', playlistId: 'missing', tracks: [{ source: 'youtube', sourceId: 'aaaaaaaaaaa', title: 'X', artist: 'Y' }] })
       .expect(404);
   });
+
+  it('fails closed on Gospel seeds when classifier returns null for unknown artists without genre', async () => {
+    const config = tempConfig();
+    const media = new FakeMedia();
+    const fake = createFakeFetch({
+      deezerArtists: {
+        'aline barros': [{ id: 700, name: 'Aline Barros' }],
+      },
+      deezerRelated: {
+        700: [
+          { id: 701, name: 'Gabriela Rocha' },
+          { id: 702, name: 'Banda Secular Desconhecida' },
+        ],
+      },
+      deezerTop: {
+        701: [
+          {
+            id: 7001,
+            title: 'Lugar Secreto',
+            duration: 300,
+            artist: { id: 701, name: 'Gabriela Rocha' },
+            album: { title: 'Céu', cover_medium: 'https://cdn.example/gr.jpg' },
+          },
+        ],
+        702: [
+          {
+            id: 7002,
+            title: 'Noite na Balada',
+            duration: 200,
+            artist: { id: 702, name: 'Banda Secular Desconhecida' },
+            album: { title: 'Festa', cover_medium: 'https://cdn.example/sec.jpg' },
+          },
+        ],
+      },
+    });
+
+    const jukebox = createJukebox(config, {
+      media,
+      fetchFn: fake.fetchFn,
+      log: () => {},
+      externalClassifierLookup: false,
+    });
+    const app = createApp({ config, jukebox });
+
+    const g1 = seedLocalTrack(jukebox, config.musicDir, {
+      title: 'Ressuscita-me',
+      artist: 'Aline Barros',
+      genre: 'Gospel',
+      subgenre: 'Louvor & Adoração',
+    });
+    const g2 = seedLocalTrack(jukebox, config.musicDir, {
+      title: 'Sonda-me',
+      artist: 'Aline Barros',
+      genre: 'Gospel',
+      subgenre: 'Louvor & Adoração',
+    });
+    // Mix in an uncategorized track + 1 misclassified track so Gospel remains majority
+    const uncat = seedLocalTrack(jukebox, config.musicDir, {
+      title: 'Faixa Sem Genero',
+      artist: 'Aline Barros',
+      genre: null,
+      subgenre: null,
+    });
+    const playlist = jukebox.playlists!.create({ name: 'Culto Domingo' });
+    jukebox.playlists!.addTrack(playlist.id, g1.id);
+    jukebox.playlists!.addTrack(playlist.id, g2.id);
+    jukebox.playlists!.addTrack(playlist.id, uncat.id);
+
+    const res = await request(app)
+      .post('/api/discovery/suggest')
+      .send({ mode: 'playlist', playlistId: playlist.id, limit: 10 })
+      .expect(200);
+
+    const titles = res.body.suggestions.map((s: { title: string }) => s.title);
+    expect(titles).toContain('Lugar Secreto');
+    expect(titles).not.toContain('Noite na Balada');
+  });
+
+  it('applies normalized deduplication and Gospel isolation inside populate()', async () => {
+    const config = tempConfig();
+    const media = new FakeMedia();
+    const fake = createFakeFetch({});
+    const jukebox = createJukebox(config, {
+      media,
+      fetchFn: fake.fetchFn,
+      log: () => {},
+      externalClassifierLookup: false,
+    });
+    const app = createApp({ config, jukebox });
+
+    const existingPagode = seedLocalTrack(jukebox, config.musicDir, {
+      title: 'Tá Vendo Aquela Lua (Ao Vivo)',
+      artist: 'Exaltasamba',
+      genre: 'Samba & Pagode',
+      subgenre: 'Pagode 90',
+    });
+    const existingGospel = seedLocalTrack(jukebox, config.musicDir, {
+      title: 'Ressuscita-me',
+      artist: 'Aline Barros',
+      genre: 'Gospel',
+      subgenre: 'Louvor & Adoração',
+    });
+
+    // 1. Populating library with Deezer variant of an existing local track must reuse existing and count as duplicate
+    const libRes = await request(app)
+      .post('/api/discovery/populate')
+      .send({
+        target: 'library',
+        tracks: [{ source: 'deezer', sourceId: '1001', title: 'Tá Vendo Aquela Lua', artist: 'Exaltasamba' }],
+      })
+      .expect(200);
+
+    expect(libRes.body).toMatchObject({ total: 1, added: 0, duplicates: 1, queuedDownloads: 0 });
+    expect(libRes.body.tracks[0].id).toBe(existingPagode.id);
+    expect(jukebox.tracks.findBySource('deezer', '1001')).toBeNull();
+
+    // 2. Populating a secular playlist reuses existing library track first time, blocks Gospel track, and dedupes on repeat
+    const secularPlaylist = jukebox.playlists!.create({ name: 'Pagodinho' });
+    jukebox.playlists!.addTrack(
+      secularPlaylist.id,
+      seedLocalTrack(jukebox, config.musicDir, {
+        title: 'Cheia de Manias',
+        artist: 'Raça Negra',
+        genre: 'Samba & Pagode',
+      }).id,
+    );
+
+    const plFirstRes = await request(app)
+      .post('/api/discovery/populate')
+      .send({
+        target: 'playlist',
+        playlistId: secularPlaylist.id,
+        tracks: [
+          { source: 'deezer', sourceId: '1001', title: 'Tá Vendo Aquela Lua', artist: 'Exaltasamba' },
+          { source: 'deezer', sourceId: '5001', title: 'Lugar Secreto', artist: 'Gabriela Rocha' },
+        ],
+      })
+      .expect(200);
+
+    expect(plFirstRes.body).toMatchObject({ total: 2, added: 1, duplicates: 0, queuedDownloads: 0 });
+    expect(plFirstRes.body.tracks).toHaveLength(1);
+    expect(plFirstRes.body.tracks[0].id).toBe(existingPagode.id);
+    expect(jukebox.tracks.findBySource('deezer', '5001')).toBeNull();
+
+    const plDupRes = await request(app)
+      .post('/api/discovery/populate')
+      .send({
+        target: 'playlist',
+        playlistId: secularPlaylist.id,
+        tracks: [{ source: 'youtube', sourceId: 'yt_lua_0001', title: 'Ta Vendo Aquela Lua [Official Video]', artist: 'Exaltasamba' }],
+      })
+      .expect(200);
+    expect(plDupRes.body).toMatchObject({ total: 1, added: 0, duplicates: 1, queuedDownloads: 0 });
+
+    // 3. Gospel playlist rejects secular and unknown tracks
+    const gospelPlaylist = jukebox.playlists!.create({ name: 'Louvor da Manhã' });
+    jukebox.playlists!.addTrack(gospelPlaylist.id, existingGospel.id);
+
+    const gospelPlRes = await request(app)
+      .post('/api/discovery/populate')
+      .send({
+        target: 'playlist',
+        playlistId: gospelPlaylist.id,
+        tracks: [
+          { source: 'deezer', sourceId: '8881', title: 'Show das Poderosas', artist: 'Anitta' },
+          { source: 'deezer', sourceId: '8882', title: 'Som Misterioso', artist: 'Artista Desconhecido' },
+        ],
+      })
+      .expect(200);
+
+    expect(gospelPlRes.body).toMatchObject({ total: 2, added: 0, duplicates: 0, queuedDownloads: 0 });
+    expect(gospelPlRes.body.tracks).toEqual([]);
+    expect(jukebox.tracks.findBySource('deezer', '8881')).toBeNull();
+    expect(jukebox.tracks.findBySource('deezer', '8882')).toBeNull();
+
+    // 4. Active Gospel queue rejects secular track and accepts Gospel track
+    jukebox.queue.enqueue(existingGospel.id, 'host-1', 'Host');
+    const queueRes = await request(app)
+      .post('/api/discovery/populate')
+      .send({
+        target: 'queue',
+        tracks: [
+          { source: 'deezer', sourceId: '9991', title: 'Show das Poderosas', artist: 'Anitta' },
+          { source: 'deezer', sourceId: '9992', title: 'Lugar Secreto', artist: 'Gabriela Rocha' },
+        ],
+      })
+      .expect(200);
+
+    expect(queueRes.body).toMatchObject({ total: 2, added: 1, duplicates: 0 });
+    expect(queueRes.body.tracks).toHaveLength(1);
+    expect(queueRes.body.tracks[0].artist).toBe('Gabriela Rocha');
+    expect(jukebox.tracks.findBySource('deezer', '9991')).toBeNull();
+  });
 });

@@ -1,5 +1,60 @@
 import { formatTime } from './format';
-import type { CatalogAlbum, CatalogCategory, SearchResult, Track, TrackMetadataPatch } from './types';
+import type {
+  CatalogAlbum,
+  CatalogCategory,
+  DiscoveryMode,
+  DiscoveryTarget,
+  SearchResult,
+  Track,
+  TrackMetadataPatch,
+} from './types';
+
+export interface DiscoverSimilarRequest {
+  mode: 'category' | 'playlist';
+  category?: string;
+  subgenre?: string | null;
+  playlistId?: string;
+  label: string;
+}
+
+export interface DiscoveryRequestContext {
+  mode: DiscoveryMode;
+  target: DiscoveryTarget;
+  title: string;
+  subtitle?: string;
+  playlistId?: string;
+  category?: string;
+  subgenre?: string | null;
+}
+
+/** Builds a `DiscoveryRequestContext` for catalog (`category`/`playlist`) or host (`vibe`) discovery triggers. */
+export function buildDiscoveryContext(req: DiscoverSimilarRequest | { mode: 'vibe' }): DiscoveryRequestContext {
+  if (req.mode === 'vibe') {
+    return {
+      mode: 'vibe',
+      target: 'queue',
+      title: 'Completar fila na vibe atual',
+      subtitle: 'Recomendações baseadas nas últimas faixas tocadas',
+    };
+  }
+  if (req.mode === 'playlist') {
+    return {
+      mode: 'playlist',
+      target: 'playlist',
+      playlistId: req.playlistId,
+      title: 'Popular semelhantes',
+      subtitle: `Playlist: ${req.label}`,
+    };
+  }
+  return {
+    mode: 'category',
+    target: 'library',
+    category: req.category,
+    subgenre: req.subgenre ?? null,
+    title: 'Popular semelhantes',
+    subtitle: req.label,
+  };
+}
 
 export type CatalogTab = 'categories' | 'playlists' | 'albums' | 'artists' | 'all';
 

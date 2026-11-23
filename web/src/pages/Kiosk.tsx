@@ -16,6 +16,7 @@ import { TrackMetadataModal } from '../components/TrackMetadataModal';
 import { VideoLyricsOverlay } from '../components/VideoLyricsOverlay';
 import { api, getHostPin, setHostPin } from '../lib/api';
 import {
+  buildDiscoveryContext,
   type CatalogRoute,
   type CatalogTab,
   DEFAULT_CATEGORY_SUGGESTIONS,
@@ -521,24 +522,7 @@ export function Kiosk() {
   };
 
   const openDiscoverFromCatalog = useCallback((req: DiscoverSimilarRequest) => {
-    if (req.mode === 'playlist') {
-      setDiscoveryContext({
-        mode: 'playlist',
-        target: 'playlist',
-        playlistId: req.playlistId,
-        title: 'Popular semelhantes',
-        subtitle: `Playlist: ${req.label}`,
-      });
-      return;
-    }
-    setDiscoveryContext({
-      mode: 'category',
-      target: 'library',
-      category: req.category,
-      subgenre: req.subgenre ?? null,
-      title: 'Popular semelhantes',
-      subtitle: req.label,
-    });
+    setDiscoveryContext(buildDiscoveryContext(req));
   }, []);
 
   const activeScope = !unlocked
@@ -626,22 +610,28 @@ export function Kiosk() {
   useEffect(() => {
     const root = kioskRef.current;
     if (!root || typeof MutationObserver === 'undefined') return;
+    const isUnavailableFocusTarget = (el: HTMLElement | null): boolean =>
+      Boolean(el && (!el.isConnected || ('disabled' in el && Boolean((el as HTMLButtonElement).disabled))));
     let scheduled = false;
     const observer = new MutationObserver(() => {
       if (!dpadActiveRef.current || scheduled) return;
-      const currentEl = focusedElRef.current;
-      if (currentEl && !currentEl.isConnected) {
+      if (isUnavailableFocusTarget(focusedElRef.current)) {
         scheduled = true;
         queueMicrotask(() => {
           scheduled = false;
           if (!dpadActiveRef.current) return;
-          if (focusedElRef.current && !focusedElRef.current.isConnected) {
+          if (isUnavailableFocusTarget(focusedElRef.current)) {
             focusDefaultInScope();
           }
         });
       }
     });
-    observer.observe(root, { childList: true, subtree: true });
+    observer.observe(root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['disabled'],
+    });
     return () => observer.disconnect();
   }, [focusDefaultInScope]);
 
@@ -1417,12 +1407,7 @@ export function Kiosk() {
           }}
           onDiscoverQueueVibe={() => {
             setSettingsOpen(false);
-            setDiscoveryContext({
-              mode: 'vibe',
-              target: 'queue',
-              title: 'Completar fila na vibe atual',
-              subtitle: 'Recomendações baseadas nas últimas faixas tocadas',
-            });
+            setDiscoveryContext(buildDiscoveryContext({ mode: 'vibe' }));
           }}
           reloadKey={catalogReloadKey}
           onCatalogChanged={() => setCatalogReloadKey((k) => k + 1)}
@@ -1521,6 +1506,12 @@ export function Kiosk() {
         onClose={() => setDiscoveryContext(null)}
         onPopulated={() => setCatalogReloadKey((k) => k + 1)}
         onToast={toast.show}
+        onSuggestionsLoaded={() => {
+          if (!dpadActiveRef.current) return;
+          window.requestAnimationFrame(() => {
+            if (dpadActiveRef.current) focusDefaultInScope();
+          });
+        }}
       />
 
       {!unlocked && (

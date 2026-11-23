@@ -257,6 +257,7 @@ export class TrackRepository {
 
   /** Returns all non-error tracks' identifying fields for normalized deduplication. */
   listDedupeEntries(): {
+    id: string;
     source: TrackSource;
     sourceId: string;
     title: string;
@@ -264,8 +265,9 @@ export class TrackRepository {
     spotifyUri: string | null;
   }[] {
     const rows = this.db
-      .prepare("SELECT source, source_id, title, artist, spotify_uri FROM tracks WHERE status != 'error'")
+      .prepare("SELECT id, source, source_id, title, artist, spotify_uri FROM tracks WHERE status != 'error'")
       .all() as unknown as {
+      id: string;
       source: TrackSource;
       source_id: string;
       title: string;
@@ -273,6 +275,7 @@ export class TrackRepository {
       spotify_uri: string | null;
     }[];
     return rows.map((r) => ({
+      id: r.id,
       source: r.source,
       sourceId: r.source_id,
       title: r.title,

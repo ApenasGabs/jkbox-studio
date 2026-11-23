@@ -14,6 +14,7 @@ import { useToast } from '../components/Toast';
 import { TrackMetadataModal } from '../components/TrackMetadataModal';
 import { api, getClientId, getHostPin, getName, type SearchSource, setHostPin, setName } from '../lib/api';
 import {
+  buildDiscoveryContext,
   type CatalogRoute,
   type CatalogTab,
   DEFAULT_CATEGORY_SUGGESTIONS,
@@ -332,24 +333,7 @@ export function Remote() {
   };
 
   const openDiscoverFromCatalog = useCallback((req: DiscoverSimilarRequest) => {
-    if (req.mode === 'playlist') {
-      setDiscoveryContext({
-        mode: 'playlist',
-        target: 'playlist',
-        playlistId: req.playlistId,
-        title: 'Popular semelhantes',
-        subtitle: `Playlist: ${req.label}`,
-      });
-      return;
-    }
-    setDiscoveryContext({
-      mode: 'category',
-      target: 'library',
-      category: req.category,
-      subgenre: req.subgenre ?? null,
-      title: 'Popular semelhantes',
-      subtitle: req.label,
-    });
+    setDiscoveryContext(buildDiscoveryContext(req));
   }, []);
 
   const vote = (entry: QueueEntry) => api.vote(entry.id).catch((err) => toast.show(err.message, true));
@@ -933,12 +917,7 @@ export function Remote() {
                 type="button"
                 onClick={() => {
                   setHostPanelOpen(false);
-                  setDiscoveryContext({
-                    mode: 'vibe',
-                    target: 'queue',
-                    title: 'Completar fila na vibe atual',
-                    subtitle: 'Recomendações baseadas nas últimas faixas tocadas',
-                  });
+                  setDiscoveryContext(buildDiscoveryContext({ mode: 'vibe' }));
                 }}
                 className="rounded-xl border border-accent/40 bg-accent/20 px-3 py-2 text-xs font-semibold text-purple-100 transition hover:bg-accent/30"
               >
