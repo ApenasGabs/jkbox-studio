@@ -174,6 +174,13 @@ export class QueueService extends EventEmitter<QueueEvents> {
     return rows.map((r) => r.track_id);
   }
 
+  /** Returns recently played/started-and-removed Track objects (most recent first). */
+  recentTracks(limit = 30): Track[] {
+    return this.recentTrackIds(limit)
+      .map((id) => this.tracks.get(id))
+      .filter((t): t is Track => t !== null);
+  }
+
   private ordered(): QueueEntryView[] {
     const rows = this.db
       .prepare("SELECT * FROM queue WHERE status = 'queued'")

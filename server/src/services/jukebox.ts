@@ -3,7 +3,17 @@ import type { Settings } from '../db.js';
 import { DEFAULT_AUTO_DJ_RECENT_WINDOW, pickAutoDjTrack } from '../lib/autoDj.js';
 import { parseInput } from '../lib/parseInput.js';
 import { sanitizeResult } from '../lib/validate.js';
-import type { PlaybackOutput, QueueEntryView, SearchResult, SpotifyDevice, Track, TrackSource } from '../types.js';
+import type {
+  AutoDjConfig,
+  AutoDjMode,
+  PlaybackOutput,
+  QueueEntryView,
+  SearchResult,
+  SpotifyDevice,
+  Track,
+  TrackSource,
+} from '../types.js';
+import { isCanonicalCategory, type AutocategorizeSummary, type ClassifierService } from './classifier.js';
 import type { DownloadManager } from './downloads.js';
 import type { LyricsService } from './lyrics.js';
 import { QueueError, type QueueService } from './queue.js';
@@ -81,7 +91,12 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
   private spotifyLastProgressMs = 0;
   private consecutiveSpotifyMisses = 0;
   private _autoDjEnabled: boolean;
+  private _autoDjMode: AutoDjMode;
+  private _autoDjCategory: string | null;
+  private _autoDjSubgenre: string | null;
   private _playbackOutput: PlaybackOutput;
+  private autocategorizeInFlight: Promise<AutocategorizeSummary> | null = null;
+  private readonly classifyingTrackIds = new Set<string>();
 
   constructor(
     readonly tracks: TrackRepository,
@@ -92,12 +107,20 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     readonly lyrics: LyricsService,
     private readonly log: (msg: string) => void = console.log,
     readonly settings?: Settings,
+    readonly classifier?: ClassifierService,
   ) {
     super();
     this._autoDjEnabled = this.settings?.get<boolean>('autoDjEnabled') ?? false;
+    const savedMode = this.settings?.get<string>('autoDjMode');
+    this._autoDjMode = savedMode === 'category' || savedMode === 'random' ? savedMode : 'vibe';
+    this._autoDjCategory = this.settings?.get<string | null>('autoDjCategory') ?? null;
+    this._autoDjSubgenre = this.settings?.get<string | null>('autoDjSubgenre') ?? null;
     this._playbackOutput = normalizePlaybackOutput(this.settings?.get<unknown>('playback_output'), spotify.connected);
     queue.setPlayablePredicate((track) => track.status === 'ready' || this._playbackOutput.type === 'spotify');
-    downloads.on('ready', () => queue.advanceIfIdle());
+    downloads.on('ready', (track) => {
+      queue.advanceIfIdle();
+      void this.classifyTrackInBackground(track.id);
+    });
     queue.on('started', (entry) => {
       if (this._playbackOutput.type === 'spotify') {
         void this.playCurrentOnSpotify(entry);
@@ -508,13 +531,109 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     return this._autoDjEnabled;
   }
 
+  get autoDjMode(): AutoDjMode {
+    return this._autoDjMode;
+  }
+
+  get autoDjCategory(): string | null {
+    return this._autoDjCategory;
+  }
+
+  get autoDjSubgenre(): string | null {
+    return this._autoDjSubgenre;
+  }
+
   setAutoDjEnabled(enabled: boolean): boolean {
     this._autoDjEnabled = enabled;
     this.settings?.set('autoDjEnabled', enabled);
     return this._autoDjEnabled;
   }
 
-  /** Enqueues a random cached track when Auto-DJ is enabled and playback just drained the queue. */
+  setAutoDjConfig(patch: {
+    enabled?: boolean;
+    mode?: AutoDjMode;
+    category?: string | null;
+    subgenre?: string | null;
+  }): AutoDjConfig {
+    if (patch.enabled !== undefined) {
+      this._autoDjEnabled = patch.enabled;
+      this.settings?.set('autoDjEnabled', this._autoDjEnabled);
+    }
+    if (patch.mode !== undefined) {
+      this._autoDjMode = patch.mode;
+      this.settings?.set('autoDjMode', this._autoDjMode);
+    }
+    if (patch.category !== undefined) {
+      const nextCategory = patch.category?.trim() || null;
+      const categoryChanged = nextCategory !== this._autoDjCategory;
+      this._autoDjCategory = nextCategory;
+      this.settings?.set('autoDjCategory', this._autoDjCategory);
+      if (patch.subgenre === undefined && (categoryChanged || !nextCategory)) {
+        this._autoDjSubgenre = null;
+        this.settings?.set('autoDjSubgenre', null);
+      }
+    }
+    if (patch.subgenre !== undefined) {
+      this._autoDjSubgenre = patch.subgenre?.trim() || null;
+      this.settings?.set('autoDjSubgenre', this._autoDjSubgenre);
+    }
+    return {
+      enabled: this._autoDjEnabled,
+      mode: this._autoDjMode,
+      category: this._autoDjCategory,
+      subgenre: this._autoDjSubgenre,
+    };
+  }
+
+  private hasActiveTrack(trackIds: ReadonlySet<string>): boolean {
+    const { nowPlaying, queue: queued } = this.queue.state();
+    if (nowPlaying && trackIds.has(nowPlaying.item.trackId)) return true;
+    return queued.some((entry) => trackIds.has(entry.trackId));
+  }
+
+  async classifyTrackInBackground(trackId: string): Promise<void> {
+    if (!this.classifier || this.classifyingTrackIds.has(trackId)) return;
+    const track = this.tracks.get(trackId);
+    if (!track || track.genreManual) return;
+    if (isCanonicalCategory(track.genre) && track.subgenre?.trim()) return;
+    this.classifyingTrackIds.add(trackId);
+    try {
+      const res = await this.classifier.classifyTrack(track);
+      if (res.updated && this.hasActiveTrack(new Set([trackId]))) {
+        this.queue.emit('change');
+      }
+    } catch (err) {
+      this.log(`[classifier] falha em segundo plano (${track.title}): ${errorMessage(err)}`);
+    } finally {
+      this.classifyingTrackIds.delete(trackId);
+    }
+  }
+
+  async autocategorizeLibrary(): Promise<AutocategorizeSummary> {
+    if (!this.classifier) {
+      return { processed: 0, updated: 0, skippedManual: 0, failed: 0, updatedTrackIds: [] };
+    }
+    if (this.autocategorizeInFlight) {
+      return this.autocategorizeInFlight;
+    }
+    const run = (async () => {
+      const summary = await this.classifier!.autocategorizeAll();
+      if (summary.updatedTrackIds.length > 0 && this.hasActiveTrack(new Set(summary.updatedTrackIds))) {
+        this.queue.emit('change');
+      }
+      return summary;
+    })();
+    this.autocategorizeInFlight = run;
+    try {
+      return await run;
+    } finally {
+      if (this.autocategorizeInFlight === run) {
+        this.autocategorizeInFlight = null;
+      }
+    }
+  }
+
+  /** Enqueues a cached track when Auto-DJ is enabled and playback just drained the queue. */
   maybeEnqueueAutoDj(random?: () => number): Track | null {
     if (!this._autoDjEnabled) return null;
     if (this._playbackOutput.type === 'spotify' && this.consecutiveSpotifyMisses >= 5) return null;
@@ -526,16 +645,21 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       .filter((t) => this._playbackOutput.type !== 'spotify' || !this.spotifyUnavailableTrackIds.has(t.id));
     if (cached.length === 0) return null;
 
-    const recentIds = this.queue.recentTrackIds(DEFAULT_AUTO_DJ_RECENT_WINDOW * 3);
+    const recentTracks = this.queue.recentTracks(DEFAULT_AUTO_DJ_RECENT_WINDOW * 3);
+    const recentIds = recentTracks.map((t) => t.id);
     const picked = pickAutoDjTrack(cached, recentIds, {
       recentWindow: DEFAULT_AUTO_DJ_RECENT_WINDOW,
       random,
+      mode: this._autoDjMode,
+      lastTrack: recentTracks[0] ?? null,
+      category: this._autoDjCategory,
+      subgenre: this._autoDjSubgenre,
     });
     if (!picked) return null;
 
     try {
       this.queue.enqueue(picked.id, 'auto-dj', 'Auto-DJ');
-      this.log(`[auto-dj] enfileirada: ${picked.title}${picked.artist ? ` — ${picked.artist}` : ''}`);
+      this.log(`[auto-dj:${this._autoDjMode}] enfileirada: ${picked.title}${picked.artist ? ` — ${picked.artist}` : ''}`);
       return picked;
     } catch (err) {
       this.log(`[auto-dj] falha ao enfileirar faixa: ${errorMessage(err)}`);
@@ -543,11 +667,23 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     }
   }
 
-  /** Marks results that are already in the local library so the UI can flag them as instant. */
+  /** Marks results that are already in the local library so the UI can flag them as instant and display saved genres. */
   private annotate(results: SearchResult[]): SearchResult[] {
     return results.map((r) => {
       const track = this.tracks.findBySource(r.source, r.sourceId);
-      return track ? { ...r, trackId: track.id, cached: this.tracks.isCached(track) } : r;
+      if (!track) return r;
+      return {
+        ...r,
+        title: track.title || r.title,
+        artist: track.artist || r.artist,
+        album: track.album ?? r.album ?? null,
+        genre: track.genre,
+        subgenre: track.subgenre,
+        year: track.year ?? r.year ?? null,
+        trackNumber: track.trackNumber ?? r.trackNumber ?? null,
+        trackId: track.id,
+        cached: this.tracks.isCached(track),
+      };
     });
   }
 
@@ -563,6 +699,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       artist: t.artist,
       album: t.album,
       genre: t.genre,
+      subgenre: t.subgenre,
       year: t.year,
       trackNumber: t.trackNumber,
       durationSec: t.durationSec,
@@ -660,6 +797,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       track = this.tracks.upsertFromResult(result);
     }
     const cached = this.downloads.ensure(track.id);
+    void this.classifyTrackInBackground(track.id);
     const outcome = this.queue.enqueue(track.id, requesterId, requesterName);
     if (!outcome.duplicate && syncSpotify) void this.syncToSpotify(this.tracks.get(track.id)!);
     return { ...outcome, cached };

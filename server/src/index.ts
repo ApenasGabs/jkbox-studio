@@ -21,6 +21,9 @@ async function main() {
 
   const imported = await scanLibrary(jukebox.tracks, config.musicDir);
   if (imported > 0) console.log(`[jkbox] ${imported} arquivo(s) importado(s) do acervo local`);
+  void jukebox.autocategorizeLibrary().catch((err) => {
+    console.warn(`[jkbox] falha na auto-categorização inicial: ${(err as Error).message}`);
+  });
   jukebox.downloads.resumeInterrupted();
   jukebox.queue.advanceIfIdle();
   jukebox.syncStartupPlayback();

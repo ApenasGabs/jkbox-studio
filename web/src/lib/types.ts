@@ -11,6 +11,8 @@ export interface Track {
   artist: string;
   album: string | null;
   genre?: string | null;
+  subgenre?: string | null;
+  genreManual?: boolean;
   year?: number | null;
   trackNumber?: number | null;
   durationSec: number | null;
@@ -29,6 +31,7 @@ export interface SearchResult {
   artist: string;
   album?: string | null;
   genre?: string | null;
+  subgenre?: string | null;
   year?: number | null;
   trackNumber?: number | null;
   durationSec?: number | null;
@@ -43,8 +46,15 @@ export interface TrackMetadataPatch {
   artist?: string;
   album?: string | null;
   genre?: string | null;
+  subgenre?: string | null;
   year?: number | null;
   trackNumber?: number | null;
+}
+
+export interface CatalogSubcategory {
+  name: string;
+  trackCount: number;
+  cover: string | null;
 }
 
 export interface CatalogCategory {
@@ -53,7 +63,10 @@ export interface CatalogCategory {
   albumCount: number;
   artistCount: number;
   cover: string | null;
+  subcategories?: CatalogSubcategory[];
 }
+
+export type AutoDjMode = 'vibe' | 'category' | 'random';
 
 export interface CatalogAlbum {
   name: string;
@@ -147,6 +160,9 @@ export interface AppConfig {
   audioFormat: string;
   videoMode: VideoMode;
   autoDjEnabled: boolean;
+  autoDjMode?: AutoDjMode;
+  autoDjCategory?: string | null;
+  autoDjSubgenre?: string | null;
   playbackOutput: PlaybackOutput;
   spotify: SpotifyStatus;
   mdns?: MdnsStatus | null;

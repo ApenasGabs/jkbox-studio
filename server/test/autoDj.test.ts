@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import request from 'supertest';
 import { describe, expect, it } from 'vitest';
+import { createApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
 import { createJukebox } from '../src/container.js';
 import { pickAutoDjTrack } from '../src/lib/autoDj.js';
@@ -109,5 +111,137 @@ describe('Jukebox Auto-DJ integration', () => {
       log: () => {},
     });
     expect(reopened.autoDjEnabled).toBe(true);
+  });
+
+  it('cascades subgenre -> genre -> affinity in vibe mode and strictly isolates Gospel', () => {
+    const library = [
+      { id: 'f-2000', genre: 'Funk', subgenre: 'Funk Anos 2000' },
+      { id: 'f-mand', genre: 'Funk', subgenre: 'Funk Mandelão' },
+      { id: 'rap-1', genre: 'Rap & Trap', subgenre: 'Trap BR' },
+      { id: 'samba-1', genre: 'Samba & Pagode', subgenre: 'Pagode 90' },
+      { id: 'gospel-1', genre: 'Gospel', subgenre: 'Louvor & Adoração' },
+      { id: 'gospel-2', genre: 'Gospel', subgenre: 'Gospel Pentecostal' },
+    ];
+
+    // Level 1: same subgenre
+    const level1 = pickAutoDjTrack(library, ['last'], {
+      mode: 'vibe',
+      lastTrack: { id: 'last', genre: 'Funk', subgenre: 'Funk Anos 2000' },
+      random: () => 0,
+    });
+    expect(level1?.id).toBe('f-2000');
+
+    // Level 2: same genre when no other track shares subgenre
+    const level2 = pickAutoDjTrack(library, ['f-2000'], {
+      mode: 'vibe',
+      lastTrack: { id: 'f-2000', genre: 'Funk', subgenre: 'Funk Anos 2000' },
+      random: () => 0,
+    });
+    expect(level2?.id).toBe('f-mand');
+
+    // Level 3: safe affinity map (Funk -> Rap & Trap, never Gospel or Samba)
+    const level3 = pickAutoDjTrack(library, ['f-2000', 'f-mand'], {
+      mode: 'vibe',
+      lastTrack: { id: 'f-mand', genre: 'Funk', subgenre: 'Funk Mandelão' },
+      random: () => 0,
+    });
+    expect(level3?.id).toBe('rap-1');
+
+    // Gospel isolation: from Gospel -> ONLY Gospel (never Funk/Rap/Samba)
+    const afterGospel = pickAutoDjTrack(library, ['gospel-1'], {
+      mode: 'vibe',
+      lastTrack: { id: 'gospel-1', genre: 'Gospel', subgenre: 'Louvor & Adoração' },
+      random: () => 0,
+    });
+    expect(afterGospel?.id).toBe('gospel-2');
+
+    // Gospel isolation when no Gospel tracks exist in library -> returns null rather than mixing
+    expect(
+      pickAutoDjTrack(
+        library.filter((t) => t.genre !== 'Gospel'),
+        [],
+        { mode: 'vibe', lastTrack: { id: 'gospel-1', genre: 'Gospel', subgenre: 'Louvor & Adoração' } },
+      ),
+    ).toBeNull();
+
+    // Non-Gospel never transitions into Gospel even if only Gospel remains outside recent
+    const onlyGospelLeft = pickAutoDjTrack(
+      [
+        { id: 'rock-1', genre: 'Rock', subgenre: 'Rock Nacional' },
+        { id: 'gospel-only', genre: 'Gospel', subgenre: 'Louvor & Adoração' },
+      ],
+      ['rock-1'],
+      { mode: 'vibe', lastTrack: { id: 'rock-1', genre: 'Rock', subgenre: 'Rock Nacional' } },
+    );
+    expect(onlyGospelLeft?.id).toBe('rock-1');
+  });
+
+  it('supports category lock and random modes via POST /api/config/autodj', async () => {
+    const { config, jukebox } = setup({ HOST_PIN: '1234' });
+    const app = createApp({ config, jukebox });
+
+    fs.writeFileSync(path.join(config.musicDir, 'f1.mp3'), Buffer.alloc(64));
+    fs.writeFileSync(path.join(config.musicDir, 'f2.mp3'), Buffer.alloc(64));
+    fs.writeFileSync(path.join(config.musicDir, 'r1.mp3'), Buffer.alloc(64));
+
+    const f1 = jukebox.tracks.insertLocal(path.join(config.musicDir, 'f1.mp3'), {
+      title: 'F1',
+      artist: 'A',
+      genre: 'Funk',
+      subgenre: 'Funk Mandelão',
+    });
+    const f2 = jukebox.tracks.insertLocal(path.join(config.musicDir, 'f2.mp3'), {
+      title: 'F2',
+      artist: 'B',
+      genre: 'Funk',
+      subgenre: 'Funk Anos 2000',
+    });
+    jukebox.tracks.insertLocal(path.join(config.musicDir, 'r1.mp3'), {
+      title: 'R1',
+      artist: 'C',
+      genre: 'Rock',
+      subgenre: 'Rock Nacional',
+    });
+
+    await request(app).post('/api/config/autodj').send({ enabled: true, mode: 'category', category: 'Funk' }).expect(403);
+    await request(app)
+      .post('/api/config/autodj')
+      .set('x-host-pin', '1234')
+      .send({ enabled: true, mode: 'category' })
+      .expect(400);
+
+    const updated = await request(app)
+      .post('/api/config/autodj')
+      .set('x-host-pin', '1234')
+      .send({ enabled: true, mode: 'category', category: 'Funk', subgenre: 'Funk Mandelão' })
+      .expect(200);
+    expect(updated.body).toEqual({
+      autoDjEnabled: true,
+      autoDjMode: 'category',
+      autoDjCategory: 'Funk',
+      autoDjSubgenre: 'Funk Mandelão',
+    });
+
+    const cfg = await request(app).get('/api/config').expect(200);
+    expect(cfg.body).toMatchObject({
+      autoDjEnabled: true,
+      autoDjMode: 'category',
+      autoDjCategory: 'Funk',
+      autoDjSubgenre: 'Funk Mandelão',
+    });
+
+    // Locks exclusively to Funk Mandelão (f1), never picking Rock (r1) or Funk Anos 2000 (f2)
+    const pickedSub = jukebox.maybeEnqueueAutoDj(() => 0);
+    expect(pickedSub?.id).toBe(f1.id);
+
+    // Clear subgenre -> locks to Funk (picks f2 since f1 is now playing / in queue after skip)
+    jukebox.queue.skip();
+    await request(app)
+      .post('/api/config/autodj')
+      .set('x-host-pin', '1234')
+      .send({ mode: 'category', category: 'Funk', subgenre: null })
+      .expect(200);
+    const playingAfterDrain = jukebox.queue.state().nowPlaying!;
+    expect([f1.id, f2.id]).toContain(playingAfterDrain.item.trackId);
   });
 });

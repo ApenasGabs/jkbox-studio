@@ -1,7 +1,7 @@
 import type { TrackMetadataPatch } from '../types.js';
 
-const TEXT_LIMITS = { title: 200, artist: 200, album: 200, genre: 100 } as const;
-const ALLOWED = new Set(['title', 'artist', 'album', 'genre', 'year', 'trackNumber']);
+const TEXT_LIMITS = { title: 200, artist: 200, album: 200, genre: 100, subgenre: 100 } as const;
+const ALLOWED = new Set(['title', 'artist', 'album', 'genre', 'subgenre', 'year', 'trackNumber']);
 
 export type MetadataPatchResult = { ok: true; patch: TrackMetadataPatch } | { ok: false; error: string };
 
@@ -13,10 +13,10 @@ export function parseMetadataPatch(input: unknown): MetadataPatchResult {
   if (unknown.length > 0) return { ok: false, error: `Campos não permitidos: ${unknown.join(', ')}` };
 
   const patch: TrackMetadataPatch = {};
-  for (const key of ['title', 'artist', 'album', 'genre'] as const) {
+  for (const key of ['title', 'artist', 'album', 'genre', 'subgenre'] as const) {
     if (!(key in raw)) continue;
     const value = raw[key];
-    if (value === null && (key === 'album' || key === 'genre')) {
+    if (value === null && (key === 'album' || key === 'genre' || key === 'subgenre')) {
       patch[key] = null;
       continue;
     }

@@ -73,6 +73,21 @@ const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks (artist COLLATE NOCASE);
   CREATE INDEX IF NOT EXISTS idx_tracks_genre ON tracks (genre COLLATE NOCASE);
   `,
+  // v5 — subgenres, manual genre lock, and cached artist genres (#27).
+  `
+  ALTER TABLE tracks ADD COLUMN subgenre TEXT;
+  ALTER TABLE tracks ADD COLUMN genre_manual INTEGER NOT NULL DEFAULT 0;
+  CREATE INDEX IF NOT EXISTS idx_tracks_subgenre ON tracks (subgenre COLLATE NOCASE);
+  CREATE TABLE IF NOT EXISTS artist_genres (
+    artist_key TEXT PRIMARY KEY,
+    artist_name TEXT NOT NULL,
+    genre TEXT,
+    subgenre TEXT,
+    source TEXT NOT NULL,
+    raw_genres TEXT,
+    fetched_at INTEGER NOT NULL
+  );
+  `,
 ];
 
 export function openDb(file: string): Db {

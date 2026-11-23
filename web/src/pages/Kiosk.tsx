@@ -2,6 +2,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { type RefObject, useCallback, useEffect, useRef, useState } from 'react';
 import { CatalogBrowser } from '../components/CatalogBrowser';
 import { Cover } from '../components/Cover';
+import { GenreBadges } from '../components/GenreBadges';
 import { LyricsView } from '../components/LyricsView';
 import { MdnsHostnamePanel } from '../components/MdnsHostnamePanel';
 import { QueueList } from '../components/QueueList';
@@ -22,7 +23,17 @@ import {
 import { cssImageUrl, formatTime, isLoopback, resolveRemoteQrUrl } from '../lib/format';
 import { activateFocusedElement, findNextSpatialCandidate, getFocusableElements } from '../lib/spatialNav';
 import { formatSpotifyOutputBadge } from '../lib/spotifyConnect';
-import type { AppConfig, KioskCommand, MdnsStatus, PlaybackOutput, QueueEntry, SearchResult, Track } from '../lib/types';
+import type {
+  AppConfig,
+  AutoDjMode,
+  CatalogCategory,
+  KioskCommand,
+  MdnsStatus,
+  PlaybackOutput,
+  QueueEntry,
+  SearchResult,
+  Track,
+} from '../lib/types';
 import { useInterpolatedTime } from '../lib/useInterpolatedTime';
 import { useJukebox } from '../lib/useJukebox';
 import { useKioskInput } from '../lib/useKioskInput';
@@ -952,11 +963,7 @@ export function Kiosk() {
                   </p>
                   <div className="mt-3 flex flex-wrap items-center justify-center gap-2 text-sm text-zinc-400">
                     <SourceBadge source={current.track.source} />
-                    {current.track.genre && (
-                      <span className="rounded-full border border-accent/35 bg-accent/15 px-2.5 py-0.5 text-xs font-medium text-purple-200">
-                        {current.track.genre}
-                      </span>
-                    )}
+                    <GenreBadges genre={current.track.genre} subgenre={current.track.subgenre} variant="kiosk-hero" />
                     <span>pedido por {current.requesterName}</span>
                   </div>
                 </div>
@@ -974,11 +981,7 @@ export function Kiosk() {
                   </div>
                   <div className="hidden shrink-0 items-center gap-2 text-xs text-zinc-400 sm:flex">
                     <SourceBadge source={current.track.source} />
-                    {current.track.genre && (
-                      <span className="rounded-full border border-accent/35 bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-purple-200">
-                        {current.track.genre}
-                      </span>
-                    )}
+                    <GenreBadges genre={current.track.genre} subgenre={current.track.subgenre} variant="kiosk-compact" />
                     <span>pedido por {current.requesterName}</span>
                   </div>
                 </div>
@@ -1007,11 +1010,7 @@ export function Kiosk() {
                 </div>
                 <div className="hidden shrink-0 items-center gap-2 text-xs text-zinc-400 sm:flex">
                   <SourceBadge source={current.track.source} />
-                  {current.track.genre && (
-                    <span className="rounded-full border border-accent/35 bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-purple-200">
-                      {current.track.genre}
-                    </span>
-                  )}
+                  <GenreBadges genre={current.track.genre} subgenre={current.track.subgenre} variant="kiosk-compact" />
                   <span>pedido por {current.requesterName}</span>
                 </div>
               </div>
@@ -1304,6 +1303,7 @@ export function Kiosk() {
             setSettingsOpen(false);
             setCatalogOpen(true);
           }}
+          onCatalogChanged={() => setCatalogReloadKey((k) => k + 1)}
           onClose={() => setSettingsOpen(false)}
           onChanged={refreshConfig}
           onMdnsUpdated={handleMdnsUpdated}
@@ -1438,11 +1438,18 @@ interface HostPanelProps {
   onToggleReactions: () => void;
   onEditCurrentTrack: () => void;
   onOpenCatalog: () => void;
+  onCatalogChanged: () => void;
   onClose: () => void;
   onChanged: () => void;
   onMdnsUpdated: (mdns: MdnsStatus) => void;
   run: RunFn;
 }
+
+const AUTO_DJ_MODES: { id: AutoDjMode; label: string; hint: string }[] = [
+  { id: 'vibe', label: 'Seguir clima atual', hint: 'Mesma subcategoria → categoria → afinidade segura (Gospel isolado).' },
+  { id: 'category', label: 'Travar em Categoria/Subcategoria', hint: 'Toca apenas faixas da categoria/subcategoria selecionada.' },
+  { id: 'random', label: 'Aleatório', hint: 'Sorteia qualquer faixa em cache evitando repetições recentes.' },
+];
 
 function HostPanel({
   panelRef,
@@ -1459,6 +1466,7 @@ function HostPanel({
   onToggleReactions,
   onEditCurrentTrack,
   onOpenCatalog,
+  onCatalogChanged,
   onClose,
   onChanged,
   onMdnsUpdated,
@@ -1466,7 +1474,26 @@ function HostPanel({
 }: HostPanelProps) {
   const [pin, setPin] = useState(getHostPin());
   const [playlist, setPlaylist] = useState('');
+  const [categories, setCategories] = useState<CatalogCategory[]>([]);
+  const [pickingCategory, setPickingCategory] = useState(false);
+  const [autocategorizing, setAutocategorizing] = useState(false);
   const spotify = config?.spotify;
+  const activeMode: AutoDjMode = config?.autoDjMode ?? 'vibe';
+  const showCategoryPicker = activeMode === 'category' || pickingCategory;
+  const activeCategoryName = config?.autoDjCategory ?? '';
+  const activeSubcategoryName = config?.autoDjSubgenre ?? '';
+  const activeCategoryObj = categories.find((c) => c.name.toLowerCase() === activeCategoryName.toLowerCase());
+
+  const loadCategories = useCallback(() => {
+    api
+      .catalogCategories()
+      .then((res) => setCategories(res.categories))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    loadCategories();
+  }, [loadCategories]);
 
   return (
     <div className="fixed inset-0 z-30 flex justify-end bg-black/50" onClick={onClose}>
@@ -1555,37 +1582,194 @@ function HostPanel({
           )}
         </section>
 
-        <section className="glass flex items-center justify-between gap-3 p-4">
-          <div className="min-w-0">
-            <h3 className="font-semibold">Auto-DJ</h3>
-            <p className="text-xs text-zinc-400">
-              Quando a fila esvaziar, toca automaticamente uma faixa aleatória do acervo em cache sem repetir as últimas tocadas.
-            </p>
+        <section className="glass flex flex-col gap-3 p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <h3 className="font-semibold">Auto-DJ</h3>
+              <p className="text-xs text-zinc-400">
+                Quando a fila esvaziar, escolhe automaticamente a próxima faixa em cache sem repetir as últimas tocadas.
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-label="Ativar Auto-DJ"
+              aria-checked={Boolean(config?.autoDjEnabled)}
+              disabled={!config}
+              onClick={() => {
+                if (!config) return;
+                const next = !config.autoDjEnabled;
+                void run(
+                  () => api.updateAutoDjConfig({ enabled: next }),
+                  next ? 'Auto-DJ ativado' : 'Auto-DJ desativado',
+                ).then(onChanged);
+              }}
+              className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition ${
+                config?.autoDjEnabled ? 'bg-accent' : 'bg-white/20'
+              } disabled:opacity-50`}
+            >
+              <span
+                className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${
+                  config?.autoDjEnabled ? 'translate-x-6' : 'translate-x-1'
+                }`}
+              />
+            </button>
           </div>
-          <button
-            type="button"
-            role="switch"
-            aria-label="Ativar Auto-DJ"
-            aria-checked={Boolean(config?.autoDjEnabled)}
-            disabled={!config}
-            onClick={() => {
-              if (!config) return;
-              const next = !config.autoDjEnabled;
-              void run(
-                () => api.updateHostSettings({ autoDjEnabled: next }),
-                next ? 'Auto-DJ ativado' : 'Auto-DJ desativado',
-              ).then(onChanged);
-            }}
-            className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition ${
-              config?.autoDjEnabled ? 'bg-accent' : 'bg-white/20'
-            } disabled:opacity-50`}
-          >
-            <span
-              className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${
-                config?.autoDjEnabled ? 'translate-x-6' : 'translate-x-1'
-              }`}
-            />
-          </button>
+
+          <div className="flex flex-col gap-1.5" role="group" aria-label="Modo do Auto-DJ">
+            {AUTO_DJ_MODES.map((option) => {
+              const selected = activeMode === option.id && (!pickingCategory || option.id === 'category');
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  aria-pressed={selected}
+                  disabled={!config}
+                  onClick={() => {
+                    if (!config) return;
+                    if (option.id === 'category') {
+                      const targetCat = activeCategoryName || categories[0]?.name || '';
+                      if (!targetCat) {
+                        setPickingCategory(true);
+                        onToast('Nenhuma categoria no acervo ainda — auto-categorize ou edite uma faixa.', true);
+                        return;
+                      }
+                      setPickingCategory(true);
+                      void run(
+                        () =>
+                          api.updateAutoDjConfig({
+                            mode: 'category',
+                            category: targetCat,
+                            subgenre: activeCategoryName ? activeSubcategoryName || null : null,
+                          }),
+                        `Auto-DJ travado em ${targetCat}`,
+                      ).then(onChanged);
+                      return;
+                    }
+                    setPickingCategory(false);
+                    void run(
+                      () => api.updateAutoDjConfig({ mode: option.id }),
+                      `Modo Auto-DJ: ${option.label}`,
+                    ).then(onChanged);
+                  }}
+                  className={`flex flex-col rounded-xl border px-3 py-2 text-left transition ${
+                    selected
+                      ? 'border-accent bg-accent/20 text-white'
+                      : 'border-white/10 bg-white/5 text-zinc-200 hover:bg-white/10'
+                  } disabled:opacity-50`}
+                >
+                  <span className="text-xs font-semibold">{option.label}</span>
+                  <span className="text-[11px] text-zinc-400">{option.hint}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {showCategoryPicker && (
+            <div className="flex flex-col gap-2 rounded-xl border border-white/10 bg-black/25 p-3">
+              <div className="flex flex-col gap-1.5">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
+                  Categoria travada
+                </span>
+                {categories.length === 0 ? (
+                  <p className="text-xs text-zinc-400">
+                    Nenhuma categoria encontrada. Use &ldquo;Auto-categorizar acervo&rdquo; abaixo primeiro.
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap gap-1.5">
+                    {categories.map((cat) => {
+                      const active = activeCategoryName.toLowerCase() === cat.name.toLowerCase();
+                      return (
+                        <button
+                          key={cat.name}
+                          type="button"
+                          aria-pressed={active}
+                          onClick={() => {
+                            void run(
+                              () =>
+                                api.updateAutoDjConfig({
+                                  mode: 'category',
+                                  category: cat.name,
+                                  subgenre: null,
+                                }),
+                              `Auto-DJ travado em ${cat.name}`,
+                            ).then(onChanged);
+                          }}
+                          className={`rounded-full border px-2.5 py-1 text-xs font-medium transition ${
+                            active
+                              ? 'border-accent bg-accent text-white'
+                              : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/15'
+                          }`}
+                        >
+                          {cat.name} ({cat.trackCount})
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {activeCategoryObj && (activeCategoryObj.subcategories?.length ?? 0) > 0 && (
+                <div className="flex flex-col gap-1.5 border-t border-white/10 pt-2">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
+                    Subcategoria (opcional)
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      aria-pressed={!activeSubcategoryName}
+                      onClick={() => {
+                        void run(
+                          () =>
+                            api.updateAutoDjConfig({
+                              mode: 'category',
+                              category: activeCategoryObj.name,
+                              subgenre: null,
+                            }),
+                          `Auto-DJ: todas de ${activeCategoryObj.name}`,
+                        ).then(onChanged);
+                      }}
+                      className={`rounded-full border px-2.5 py-0.5 text-xs transition ${
+                        !activeSubcategoryName
+                          ? 'border-accent-2 bg-accent-2/25 font-semibold text-white'
+                          : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/15'
+                      }`}
+                    >
+                      Todas da categoria
+                    </button>
+                    {activeCategoryObj.subcategories!.map((sub) => {
+                      const active = activeSubcategoryName.toLowerCase() === sub.name.toLowerCase();
+                      return (
+                        <button
+                          key={sub.name}
+                          type="button"
+                          aria-pressed={active}
+                          onClick={() => {
+                            void run(
+                              () =>
+                                api.updateAutoDjConfig({
+                                  mode: 'category',
+                                  category: activeCategoryObj.name,
+                                  subgenre: sub.name,
+                                }),
+                              `Auto-DJ travado em ${sub.name}`,
+                            ).then(onChanged);
+                          }}
+                          className={`rounded-full border px-2.5 py-0.5 text-xs transition ${
+                            active
+                              ? 'border-accent-2 bg-accent-2/25 font-semibold text-white'
+                              : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/15'
+                          }`}
+                        >
+                          {sub.name} ({sub.trackCount})
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </section>
 
         <section className="glass flex items-center justify-between gap-3 p-4">
@@ -1714,14 +1898,39 @@ function HostPanel({
               📚 Explorar catálogo
             </button>
             <button
+              type="button"
               onClick={() =>
-                run(api.rescanLibrary, ({ added }) => (added ? `${added} arquivo(s) adicionados ao acervo` : 'Nenhum arquivo novo encontrado'))
+                run(api.rescanLibrary, ({ added }) => {
+                  if (added) {
+                    onCatalogChanged();
+                    loadCategories();
+                  }
+                  return added ? `${added} arquivo(s) adicionados ao acervo` : 'Nenhum arquivo novo encontrado';
+                })
               }
               className="rounded-lg bg-white/10 px-3 py-2 text-sm hover:bg-white/20"
             >
               Reescanear acervo
             </button>
           </div>
+          <button
+            type="button"
+            disabled={autocategorizing}
+            onClick={() => {
+              setAutocategorizing(true);
+              void run(api.autocategorizeLibrary, ({ updated, skippedManual }) => {
+                onCatalogChanged();
+                loadCategories();
+                if (updated > 0) {
+                  return `${updated} faixa(s) auto-categorizada(s)${skippedManual > 0 ? ` (${skippedManual} manuais preservadas)` : ''}`;
+                }
+                return 'Nenhuma faixa pendente para auto-categorizar';
+              }).finally(() => setAutocategorizing(false));
+            }}
+            className="rounded-lg border border-accent/35 bg-accent/15 px-3 py-2 text-sm font-semibold text-purple-100 transition hover:bg-accent/25 disabled:opacity-50"
+          >
+            {autocategorizing ? 'Categorizando acervo…' : '✨ Auto-categorizar acervo'}
+          </button>
           {currentTrack && (
             <button
               type="button"
