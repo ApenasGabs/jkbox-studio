@@ -6,6 +6,7 @@ import { DiscoveryModal, type DiscoveryRequestContext } from '../components/Disc
 import { GenreBadges } from '../components/GenreBadges';
 import { LyricsView } from '../components/LyricsView';
 import { MdnsHostnamePanel } from '../components/MdnsHostnamePanel';
+import { PlaylistImportDetectedCard, PlaylistImportFeedback } from '../components/PlaylistImportBanner';
 import { PlaylistManagerPanel } from '../components/PlaylistManagerPanel';
 import { QueueList } from '../components/QueueList';
 import { SourceBadge } from '../components/SourceBadge';
@@ -28,9 +29,16 @@ import {
 } from '../lib/catalog';
 import { formatTime } from '../lib/format';
 import { applyKaraokeFilter } from '../lib/karaoke';
+import {
+  describePlaylistImportError,
+  detectPlaylistLink,
+  formatPlaylistImportSummary,
+  type PlaylistImportErrorInfo,
+} from '../lib/playlistImport';
 import { describeSpotifyConnectError, formatSpotifyOutputBadge } from '../lib/spotifyConnect';
 import {
   type AppConfig,
+  type PlaylistImportResult,
   type PlaylistSummary,
   type QueueEntry,
   REACTION_EMOJIS,
@@ -100,6 +108,9 @@ export function Remote() {
   const [playlistPickerTrack, setPlaylistPickerTrack] = useState<PlaylistPickerTrack | null>(null);
   const [discoveryContext, setDiscoveryContext] = useState<DiscoveryRequestContext | null>(null);
   const [hostPlaylists, setHostPlaylists] = useState<PlaylistSummary[]>([]);
+  const [importingPlaylist, setImportingPlaylist] = useState(false);
+  const [importResult, setImportResult] = useState<PlaylistImportResult | null>(null);
+  const [importError, setImportError] = useState<PlaylistImportErrorInfo | null>(null);
   const [hostVerified, setHostVerified] = useState(false);
   const [hostPinOpen, setHostPinOpen] = useState(false);
   const [hostPanelOpen, setHostPanelOpen] = useState(false);
@@ -122,6 +133,7 @@ export function Remote() {
   );
   const canEditMetadata = Boolean(config && (!config.hostPinRequired || hostVerified));
   const spotifyBadge = formatSpotifyOutputBadge(playbackOutput);
+  const detectedPlaylist = detectPlaylistLink(query);
 
   useEffect(() => {
     api
@@ -139,7 +151,7 @@ export function Remote() {
   }, []);
 
   useEffect(() => {
-    const timer = setTimeout(() => setCatalogFilter(query), 250);
+    const timer = setTimeout(() => setCatalogFilter(detectPlaylistLink(query) ? '' : query), 250);
     return () => clearTimeout(timer);
   }, [query]);
 
@@ -291,6 +303,40 @@ export function Remote() {
     } catch (err) {
       toast.show((err as Error).message, true);
     }
+  };
+
+  const importPlaylistByUrl = async (rawUrl: string): Promise<boolean> => {
+    if (importingPlaylist) return false;
+    setImportingPlaylist(true);
+    setImportError(null);
+    setImportResult(null);
+    try {
+      const outcome = await api.importPlaylist(rawUrl);
+      setImportResult(outcome);
+      if (query.trim() === rawUrl.trim()) {
+        setQuery('');
+        setCatalogFilter('');
+      }
+      setCatalogReloadKey((k) => k + 1);
+      toast.show(formatPlaylistImportSummary(outcome).toast);
+      return true;
+    } catch (err) {
+      const info = describePlaylistImportError(err);
+      setImportError(info);
+      toast.show(info.message, true);
+      return false;
+    } finally {
+      setImportingPlaylist(false);
+    }
+  };
+
+  const openImportedPlaylist = (playlist: PlaylistSummary) => {
+    setQuery('');
+    setCatalogFilter('');
+    setView('search');
+    setSource('local');
+    setCatalogTab('playlists');
+    setCatalogHistory([{ kind: 'root' }, { kind: 'playlist', id: playlist.id, name: playlist.name }]);
   };
 
   const handleMetadataSaved = (updated: Track) => {
@@ -509,6 +555,14 @@ export function Remote() {
             </button>
           </form>
 
+          {detectedPlaylist && (
+            <PlaylistImportDetectedCard
+              detected={detectedPlaylist}
+              importing={importingPlaylist}
+              onImport={() => void importPlaylistByUrl(detectedPlaylist.url)}
+            />
+          )}
+
           <div className="flex flex-wrap items-center gap-2">
             {tabs.map((tab) => (
               <button
@@ -535,6 +589,14 @@ export function Remote() {
             </button>
           </div>
 
+          <PlaylistImportFeedback
+            result={importResult}
+            error={importError}
+            onOpenPlaylist={openImportedPlaylist}
+            onDismissResult={() => setImportResult(null)}
+            onDismissError={() => setImportError(null)}
+          />
+
           {source === 'local' ? (
             <CatalogBrowser
               tab={catalogTab}
@@ -554,6 +616,8 @@ export function Remote() {
               onAddPlaylist={addPlaylistToQueue}
               onAddToPlaylist={setPlaylistPickerTrack}
               onDiscoverSimilar={canEditMetadata ? openDiscoverFromCatalog : undefined}
+              onImportPlaylist={importPlaylistByUrl}
+              importingPlaylist={importingPlaylist}
               canEditMetadata={canEditMetadata}
               canEnqueueAlbum={canEditMetadata}
               onEditTrack={setEditingTrack}

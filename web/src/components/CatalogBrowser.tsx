@@ -54,6 +54,8 @@ interface Props {
   onAddPlaylist?: (playlist: PlaylistSummary, shuffle: boolean) => Promise<void>;
   onAddToPlaylist?: (track: PlaylistPickerTrack) => void;
   onDiscoverSimilar?: (req: DiscoverSimilarRequest) => void;
+  onImportPlaylist?: (url: string) => Promise<boolean>;
+  importingPlaylist?: boolean;
   canEditMetadata: boolean;
   canEnqueueAlbum?: boolean;
   onEditTrack: (track: EditableTrack) => void;
@@ -78,6 +80,8 @@ export function CatalogBrowser({
   onAddPlaylist,
   onAddToPlaylist,
   onDiscoverSimilar,
+  onImportPlaylist,
+  importingPlaylist = false,
   canEditMetadata,
   canEnqueueAlbum = false,
   onEditTrack,
@@ -96,6 +100,8 @@ export function CatalogBrowser({
   const [creatingPlaylistOpen, setCreatingPlaylistOpen] = useState(false);
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [newPlaylistDesc, setNewPlaylistDesc] = useState('');
+  const [importingPlaylistOpen, setImportingPlaylistOpen] = useState(false);
+  const [importPlaylistUrl, setImportPlaylistUrl] = useState('');
   const [playlistBusy, setPlaylistBusy] = useState(false);
   const [editingPlaylistOpen, setEditingPlaylistOpen] = useState(false);
   const [editPlaylistName, setEditPlaylistName] = useState('');
@@ -267,6 +273,16 @@ export function CatalogBrowser({
       onToast?.((err as Error).message, true);
     } finally {
       setPlaylistBusy(false);
+    }
+  };
+
+  const handleImportPlaylistForm = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!onImportPlaylist || importingPlaylist) return;
+    const ok = await onImportPlaylist(importPlaylistUrl.trim());
+    if (ok) {
+      setImportPlaylistUrl('');
+      setImportingPlaylistOpen(false);
     }
   };
 
@@ -798,12 +814,15 @@ export function CatalogBrowser({
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <div className="flex min-w-0 items-center gap-3">
                         <Cover
-                          src={playlistDetail.cover}
+                          src={playlistDetail.cover ?? playlistDetail.thumbnail}
                           alt={playlistDetail.name}
                           className="h-16 w-16 shrink-0 rounded-2xl shadow-lg sm:h-20 sm:w-20"
                         />
                         <div className="min-w-0 flex-1">
-                          <h4 className="truncate text-lg font-bold leading-tight">{playlistDetail.name}</h4>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h4 className="truncate text-lg font-bold leading-tight">{playlistDetail.name}</h4>
+                            {playlistDetail.source && <SourceBadge source={playlistDetail.source} />}
+                          </div>
                           {playlistDetail.description && (
                             <p className="mt-0.5 line-clamp-2 text-xs text-zinc-300">{playlistDetail.description}</p>
                           )}
@@ -973,21 +992,61 @@ export function CatalogBrowser({
         </div>
       ) : tab === 'playlists' ? (
         <div className="flex flex-col gap-3">
-          {canEditMetadata && (
+          {(canEditMetadata || onImportPlaylist) && (
             <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-xs text-zinc-400">
-                  Misture músicas de estilos diferentes em listas temáticas como Churrasco, Festa ou Esquenta.
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="min-w-0 flex-1 text-xs text-zinc-400">
+                  Misture músicas em listas temáticas ou importe playlists públicas do YouTube e Spotify.
                 </p>
-                <button
-                  type="button"
-                  onClick={() => setCreatingPlaylistOpen((v) => !v)}
-                  className="shrink-0 rounded-xl bg-accent px-3 py-1.5 text-xs font-semibold text-white transition hover:brightness-110"
-                >
-                  {creatingPlaylistOpen ? 'Cancelar' : '+ Nova playlist'}
-                </button>
+                <div className="flex shrink-0 items-center gap-2">
+                  {onImportPlaylist && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCreatingPlaylistOpen(false);
+                        setImportingPlaylistOpen((v) => !v);
+                      }}
+                      className="rounded-xl border border-white/15 bg-white/10 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-white/20"
+                    >
+                      {importingPlaylistOpen ? 'Cancelar' : '📥 Importar link'}
+                    </button>
+                  )}
+                  {canEditMetadata && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setImportingPlaylistOpen(false);
+                        setCreatingPlaylistOpen((v) => !v);
+                      }}
+                      className="rounded-xl bg-accent px-3 py-1.5 text-xs font-semibold text-white transition hover:brightness-110"
+                    >
+                      {creatingPlaylistOpen ? 'Cancelar' : '+ Nova playlist'}
+                    </button>
+                  )}
+                </div>
               </div>
-              {creatingPlaylistOpen && (
+              {onImportPlaylist && importingPlaylistOpen && (
+                <form
+                  onSubmit={(e) => void handleImportPlaylistForm(e)}
+                  className="glass flex flex-col gap-2 p-3 sm:flex-row sm:items-center"
+                >
+                  <input
+                    value={importPlaylistUrl}
+                    onChange={(e) => setImportPlaylistUrl(e.target.value)}
+                    placeholder="Cole o link da playlist do YouTube ou Spotify…"
+                    aria-label="URL da playlist para importar"
+                    className="min-w-0 flex-1 rounded-xl bg-white/10 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-accent"
+                  />
+                  <button
+                    type="submit"
+                    disabled={importingPlaylist}
+                    className="shrink-0 rounded-xl bg-accent px-4 py-2 text-xs font-semibold text-white transition hover:brightness-110 disabled:cursor-wait disabled:opacity-60"
+                  >
+                    {importingPlaylist ? 'Importando…' : 'Importar Playlist'}
+                  </button>
+                </form>
+              )}
+              {canEditMetadata && creatingPlaylistOpen && (
                 <form
                   onSubmit={(e) => void handleCreatePlaylist(e)}
                   className="glass flex flex-col gap-2 p-3"
@@ -1042,6 +1101,7 @@ export function CatalogBrowser({
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
               {visiblePlaylists.map((pl) => {
                 const theme = getCategoryTheme(pl.name);
+                const coverSrc = pl.cover ?? pl.thumbnail ?? null;
                 return (
                   <button
                     key={pl.id}
@@ -1053,12 +1113,19 @@ export function CatalogBrowser({
                       <span className="line-clamp-2 text-base font-bold leading-snug text-white">{pl.name}</span>
                       <span className="text-xs text-white/80">{formatTrackCount(pl.trackCount)}</span>
                     </div>
-                    {pl.description && (
-                      <p className="relative z-10 mt-2 line-clamp-2 pr-8 text-[11px] text-white/75">{pl.description}</p>
-                    )}
-                    {pl.cover && (
+                    <div className="relative z-10 mt-2 flex flex-col gap-1.5 pr-12">
+                      {pl.source && (
+                        <div>
+                          <SourceBadge source={pl.source} />
+                        </div>
+                      )}
+                      {pl.description && (
+                        <p className="line-clamp-2 text-[11px] text-white/75">{pl.description}</p>
+                      )}
+                    </div>
+                    {coverSrc && (
                       <img
-                        src={pl.cover}
+                        src={coverSrc}
                         alt=""
                         aria-hidden="true"
                         loading="lazy"
