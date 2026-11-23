@@ -3,6 +3,7 @@ import { CatalogBrowser } from '../components/CatalogBrowser';
 import { Cover } from '../components/Cover';
 import { GenreBadges } from '../components/GenreBadges';
 import { LyricsView } from '../components/LyricsView';
+import { MdnsHostnamePanel } from '../components/MdnsHostnamePanel';
 import { QueueList } from '../components/QueueList';
 import { SourceBadge } from '../components/SourceBadge';
 import { SpotifyConnectSelector } from '../components/SpotifyConnectSelector';
@@ -60,7 +61,7 @@ function formatPlayedAt(finishedAt: number | null | undefined): string | null {
 }
 
 export function Remote() {
-  const { state, playbackOutput, position, downloads, lyricsOffset, notice, connected, send } = useJukebox();
+  const { state, playbackOutput, position, downloads, lyricsOffset, mdns, setMdns, notice, connected, send } = useJukebox();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [view, setView] = useState<'search' | 'queue' | 'lyrics' | 'history'>('search');
   const [name, setNameState] = useState(getName());
@@ -791,6 +792,15 @@ export function Remote() {
               playbackOutput={playbackOutput}
               volume={spotifyVolume}
               onVolumeChange={setSpotifyVolume}
+              onToast={toast.show}
+            />
+
+            <MdnsHostnamePanel
+              mdns={mdns ?? config?.mdns}
+              onUpdated={(nextMdns) => {
+                setMdns(nextMdns);
+                setConfig((prev) => (prev ? { ...prev, mdns: nextMdns } : prev));
+              }}
               onToast={toast.show}
             />
           </div>

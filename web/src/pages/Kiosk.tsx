@@ -4,6 +4,7 @@ import { CatalogBrowser } from '../components/CatalogBrowser';
 import { Cover } from '../components/Cover';
 import { GenreBadges } from '../components/GenreBadges';
 import { LyricsView } from '../components/LyricsView';
+import { MdnsHostnamePanel } from '../components/MdnsHostnamePanel';
 import { QueueList } from '../components/QueueList';
 import { SourceBadge } from '../components/SourceBadge';
 import { SpotifyConnectSelector } from '../components/SpotifyConnectSelector';
@@ -19,7 +20,7 @@ import {
   editableFromTrack,
   mergeCategorySuggestions,
 } from '../lib/catalog';
-import { cssImageUrl, formatTime, isLoopback, remoteUrl } from '../lib/format';
+import { cssImageUrl, formatTime, isLoopback, resolveRemoteQrUrl } from '../lib/format';
 import { activateFocusedElement, findNextSpatialCandidate, getFocusableElements } from '../lib/spatialNav';
 import { formatSpotifyOutputBadge } from '../lib/spotifyConnect';
 import type {
@@ -27,6 +28,7 @@ import type {
   AutoDjMode,
   CatalogCategory,
   KioskCommand,
+  MdnsStatus,
   PlaybackOutput,
   QueueEntry,
   SearchResult,
@@ -100,7 +102,7 @@ function youtubeEmbedUrl(youtubeId: string, startSec: number, autoplay: boolean)
 }
 
 export function Kiosk() {
-  const { state, playbackOutput, position, downloads, lyricsOffset, reactions, notice, connected, send, subscribeInput } = useJukebox();
+  const { state, playbackOutput, position, downloads, lyricsOffset, mdns, setMdns, reactions, notice, connected, send, subscribeInput } = useJukebox();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [unlocked, setUnlocked] = useState(false);
   const [playing, setPlaying] = useState(false);
@@ -187,6 +189,13 @@ export function Kiosk() {
   );
 
   const refreshConfig = useCallback(() => api.config().then(setConfig).catch(() => {}), []);
+  const handleMdnsUpdated = useCallback(
+    (nextMdns: MdnsStatus) => {
+      setMdns(nextMdns);
+      setConfig((prev) => (prev ? { ...prev, mdns: nextMdns } : prev));
+    },
+    [setMdns],
+  );
 
   useEffect(() => {
     refreshConfig();
@@ -433,7 +442,9 @@ export function Kiosk() {
     void persistLyricsOffset(0);
   };
 
-  const url = remoteUrl(config?.publicUrl ?? null);
+  const liveMdns = mdns ?? config?.mdns ?? null;
+  const effectiveConfig = config ? { ...config, mdns: liveMdns } : null;
+  const url = resolveRemoteQrUrl(config, liveMdns);
   const effectiveDuration = isSpotifyOutput ? current?.track.durationSec || 0 : time.duration || current?.track.durationSec || 0;
   const progressPct = effectiveDuration > 0 ? Math.min(100, (effectiveCurrentSec / effectiveDuration) * 100) : 0;
   const remainingSec = effectiveDuration > 0 ? Math.max(0, effectiveDuration - effectiveCurrentSec) : Number.POSITIVE_INFINITY;
@@ -1273,7 +1284,7 @@ export function Kiosk() {
         <HostPanel
           panelRef={hostDialogRef}
           remoteUrl={url}
-          config={config}
+          config={effectiveConfig}
           playbackOutput={playbackOutput}
           spotifyVolume={spotifyVolume}
           onSpotifyVolumeChange={setSpotifyVolume}
@@ -1295,6 +1306,7 @@ export function Kiosk() {
           onCatalogChanged={() => setCatalogReloadKey((k) => k + 1)}
           onClose={() => setSettingsOpen(false)}
           onChanged={refreshConfig}
+          onMdnsUpdated={handleMdnsUpdated}
           run={run}
         />
       )}
@@ -1429,6 +1441,7 @@ interface HostPanelProps {
   onCatalogChanged: () => void;
   onClose: () => void;
   onChanged: () => void;
+  onMdnsUpdated: (mdns: MdnsStatus) => void;
   run: RunFn;
 }
 
@@ -1456,6 +1469,7 @@ function HostPanel({
   onCatalogChanged,
   onClose,
   onChanged,
+  onMdnsUpdated,
   run,
 }: HostPanelProps) {
   const [pin, setPin] = useState(getHostPin());
@@ -1513,6 +1527,8 @@ function HostPanel({
             <p className="text-xs text-accent-2 [overflow-wrap:anywhere]">{qrUrl}</p>
           </div>
         </section>
+
+        <MdnsHostnamePanel mdns={config?.mdns} onUpdated={onMdnsUpdated} onToast={onToast} />
 
         {config?.hostPinRequired && (
           <section className="glass flex flex-col gap-2 p-4">

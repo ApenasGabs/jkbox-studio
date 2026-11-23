@@ -1,3 +1,5 @@
+import type { AppConfig, MdnsStatus } from './types';
+
 export function formatTime(totalSec: number | null | undefined): string {
   if (totalSec == null || !Number.isFinite(totalSec) || totalSec < 0) return '--:--';
   const sec = Math.floor(totalSec);
@@ -11,6 +13,16 @@ export function formatTime(totalSec: number | null | undefined): string {
 export function remoteUrl(publicUrl: string | null, origin: string = window.location.origin): string {
   return `${(publicUrl || origin).replace(/\/+$/, '')}/remote`;
 }
+
+/** Resolves the QR code target URL, preferring `.local` mDNS when enabled and toggled on. */
+export const resolveRemoteQrUrl = (
+  config: Pick<AppConfig, 'publicUrl'> | null | undefined,
+  mdns: Pick<MdnsStatus, 'enabled' | 'useForQr' | 'url'> | null | undefined,
+  origin: string = window.location.origin,
+): string => {
+  const baseUrl = mdns?.useForQr && mdns.enabled && mdns.url ? mdns.url : (config?.publicUrl ?? null);
+  return remoteUrl(baseUrl, origin);
+};
 
 export function isLoopback(url: string): boolean {
   try {

@@ -140,6 +140,20 @@ export interface SpotifyStatus {
   redirectUri: string | null;
 }
 
+export type MdnsMode = 'os-helper' | 'embedded' | 'disabled';
+
+export interface MdnsStatus {
+  hostname: string;
+  fqdn: string;
+  url: string;
+  enabled: boolean;
+  active: boolean;
+  mode: MdnsMode;
+  useForQr: boolean;
+  dockerBridgeHint: boolean;
+  lastError: string | null;
+}
+
 export interface AppConfig {
   publicUrl: string | null;
   hostPinRequired: boolean;
@@ -151,6 +165,7 @@ export interface AppConfig {
   autoDjSubgenre?: string | null;
   playbackOutput: PlaybackOutput;
   spotify: SpotifyStatus;
+  mdns?: MdnsStatus | null;
 }
 
 export type LyricsSource = 'lrclib' | 'local' | 'none';
@@ -182,4 +197,5 @@ export type ServerMessage =
   | { type: 'lyrics_offset'; trackId: string; offsetMs: number }
   | { type: 'reaction'; emoji: ReactionEmoji; senderName?: string }
   | { type: 'notice'; message: string; error?: boolean }
-  | { type: 'input'; command: KioskCommand; phase?: KioskInputPhase; source?: string };
+  | { type: 'input'; command: KioskCommand; phase?: KioskInputPhase; source?: string }
+  | { type: 'mdns'; mdns: MdnsStatus };
