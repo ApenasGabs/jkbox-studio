@@ -1,0 +1,25 @@
+[Unit]
+Description=jkbox-studio Physical Buttons & evdev Input Daemon
+Documentation=https://github.com/ApenasGabs/jkbox-studio
+After=jkbox.service sound.target
+Wants=jkbox.service
+
+[Service]
+Type=simple
+User=jkbox
+Group=jkbox
+SupplementaryGroups=input audio
+WorkingDirectory=/opt/jkbox/current
+Environment=NODE_ENV=production
+Environment=JKBOX_BUTTONS_CONFIG=/etc/jkbox/buttons.json
+EnvironmentFile=-/etc/jkbox/jkbox.env
+ExecStart=/usr/bin/env node /opt/jkbox/current/os/jkbox-buttons
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

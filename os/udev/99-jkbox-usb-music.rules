@@ -1,0 +1,3 @@
+# Automount USB storage partitions with music into /data/music/usb-* via systemd
+ACTION=="add", SUBSYSTEM=="block", ENV{ID_BUS}=="usb", ENV{ID_FS_USAGE}=="filesystem", TAG+="systemd", ENV{SYSTEMD_WANTS}="jkbox-usb-mount@%k.service"
+ACTION=="remove", SUBSYSTEM=="block", ENV{ID_BUS}=="usb", RUN+="/opt/jkbox/current/os/jkbox-usb-mount.sh remove %k"

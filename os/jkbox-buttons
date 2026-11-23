@@ -1,0 +1,434 @@
+#!/usr/bin/env node
+import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import readline from 'node:readline';
+import {
+  ABS_AXIS_NAMES,
+  buildWpctlArgs,
+  classifyAbsAxisValue,
+  createButtonProcessor,
+  EV_ABS,
+  EV_KEY,
+  keyCodeToToken,
+  loadDefaultButtonsConfig,
+  loadJkboxEnv,
+  parseInputEventBuffer,
+  parseProcBusInputDevices,
+  resolveButtonsConfig,
+  selectInputDevices,
+} from './lib/buttons-core.mjs';
+
+const DEFAULT_CONFIG_PATH = process.env.JKBOX_BUTTONS_CONFIG || '/etc/jkbox/buttons.json';
+const PROC_DEVICES_PATH = '/proc/bus/input/devices';
+
+function parseArgs(argv) {
+  const args = {
+    configPath: DEFAULT_CONFIG_PATH,
+    wsUrl: '',
+    calibrate: false,
+    listDevices: false,
+    dryRun: false,
+    help: false,
+  };
+
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--config' && argv[i + 1]) {
+      args.configPath = argv[++i];
+    } else if (a === '--ws-url' && argv[i + 1]) {
+      args.wsUrl = argv[++i];
+    } else if (a === '--calibrate') {
+      args.calibrate = true;
+    } else if (a === '--list-devices') {
+      args.listDevices = true;
+    } else if (a === '--dry-run') {
+      args.dryRun = true;
+    } else if (a === '-h' || a === '--help') {
+      args.help = true;
+    } else {
+      console.error(`[jkbox-buttons] Argumento desconhecido: ${a}`);
+      process.exit(2);
+    }
+  }
+  return args;
+}
+
+function printHelp() {
+  console.log(`Uso: jkbox-buttons [opções]
+
+Micro-daemon evdev para controle físico do jkbox-studio via WebSocket + wpctl.
+
+Opções:
+  --config <arquivo>   Caminho do buttons.json (padrão: /etc/jkbox/buttons.json)
+  --ws-url <url>       URL do WebSocket local (padrão: ws://127.0.0.1:\${PORT:-3000}/ws)
+  --calibrate          Assistente interativo para mapear botões físicos/encoder
+  --list-devices       Lista dispositivos /dev/input/event* detectados e sai
+  --dry-run            Lê eventos e loga comandos sem conectar ao WebSocket nem chamar wpctl
+  -h, --help           Exibe esta ajuda
+`);
+}
+
+function readUserConfig(configPath) {
+  if (!configPath || !fs.existsSync(configPath)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  } catch (err) {
+    console.error(`[jkbox-buttons] Falha ao ler ${configPath}: ${err.message}`);
+    return {};
+  }
+}
+
+function readCandidateDevices(deviceMatch) {
+  if (!fs.existsSync(PROC_DEVICES_PATH)) return [];
+  const raw = fs.readFileSync(PROC_DEVICES_PATH, 'utf8');
+  const all = parseProcBusInputDevices(raw);
+  return selectInputDevices(all, deviceMatch);
+}
+
+function ensureXdgRuntimeDir() {
+  if (process.env.XDG_RUNTIME_DIR) return process.env.XDG_RUNTIME_DIR;
+  if (typeof process.getuid === 'function') {
+    const candidate = `/run/user/${process.getuid()}`;
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return '';
+}
+
+function runVolumeCommand(cmd, config, dryRun) {
+  const wpctlArgs = buildWpctlArgs(cmd, {
+    step: config.volumeStep,
+    maxVolume: config.volumeMax,
+  });
+  if (!wpctlArgs) return;
+  if (dryRun) {
+    console.log(`[jkbox-buttons] [dry-run] wpctl ${wpctlArgs.join(' ')}`);
+    return;
+  }
+  const runtimeDir = ensureXdgRuntimeDir();
+  const env = runtimeDir ? { ...process.env, XDG_RUNTIME_DIR: runtimeDir } : process.env;
+  execFile('wpctl', wpctlArgs, { env, timeout: 3000 }, (err) => {
+    if (err) {
+      console.warn(`[jkbox-buttons] Falha ao executar wpctl (${cmd}): ${err.message}`);
+    }
+  });
+}
+
+function createWsSender(wsUrl, dryRun) {
+  if (dryRun) {
+    return {
+      sendInput: (command, phase = 'press') => {
+        console.log(`[jkbox-buttons] [dry-run] WS -> { type: "input", command: "${command}", phase: "${phase}", source: "evdev" }`);
+      },
+      close: () => {},
+    };
+  }
+
+  let ws = null;
+  let closed = false;
+  let retry = 0;
+  let reconnectTimer = null;
+
+  const connect = () => {
+    if (closed) return;
+    if (typeof globalThis.WebSocket !== 'function') {
+      console.error('[jkbox-buttons] Node.js >= 22 com WebSocket global é obrigatório.');
+      return;
+    }
+
+    try {
+      ws = new globalThis.WebSocket(wsUrl);
+    } catch (err) {
+      scheduleReconnect();
+      return;
+    }
+
+    ws.addEventListener('open', () => {
+      retry = 0;
+      console.log(`[jkbox-buttons] Conectado ao backend local em ${wsUrl}`);
+    });
+
+    ws.addEventListener('close', () => {
+      ws = null;
+      if (!closed) scheduleReconnect();
+    });
+
+    ws.addEventListener('error', () => {
+      // 'close' event triggers reconnect.
+    });
+  };
+
+  const scheduleReconnect = () => {
+    if (closed || reconnectTimer) return;
+    const delay = Math.min(10_000, 500 * 2 ** Math.min(retry++, 5));
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connect();
+    }, delay);
+  };
+
+  connect();
+
+  return {
+    sendInput: (command, phase = 'press') => {
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'input', command, phase, source: 'evdev' }));
+      }
+    },
+    close: () => {
+      closed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      try {
+        ws?.close();
+      } catch {
+        // ignore
+      }
+    },
+  };
+}
+
+async function runCalibration(args) {
+  const userConfig = readUserConfig(args.configPath);
+  const { config } = resolveButtonsConfig(userConfig, loadJkboxEnv());
+  const allDevices = fs.existsSync(PROC_DEVICES_PATH)
+    ? parseProcBusInputDevices(fs.readFileSync(PROC_DEVICES_PATH, 'utf8'))
+    : [];
+  const candidates = selectInputDevices(allDevices, config.deviceMatch);
+  const targets = candidates.length > 0 ? candidates : allDevices;
+
+  if (targets.length === 0) {
+    console.error('[jkbox-buttons] Nenhum dispositivo /dev/input/event* encontrado. Execute com sudo ou usuário no grupo input.');
+    process.exit(1);
+  }
+
+  console.log('\n=== Calibração Interativa jkbox-buttons ===');
+  console.log('Dispositivos monitorados:');
+  for (const d of targets) {
+    console.log(`  - ${d.devicePath} (${d.name})`);
+  }
+  console.log('\nPressione o botão/direção física correspondente ou aperte ENTER no terminal para pular.\n');
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const streams = [];
+  const absTrackers = new Map();
+  let captureHandler = null;
+
+  for (const dev of targets) {
+    try {
+      let remainder = Buffer.alloc(0);
+      const stream = fs.createReadStream(dev.devicePath, { highWaterMark: 4096 });
+      stream.on('data', (chunk) => {
+        const combined = remainder.length > 0 ? Buffer.concat([remainder, chunk]) : chunk;
+        const parsed = parseInputEventBuffer(combined);
+        remainder = parsed.remainder;
+        for (const ev of parsed.events) {
+          if (!captureHandler) continue;
+          if (ev.type === EV_KEY && ev.value === 1) {
+            captureHandler(keyCodeToToken(ev.code), dev);
+          } else if (ev.type === EV_ABS && ABS_AXIS_NAMES[ev.code]) {
+            const trackerKey = `${dev.devicePath}:${ev.code}`;
+            let tracker = absTrackers.get(trackerKey);
+            if (!tracker) {
+              tracker = { dir: 0, sawSignedOrWide: false };
+              absTrackers.set(trackerKey, tracker);
+            }
+            const dir = classifyAbsAxisValue(ev.code, ev.value, config.absAxes, tracker);
+            if (dir !== 0 && dir !== tracker.dir) {
+              tracker.dir = dir;
+              captureHandler(`${ABS_AXIS_NAMES[ev.code]}_${dir < 0 ? 'NEG' : 'POS'}`, dev);
+            } else if (dir === 0) {
+              tracker.dir = 0;
+            }
+          }
+        }
+      });
+      stream.on('error', () => {});
+      streams.push(stream);
+    } catch {
+      // skip unreadable
+    }
+  }
+
+  if (streams.length === 0) {
+    rl.close();
+    console.error('[jkbox-buttons] Sem permissão de leitura em /dev/input/event*. Tente executar com sudo.');
+    process.exit(1);
+  }
+
+  const steps = [
+    ['UP', 'Cima (UP)'],
+    ['DOWN', 'Baixo (DOWN)'],
+    ['LEFT', 'Esquerda (LEFT)'],
+    ['RIGHT', 'Direita (RIGHT)'],
+    ['SELECT', 'Escolher / Confirmar (SELECT)'],
+    ['PLAY', 'Tocar / Pausar (PLAY)'],
+    ['BACK', 'Voltar dedicado (opcional - ENTER pula)'],
+    ['MENU', 'Menu do Host dedicado (opcional - ENTER pula)'],
+    ['SKIP', 'Pular faixa dedicado (opcional - ENTER pula)'],
+    ['VOL_UP', 'Aumentar volume (opcional - ENTER pula)'],
+    ['VOL_DOWN', 'Diminuir volume (opcional - ENTER pula)'],
+  ];
+
+  const customKeys = {};
+  for (const [cmd, label] of steps) {
+    const token = await new Promise((resolve) => {
+      let done = false;
+      const finish = (val) => {
+        if (done) return;
+        done = true;
+        captureHandler = null;
+        rl.removeListener('line', onLine);
+        resolve(val);
+      };
+      const onLine = () => finish(null);
+      process.stdout.write(`> Pressione [${label}]: `);
+      captureHandler = (detectedToken, dev) => {
+        console.log(`${detectedToken} (${dev.name})`);
+        finish(detectedToken);
+      };
+      rl.once('line', onLine);
+    });
+    if (token) {
+      customKeys[token] = cmd;
+    }
+  }
+
+  for (const s of streams) s.close();
+  rl.close();
+
+  const defaults = loadDefaultButtonsConfig();
+  const nextConfig = {
+    ...defaults,
+    ...userConfig,
+    activeProfile: 'custom',
+    profiles: {
+      ...defaults.profiles,
+      ...(userConfig.profiles || {}),
+      custom: {
+        description: 'Perfil calibrado interativamente via jkbox-buttons --calibrate',
+        keys: customKeys,
+      },
+    },
+  };
+
+  fs.mkdirSync(path.dirname(args.configPath), { recursive: true });
+  fs.writeFileSync(args.configPath, JSON.stringify(nextConfig, null, 2) + '\n', 'utf8');
+  console.log(`\nConfiguração salva em ${args.configPath}. Reinicie o serviço: sudo systemctl restart jkbox-buttons`);
+}
+
+function startDaemon(args) {
+  const userConfig = readUserConfig(args.configPath);
+  const { config, keyMap } = resolveButtonsConfig(userConfig, loadJkboxEnv());
+  const wsUrl = args.wsUrl || config.wsUrl;
+
+  if (args.listDevices) {
+    const raw = fs.existsSync(PROC_DEVICES_PATH) ? fs.readFileSync(PROC_DEVICES_PATH, 'utf8') : '';
+    const devices = parseProcBusInputDevices(raw);
+    console.log(JSON.stringify(devices, null, 2));
+    return;
+  }
+
+  const sender = createWsSender(wsUrl, args.dryRun);
+  const processor = createButtonProcessor({
+    keyMap,
+    absAxes: config.absAxes,
+    debounceMs: config.debounceMs,
+    longPressSelectMs: config.longPressSelectMs,
+    longPressPlayMs: config.longPressPlayMs,
+    menuComboHoldMs: config.menuComboHoldMs,
+    repeatDelayMs: config.repeatDelayMs,
+    repeatIntervalMs: config.repeatIntervalMs,
+    emitPhases: Boolean(config.emitPhases),
+    onCommand: (cmd) => {
+      if (args.dryRun) {
+        console.log(`[jkbox-buttons] Comando detectado: ${cmd}`);
+      }
+      sender.sendInput(cmd, 'press');
+    },
+    onPhase: (cmd, phase) => {
+      if (args.dryRun) {
+        console.log(`[jkbox-buttons] Fase detectada: ${cmd} (${phase})`);
+      }
+      sender.sendInput(cmd, phase);
+    },
+    onVolume: (volCmd) => runVolumeCommand(volCmd, config, args.dryRun),
+  });
+
+  const openStreams = new Map();
+
+  const attachDevices = () => {
+    const candidates = readCandidateDevices(config.deviceMatch);
+    const activePaths = new Set(candidates.map((d) => d.devicePath));
+
+    for (const [devPath, entry] of openStreams.entries()) {
+      if (!activePaths.has(devPath)) {
+        entry.stream.destroy();
+        openStreams.delete(devPath);
+        console.log(`[jkbox-buttons] Dispositivo desconectado: ${devPath}`);
+      }
+    }
+
+    for (const dev of candidates) {
+      if (openStreams.has(dev.devicePath)) continue;
+      try {
+        let remainder = Buffer.alloc(0);
+        const stream = fs.createReadStream(dev.devicePath, { highWaterMark: 4096 });
+        stream.on('data', (chunk) => {
+          const combined = remainder.length > 0 ? Buffer.concat([remainder, chunk]) : chunk;
+          const parsed = parseInputEventBuffer(combined);
+          remainder = parsed.remainder;
+          for (const ev of parsed.events) {
+            processor.processEvent(dev.devicePath, ev);
+          }
+        });
+        stream.on('error', (err) => {
+          console.warn(`[jkbox-buttons] Erro ao ler ${dev.devicePath} (${dev.name}): ${err.message}`);
+          openStreams.delete(dev.devicePath);
+        });
+        stream.on('close', () => {
+          openStreams.delete(dev.devicePath);
+        });
+        openStreams.set(dev.devicePath, { dev, stream });
+        console.log(`[jkbox-buttons] Monitorando ${dev.devicePath} (${dev.name})`);
+      } catch (err) {
+        console.warn(`[jkbox-buttons] Não foi possível abrir ${dev.devicePath}: ${err.message}`);
+      }
+    }
+  };
+
+  attachDevices();
+  if (openStreams.size === 0) {
+    console.warn('[jkbox-buttons] Nenhum dispositivo evdev acessível no momento; aguardando hotplug...');
+  }
+
+  const hotplugTimer = setInterval(attachDevices, 3000);
+  hotplugTimer.unref();
+
+  const shutdown = () => {
+    clearInterval(hotplugTimer);
+    processor.reset();
+    for (const { stream } of openStreams.values()) {
+      stream.destroy();
+    }
+    openStreams.clear();
+    sender.close();
+    process.exit(0);
+  };
+
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+}
+
+const args = parseArgs(process.argv.slice(2));
+if (args.help) {
+  printHelp();
+  process.exit(0);
+}
+if (args.calibrate) {
+  runCalibration(args).catch((err) => {
+    console.error(`[jkbox-buttons] Erro na calibração: ${err.message}`);
+    process.exit(1);
+  });
+} else {
+  startDaemon(args);
+}

@@ -5,6 +5,7 @@ set -euo pipefail
 
 DRY_RUN=0
 FORCE=0
+NO_RESTART=0
 TARGET_TAG="${JKBOX_TARGET_TAG:-}"
 
 usage() {
@@ -14,6 +15,7 @@ Uso: jkbox-update.sh [opções]
 Opções:
   --dry-run        Consulta a release e exibe o plano sem alterar arquivos ou serviços
   --force          Reinstala mesmo que a versão instalada já corresponda à última release
+  --no-restart     Baixa, valida e atualiza o symlink sem reiniciar o serviço (bootstrap)
   --tag <tag>      Atualiza para uma tag específica em vez de /releases/latest
   -h, --help       Exibe esta ajuda
 
@@ -51,6 +53,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --force)
       FORCE=1
+      shift
+      ;;
+    --no-restart)
+      NO_RESTART=1
       shift
       ;;
     --tag)
@@ -420,9 +426,11 @@ fi
 if [ ! -f "${STAGING_DIR}/VERSION" ]; then
   printf '%s\n' "$LATEST_TAG" > "${STAGING_DIR}/VERSION"
 fi
-if [ -f "${STAGING_DIR}/os/jkbox-update.sh" ]; then
-  chmod +x "${STAGING_DIR}/os/jkbox-update.sh"
-fi
+for os_bin in jkbox-update.sh install-kiosk.sh jkbox-usb-mount.sh jkbox-wifi-fallback.sh jkbox-kiosk-browser.sh jkbox-buttons; do
+  if [ -f "${STAGING_DIR}/os/${os_bin}" ]; then
+    chmod +x "${STAGING_DIR}/os/${os_bin}"
+  fi
+done
 chmod -R a+rX "$STAGING_DIR"
 
 if [ -e "$TARGET_DIR" ]; then
@@ -494,18 +502,22 @@ rollback() {
 log "Alternando symlink ${JKBOX_CURRENT_LINK} -> ${TARGET_DIR}..."
 swap_symlink "$TARGET_DIR"
 
-log "Reiniciando ${JKBOX_SERVICE_NAME}..."
-if ! "$JKBOX_SYSTEMCTL" restart "$JKBOX_SERVICE_NAME"; then
-  err "Falha ao reiniciar ${JKBOX_SERVICE_NAME}"
-  rollback
-  exit 1
-fi
+if [ "$NO_RESTART" -eq 0 ]; then
+  log "Reiniciando ${JKBOX_SERVICE_NAME}..."
+  if ! "$JKBOX_SYSTEMCTL" restart "$JKBOX_SERVICE_NAME"; then
+    err "Falha ao reiniciar ${JKBOX_SERVICE_NAME}"
+    rollback
+    exit 1
+  fi
 
-log "Validando healthcheck em ${JKBOX_HEALTH_URL} (timeout ${JKBOX_HEALTH_TIMEOUT}s)..."
-if ! wait_for_health; then
-  err "Healthcheck falhou em ${JKBOX_HEALTH_URL} após ${JKBOX_HEALTH_TIMEOUT}s"
-  rollback
-  exit 1
+  log "Validando healthcheck em ${JKBOX_HEALTH_URL} (timeout ${JKBOX_HEALTH_TIMEOUT}s)..."
+  if ! wait_for_health; then
+    err "Healthcheck falhou em ${JKBOX_HEALTH_URL} após ${JKBOX_HEALTH_TIMEOUT}s"
+    rollback
+    exit 1
+  fi
+else
+  log "Modo --no-restart ativo; serviço será iniciado posteriormente."
 fi
 
 if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then

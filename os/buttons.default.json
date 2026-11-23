@@ -1,0 +1,72 @@
+{
+  "wsUrl": "ws://127.0.0.1:3000/ws",
+  "activeProfile": "auto",
+  "deviceMatch": [],
+  "debounceMs": 40,
+  "longPressSelectMs": 1000,
+  "longPressPlayMs": 1500,
+  "menuComboHoldMs": 2000,
+  "repeatDelayMs": 320,
+  "repeatIntervalMs": 110,
+  "emitPhases": false,
+  "volumeStep": "5%",
+  "volumeMax": "1.0",
+  "absAxes": {
+    "0": { "center": 128, "deadzone": 64 },
+    "1": { "center": 128, "deadzone": 64 },
+    "16": { "center": 0, "deadzone": 0.5 },
+    "17": { "center": 0, "deadzone": 0.5 }
+  },
+  "profiles": {
+    "usb-keyboard": {
+      "description": "Teclado USB padrão (Setas, Enter, Espaço, Esc/Backspace e teclas multimídia)",
+      "keys": {
+        "KEY_UP": "UP",
+        "KEY_DOWN": "DOWN",
+        "KEY_LEFT": "LEFT",
+        "KEY_RIGHT": "RIGHT",
+        "KEY_ENTER": "SELECT",
+        "KEY_KPENTER": "SELECT",
+        "KEY_SPACE": "PLAY",
+        "KEY_ESC": "BACK",
+        "KEY_BACKSPACE": "BACK",
+        "KEY_PLAYPAUSE": "PLAY",
+        "KEY_NEXTSONG": "SKIP",
+        "KEY_VOLUMEUP": "VOL_UP",
+        "KEY_VOLUMEDOWN": "VOL_DOWN",
+        "KEY_MUTE": "MUTE"
+      }
+    },
+    "zero-delay-arcade": {
+      "description": "Encoder USB Zero Delay Arcade / Gamepad HID (DragonRise, RP2040 GP2040-CE, etc.)",
+      "keys": {
+        "BTN_DPAD_UP": "UP",
+        "BTN_DPAD_DOWN": "DOWN",
+        "BTN_DPAD_LEFT": "LEFT",
+        "BTN_DPAD_RIGHT": "RIGHT",
+        "ABS_Y_NEG": "UP",
+        "ABS_Y_POS": "DOWN",
+        "ABS_X_NEG": "LEFT",
+        "ABS_X_POS": "RIGHT",
+        "ABS_HAT0Y_NEG": "UP",
+        "ABS_HAT0Y_POS": "DOWN",
+        "ABS_HAT0X_NEG": "LEFT",
+        "ABS_HAT0X_POS": "RIGHT",
+        "BTN_TRIGGER": "SELECT",
+        "BTN_SOUTH": "SELECT",
+        "BTN_THUMB": "PLAY",
+        "BTN_EAST": "PLAY",
+        "BTN_THUMB2": "BACK",
+        "BTN_NORTH": "BACK",
+        "BTN_TOP": "SKIP",
+        "BTN_WEST": "SKIP",
+        "BTN_TOP2": "MENU",
+        "BTN_START": "MENU",
+        "BTN_PINKIE": "VOL_DOWN",
+        "BTN_TL": "VOL_DOWN",
+        "BTN_BASE": "VOL_UP",
+        "BTN_TR": "VOL_UP"
+      }
+    }
+  }
+}
