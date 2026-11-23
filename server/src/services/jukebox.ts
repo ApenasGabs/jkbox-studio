@@ -7,6 +7,8 @@ import type {
   AutoDjConfig,
   AutoDjMode,
   PlaybackOutput,
+  PlaylistImportResult,
+  PlaylistSource,
   QueueEntryView,
   SearchResult,
   SpotifyDevice,
@@ -27,7 +29,7 @@ import {
 } from '../lib/youtubeMatch.js';
 import { SpotifyError, type SpotifyService } from './spotify.js';
 import type { TrackRepository } from './tracks.js';
-import type { MediaProvider } from './ytdlp.js';
+import type { ExtractedPlaylist, MediaProvider } from './ytdlp.js';
 
 export type SearchSource = 'all' | TrackSource;
 
@@ -53,6 +55,7 @@ export interface JukeboxEvents {
 const MAX_BATCH = 50;
 const DEFAULT_SPOTIFY_POLL_MS = 2500;
 const SPOTIFY_START_GRACE_MS = 5000;
+const PLAYLIST_NOT_FOUND_RE = /private|privad|does not exist|not exist|not found|404|unavailable|inacess|incomplete/i;
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -99,6 +102,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
   private _playbackOutput: PlaybackOutput;
   private autocategorizeInFlight: Promise<AutocategorizeSummary> | null = null;
   private readonly classifyingTrackIds = new Set<string>();
+  private readonly pendingClassifications = new Set<Promise<void>>();
 
   constructor(
     readonly tracks: TrackRepository,
@@ -709,6 +713,27 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     }
   }
 
+  private scheduleBatchClassification(trackIds: string[]): void {
+    if (!this.classifier || trackIds.length === 0) return;
+    const ids = [...new Set(trackIds)];
+    const task = (async () => {
+      for (const id of ids) {
+        await this.classifyTrackInBackground(id);
+      }
+    })();
+    this.pendingClassifications.add(task);
+    void task.finally(() => {
+      this.pendingClassifications.delete(task);
+    });
+  }
+
+  /** Resolves once any background track classification tasks triggered by imports have settled. */
+  async classificationIdle(): Promise<void> {
+    while (this.pendingClassifications.size > 0) {
+      await Promise.all([...this.pendingClassifications]);
+    }
+  }
+
   async autocategorizeLibrary(): Promise<AutocategorizeSummary> {
     if (!this.classifier) {
       return { processed: 0, updated: 0, skippedManual: 0, failed: 0, updatedTrackIds: [] };
@@ -970,6 +995,163 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       enqueued,
       duplicates,
       items: queuedItems,
+    };
+  }
+
+  private async extractYoutubePlaylist(playlistId: string): Promise<ExtractedPlaylist> {
+    const canonicalUrl = `https://www.youtube.com/playlist?list=${playlistId}`;
+    try {
+      if (this.media.getPlaylistDetails) {
+        return await this.media.getPlaylistDetails(canonicalUrl, MAX_BATCH);
+      }
+      const tracks = await this.media.getPlaylist(canonicalUrl, MAX_BATCH + 1);
+      return {
+        title: `Playlist YouTube (${playlistId})`,
+        description: null,
+        thumbnail: tracks[0]?.thumbnail ?? null,
+        totalCount: tracks.length,
+        tracks,
+      };
+    } catch (err) {
+      const msg = errorMessage(err);
+      if (PLAYLIST_NOT_FOUND_RE.test(msg)) {
+        throw new PlaylistError('Playlist do YouTube não encontrada, privada ou inacessível', 404);
+      }
+      throw new PlaylistError(`Falha ao ler playlist do YouTube: ${msg}`, 502);
+    }
+  }
+
+  private async extractSpotifyPlaylist(playlistId: string): Promise<ExtractedPlaylist> {
+    try {
+      return await this.spotify.getPlaylistDetails(playlistId, MAX_BATCH);
+    } catch (err) {
+      if (
+        err instanceof SpotifyError &&
+        (err.status === 404 || (err.status === 403 && err.code !== 'INSUFFICIENT_SCOPE'))
+      ) {
+        throw new PlaylistError('Playlist do Spotify não encontrada, privada ou inacessível', 404);
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Imports a YouTube or Spotify playlist by URL:
+   * persists tracks + playlist idempotently by `(source, sourceId)`,
+   * enqueues tracks with deduplication, triggers video-first background downloads,
+   * and runs background auto-categorization without overwriting manual genres.
+   */
+  async importPlaylist(input: {
+    url: unknown;
+    requesterId?: string;
+    requesterName?: string;
+    enqueue?: unknown;
+  }): Promise<PlaylistImportResult> {
+    if (!this.playlists) throw new PlaylistError('Serviço de playlists indisponível', 500);
+    if (typeof input.url !== 'string' || !input.url.trim()) {
+      throw new PlaylistError('Informe a URL da playlist do YouTube ou Spotify', 400);
+    }
+    if (input.enqueue !== undefined && typeof input.enqueue !== 'boolean') {
+      throw new PlaylistError('enqueue deve ser booleano', 400);
+    }
+    const shouldEnqueue = input.enqueue ?? true;
+
+    const parsed = parseInput(input.url);
+    if (parsed.kind !== 'youtube-playlist' && parsed.kind !== 'spotify-playlist') {
+      throw new PlaylistError('URL inválida ou não suportada. Cole um link de playlist do YouTube ou Spotify.', 400);
+    }
+
+    const source: PlaylistSource = parsed.kind === 'youtube-playlist' ? 'youtube' : 'spotify';
+    const sourceId = parsed.kind === 'youtube-playlist' ? parsed.playlistId : parsed.id;
+    const extracted =
+      parsed.kind === 'youtube-playlist'
+        ? await this.extractYoutubePlaylist(parsed.playlistId)
+        : await this.extractSpotifyPlaylist(parsed.id);
+
+    const totalRemote = extracted.totalCount ?? extracted.tracks.length;
+    if (totalRemote > MAX_BATCH || extracted.tracks.length > MAX_BATCH) {
+      throw new PlaylistError(`A playlist ultrapassa o limite máximo de ${MAX_BATCH} faixas por importação`, 422);
+    }
+
+    const validResults: SearchResult[] = [];
+    const seenKeys = new Set<string>();
+    let skipped = 0;
+    for (const candidate of extracted.tracks) {
+      const clean = sanitizeResult(candidate);
+      if (!clean || /^\[(Private|Deleted) video\]$/i.test(clean.title)) {
+        skipped += 1;
+        continue;
+      }
+      const key = `${clean.source}:${clean.sourceId}`;
+      if (seenKeys.has(key)) {
+        skipped += 1;
+        continue;
+      }
+      seenKeys.add(key);
+      validResults.push(clean);
+    }
+
+    if (extracted.tracks.length === 0 || validResults.length === 0) {
+      throw new PlaylistError('A playlist está vazia ou não possui faixas importáveis', 422);
+    }
+
+    const persistedTracks: Track[] = validResults.map((res) => {
+      const track = this.tracks.upsertFromResult(res);
+      const patch: Partial<Pick<Track, 'thumbnail' | 'spotifyUri' | 'durationSec' | 'album'>> = {};
+      if (!track.thumbnail && res.thumbnail) patch.thumbnail = res.thumbnail;
+      if (!track.spotifyUri && res.spotifyUri) patch.spotifyUri = res.spotifyUri;
+      if (track.durationSec === null && res.durationSec != null) patch.durationSec = res.durationSec;
+      if (!track.album && res.album) patch.album = res.album;
+      if (Object.keys(patch).length > 0) {
+        this.tracks.update(track.id, patch);
+        return this.tracks.get(track.id)!;
+      }
+      return track;
+    });
+
+    const { playlist, created } = this.playlists.upsertImported({
+      source,
+      sourceId,
+      name: extracted.title,
+      description: extracted.description ?? null,
+      thumbnail: extracted.thumbnail ?? persistedTracks.find((t) => t.thumbnail)?.thumbnail ?? null,
+      trackIds: persistedTracks.map((t) => t.id),
+    });
+
+    const requesterId = input.requesterId?.trim() || 'playlist-import';
+    const requesterName = input.requesterName?.trim() || playlist.name;
+    let alreadyCached = 0;
+    let downloading = 0;
+    let queued = 0;
+
+    for (const track of persistedTracks) {
+      const cached = this.downloads.ensure(track.id);
+      if (cached) alreadyCached += 1;
+      else downloading += 1;
+
+      if (shouldEnqueue) {
+        const outcome = this.queue.enqueue(track.id, requesterId, requesterName);
+        if (outcome.duplicate) skipped += 1;
+        else queued += 1;
+      }
+    }
+
+    this.scheduleBatchClassification(persistedTracks.map((t) => t.id));
+
+    const detail = this.playlists.getDetail(playlist.id)!;
+    return {
+      playlist: detail.summary,
+      created,
+      imported: persistedTracks.length,
+      alreadyCached,
+      queued,
+      downloading,
+      skipped,
+      tracks: detail.items.map((item) => ({
+        ...this.trackToResult(item.track),
+        position: item.position,
+        addedAt: item.addedAt,
+      })),
     };
   }
 

@@ -7,11 +7,20 @@ export interface DownloadResult {
   filePath: string;
 }
 
+export interface ExtractedPlaylist {
+  title: string;
+  description?: string | null;
+  thumbnail?: string | null;
+  totalCount?: number | null;
+  tracks: SearchResult[];
+}
+
 /** Abstraction over yt-dlp so the rest of the app (and tests) don't depend on the binary. */
 export interface MediaProvider {
   search(query: string, limit?: number): Promise<SearchResult[]>;
   getVideo(videoId: string): Promise<SearchResult>;
   getPlaylist(url: string, limit?: number): Promise<SearchResult[]>;
+  getPlaylistDetails?(url: string, limit?: number): Promise<ExtractedPlaylist>;
   download(videoId: string, outputBase: string, onProgress: (fraction: number) => void): Promise<DownloadResult>;
   downloadVideo?(
     videoId: string,
@@ -20,6 +29,11 @@ export interface MediaProvider {
     onProgress: (fraction: number) => void,
   ): Promise<DownloadResult>;
   version(): Promise<string>;
+}
+
+interface YtThumbnail {
+  url: string;
+  width?: number;
 }
 
 interface YtEntry {
@@ -32,17 +46,30 @@ interface YtEntry {
   album?: string;
   duration?: number;
   thumbnail?: string;
-  thumbnails?: { url: string; width?: number }[];
+  thumbnails?: YtThumbnail[];
+}
+
+interface YtPlaylistPayload {
+  id?: string;
+  title?: string;
+  description?: string;
+  thumbnail?: string;
+  thumbnails?: YtThumbnail[];
+  playlist_count?: number;
+  entries?: YtEntry[];
 }
 
 const PROGRESS_PREFIX = 'jkbox-progress:';
 
+function pickBestThumbnail(thumbnail?: string, thumbnails?: YtThumbnail[]): string | null {
+  if (thumbnail?.trim()) return thumbnail.trim();
+  const sorted = [...(thumbnails ?? [])].sort((a, b) => (b.width ?? 0) - (a.width ?? 0));
+  return sorted[0]?.url ?? null;
+}
+
 export function entryToResult(entry: YtEntry): SearchResult {
-  const thumbs = entry.thumbnails ?? [];
   const bestThumb =
-    entry.thumbnail ??
-    [...thumbs].sort((a, b) => (b.width ?? 0) - (a.width ?? 0))[0]?.url ??
-    `https://i.ytimg.com/vi/${entry.id}/hqdefault.jpg`;
+    pickBestThumbnail(entry.thumbnail, entry.thumbnails) ?? `https://i.ytimg.com/vi/${entry.id}/hqdefault.jpg`;
   return {
     source: 'youtube',
     sourceId: entry.id,
@@ -137,8 +164,26 @@ export class YtDlp implements MediaProvider {
 
   async getPlaylist(url: string, limit = 50): Promise<SearchResult[]> {
     const out = await this.run([url, '--flat-playlist', '-J', '--playlist-end', String(limit)]);
-    const data = JSON.parse(out) as { entries?: YtEntry[] };
+    const data = JSON.parse(out) as YtPlaylistPayload;
     return (data.entries ?? []).filter((e) => e?.id).map(entryToResult);
+  }
+
+  async getPlaylistDetails(url: string, limit = 50): Promise<ExtractedPlaylist> {
+    const fetchLimit = Math.max(1, limit) + 1;
+    const out = await this.run([url, '--flat-playlist', '-J', '--playlist-end', String(fetchLimit)]);
+    const data = JSON.parse(out) as YtPlaylistPayload;
+    const tracks = (data.entries ?? []).filter((e) => e?.id).map(entryToResult);
+    const totalCount =
+      typeof data.playlist_count === 'number' && Number.isFinite(data.playlist_count)
+        ? data.playlist_count
+        : tracks.length;
+    return {
+      title: data.title?.trim() || 'Playlist YouTube',
+      description: data.description?.trim() || null,
+      thumbnail: pickBestThumbnail(data.thumbnail, data.thumbnails) ?? tracks[0]?.thumbnail ?? null,
+      totalCount,
+      tracks,
+    };
   }
 
   private async runDownload(

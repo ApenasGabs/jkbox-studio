@@ -4,7 +4,7 @@ import path from 'node:path';
 import { loadConfig, type Config } from '../src/config.js';
 import { createJukebox } from '../src/container.js';
 import type { FetchFn } from '../src/services/spotify.js';
-import type { MediaProvider } from '../src/services/ytdlp.js';
+import type { ExtractedPlaylist, MediaProvider } from '../src/services/ytdlp.js';
 import type { SearchResult } from '../src/types.js';
 
 export function ytResult(id: string, title = `Song ${id}`, artist = 'Artist'): SearchResult {
@@ -38,8 +38,18 @@ export class FakeMedia implements MediaProvider {
   async getVideo(videoId: string): Promise<SearchResult> {
     return ytResult(videoId);
   }
-  async getPlaylist(): Promise<SearchResult[]> {
+  async getPlaylist(_url?: string, _limit?: number): Promise<SearchResult[]> {
     return [ytResult('aaaaaaaaaaa'), ytResult('bbbbbbbbbbb')];
+  }
+  async getPlaylistDetails(url: string, limit = 50): Promise<ExtractedPlaylist> {
+    const tracks = await this.getPlaylist(url, limit);
+    return {
+      title: 'Fake YouTube Playlist',
+      description: null,
+      thumbnail: tracks[0]?.thumbnail ?? null,
+      totalCount: tracks.length,
+      tracks,
+    };
   }
   async download(videoId: string, outputBase: string, onProgress: (f: number) => void) {
     this.downloads.push(videoId);

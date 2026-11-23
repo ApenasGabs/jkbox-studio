@@ -289,6 +289,21 @@ export const createApp = ({ config, jukebox, mdns, version = '0.1.0' }: AppDeps)
     }
   });
 
+  api.post('/playlists/import', async (req, res, next) => {
+    try {
+      const body = req.body ?? {};
+      const outcome = await jukebox.importPlaylist({
+        url: body.url ?? body.link ?? body.playlistUrl,
+        requesterId: str(body.clientId),
+        requesterName: str(body.name),
+        enqueue: body.enqueue,
+      });
+      res.status(outcome.created ? 201 : 200).json(outcome);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   api.patch('/playlists/:id', requireHost, (req, res, next) => {
     try {
       if (!playlists) throw new PlaylistError('Serviço de playlists indisponível', 500);
