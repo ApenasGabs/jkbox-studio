@@ -126,6 +126,7 @@ Estrutura:
 server/   Express + WebSocket + SQLite (node:sqlite), serviços de fila, downloads, yt-dlp e Spotify
 web/      React + Vite + Tailwind CSS (páginas Kiosk "/" e Remote "/remote")
 docker/   entrypoint do container
+os/       auto-updater nativo atômico (jkbox-update.sh) e units systemd
 ```
 
 ## Segurança e limitações conhecidas

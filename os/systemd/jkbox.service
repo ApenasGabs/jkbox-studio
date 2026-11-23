@@ -1,0 +1,28 @@
+[Unit]
+Description=jkbox-studio Jukebox Service
+Documentation=https://github.com/ApenasGabs/jkbox-studio
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jkbox
+Group=jkbox
+WorkingDirectory=/opt/jkbox/current
+StateDirectory=jkbox
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=DATA_DIR=/var/lib/jkbox
+Environment=WEB_DIR=/opt/jkbox/current/web/dist
+EnvironmentFile=-/etc/jkbox/jkbox.env
+ExecStart=/usr/bin/env node /opt/jkbox/current/server/dist/index.js
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

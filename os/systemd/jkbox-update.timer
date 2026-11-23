@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic check for jkbox-studio updates
+Documentation=https://github.com/ApenasGabs/jkbox-studio
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

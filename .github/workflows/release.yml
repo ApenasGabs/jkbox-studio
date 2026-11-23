@@ -1,0 +1,168 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag de release (ex: v0.2.0). Vazio usa a versão do package.json.'
+        required: false
+        type: string
+      publish:
+        description: 'Publicar na GitHub Release (false apenas gera e valida os artefatos)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build web and server
+        run: npm run build
+
+      - name: Resolve release tag
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          elif [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="v$(node -p "require('./package.json').version")"
+          fi
+
+          if ! printf '%s' "$TAG" | grep -Eq '^v?[A-Za-z0-9._-]+$' || printf '%s' "$TAG" | grep -q '\.\.'; then
+            echo "Tag inválida: $TAG" >&2
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "tarball=jkbox-studio-${TAG}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Package production tarball and SHA256SUMS
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          TARBALL_NAME: ${{ steps.meta.outputs.tarball }}
+        run: |
+          STAGE_DIR="$(mktemp -d)"
+          mkdir -p dist-release
+
+          cp package.json package-lock.json "$STAGE_DIR/"
+          mkdir -p "$STAGE_DIR/server" "$STAGE_DIR/web"
+          cp server/package.json "$STAGE_DIR/server/package.json"
+          cp web/package.json "$STAGE_DIR/web/package.json"
+
+          (cd "$STAGE_DIR" && npm ci --omit=dev --workspace server --no-audit --no-fund)
+          rm -rf "$STAGE_DIR/web/package.json" "$STAGE_DIR/package-lock.json"
+
+          cp -r server/dist "$STAGE_DIR/server/dist"
+          cp -r web/dist "$STAGE_DIR/web/dist"
+          cp -r os "$STAGE_DIR/os"
+          chmod +x "$STAGE_DIR/os/jkbox-update.sh"
+          cp .env.example "$STAGE_DIR/.env.example"
+          printf '%s\n' "$RELEASE_TAG" > "$STAGE_DIR/VERSION"
+
+          node -e '
+            const fs = require("node:fs");
+            const rawTag = process.env.RELEASE_TAG || "";
+            const semver = rawTag.replace(/^v/, "");
+            if (/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(semver)) {
+              for (const p of ["package.json", "server/package.json"]) {
+                const full = process.argv[1] + "/" + p;
+                const pkg = JSON.parse(fs.readFileSync(full, "utf8"));
+                pkg.version = semver;
+                fs.writeFileSync(full, JSON.stringify(pkg, null, 2) + "\n");
+              }
+            }
+          ' "$STAGE_DIR"
+
+          tar -czf "dist-release/${TARBALL_NAME}" -C "$STAGE_DIR" .
+          (cd dist-release && sha256sum "${TARBALL_NAME}" > SHA256SUMS && sha256sum -c SHA256SUMS)
+          rm -rf "$STAGE_DIR"
+
+      - name: Smoke test packaged release bundle
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          TARBALL_NAME: ${{ steps.meta.outputs.tarball }}
+        run: |
+          SMOKE_DIR="$(mktemp -d)"
+          DATA_DIR="$(mktemp -d)"
+          tar -xzf "dist-release/${TARBALL_NAME}" -C "$SMOKE_DIR"
+
+          PORT=3099 DATA_DIR="$DATA_DIR" NODE_ENV=production node "${SMOKE_DIR}/server/dist/index.js" &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true; rm -rf "$SMOKE_DIR" "$DATA_DIR"' EXIT
+
+          for _ in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:3099/api/health; then
+              break
+            fi
+            sleep 0.5
+          done
+
+          HEALTH="$(curl -fsS http://127.0.0.1:3099/api/health)"
+          echo "Health response: $HEALTH"
+          printf '%s' "$HEALTH" | node -e 'const d = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (!d.ok) process.exit(1);'
+          curl -fsS -o /dev/null http://127.0.0.1:3099/
+          curl -fsS -o /dev/null http://127.0.0.1:3099/remote
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: jkbox-studio-${{ steps.meta.outputs.tag }}
+          path: |
+            dist-release/${{ steps.meta.outputs.tarball }}
+            dist-release/SHA256SUMS
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag' || inputs.publish == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          TARBALL_NAME: ${{ steps.meta.outputs.tarball }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" \
+              "dist-release/${TARBALL_NAME}" \
+              dist-release/SHA256SUMS \
+              --clobber
+          else
+            EXTRA_FLAGS=""
+            case "$RELEASE_TAG" in
+              *-*) EXTRA_FLAGS="--prerelease" ;;
+            esac
+            gh release create "$RELEASE_TAG" \
+              "dist-release/${TARBALL_NAME}" \
+              dist-release/SHA256SUMS \
+              --title "$RELEASE_TAG" \
+              --generate-notes \
+              $EXTRA_FLAGS
+          fi
