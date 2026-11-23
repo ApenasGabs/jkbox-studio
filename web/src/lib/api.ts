@@ -6,6 +6,10 @@ import type {
   CatalogArtistDetail,
   CatalogCategory,
   CatalogSubcategory,
+  DiscoveryMode,
+  DiscoveryPopulateResponse,
+  DiscoverySuggestResponse,
+  DiscoveryTarget,
   JukeboxState,
   MdnsStatus,
   PlaybackOutput,
@@ -192,6 +196,31 @@ export const api = {
   rescanLibrary: () => post<{ added: number }>('/api/library/rescan'),
   autocategorizeLibrary: () =>
     post<{ processed: number; updated: number; skippedManual: number; failed: number }>('/api/library/autocategorize'),
+  discoverySuggest: (
+    payload: {
+      mode: DiscoveryMode;
+      playlistId?: string;
+      category?: string;
+      subgenre?: string | null;
+      limit?: number;
+    },
+    signal?: AbortSignal,
+  ) =>
+    request<DiscoverySuggestResponse>('/api/discovery/suggest', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      signal,
+    }),
+  discoveryPopulate: (payload: {
+    tracks: SearchResult[];
+    target: DiscoveryTarget;
+    playlistId?: string;
+  }) =>
+    post<DiscoveryPopulateResponse>('/api/discovery/populate', {
+      ...payload,
+      clientId: getClientId(),
+      name: getName(),
+    }),
   spotifySync: () => post<SpotifyStatus & { synced: number }>('/api/spotify/sync'),
   spotifyLinkPlaylist: (playlist: string) => post<SpotifyStatus>('/api/spotify/playlist', { playlist }),
   spotifyImport: () => post<{ imported: number }>('/api/spotify/import'),

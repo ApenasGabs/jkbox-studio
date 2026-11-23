@@ -1,7 +1,8 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
-import { CatalogBrowser } from '../components/CatalogBrowser';
+import { CatalogBrowser, type DiscoverSimilarRequest } from '../components/CatalogBrowser';
 import { Cover } from '../components/Cover';
+import { DiscoveryModal, type DiscoveryRequestContext } from '../components/DiscoveryModal';
 import { GenreBadges } from '../components/GenreBadges';
 import { LyricsView } from '../components/LyricsView';
 import { MdnsHostnamePanel } from '../components/MdnsHostnamePanel';
@@ -96,6 +97,7 @@ export function Remote() {
   const [categorySuggestions, setCategorySuggestions] = useState<string[]>([...DEFAULT_CATEGORY_SUGGESTIONS]);
   const [editingTrack, setEditingTrack] = useState<EditableTrack | null>(null);
   const [playlistPickerTrack, setPlaylistPickerTrack] = useState<PlaylistPickerTrack | null>(null);
+  const [discoveryContext, setDiscoveryContext] = useState<DiscoveryRequestContext | null>(null);
   const [hostPlaylists, setHostPlaylists] = useState<PlaylistSummary[]>([]);
   const [hostVerified, setHostVerified] = useState(false);
   const [hostPinOpen, setHostPinOpen] = useState(false);
@@ -329,6 +331,27 @@ export function Remote() {
     }
   };
 
+  const openDiscoverFromCatalog = useCallback((req: DiscoverSimilarRequest) => {
+    if (req.mode === 'playlist') {
+      setDiscoveryContext({
+        mode: 'playlist',
+        target: 'playlist',
+        playlistId: req.playlistId,
+        title: 'Popular semelhantes',
+        subtitle: `Playlist: ${req.label}`,
+      });
+      return;
+    }
+    setDiscoveryContext({
+      mode: 'category',
+      target: 'library',
+      category: req.category,
+      subgenre: req.subgenre ?? null,
+      title: 'Popular semelhantes',
+      subtitle: req.label,
+    });
+  }, []);
+
   const vote = (entry: QueueEntry) => api.vote(entry.id).catch((err) => toast.show(err.message, true));
   const remove = (entry: QueueEntry) => api.remove(entry.id).catch((err) => toast.show(err.message, true));
 
@@ -546,6 +569,7 @@ export function Remote() {
               onAddAlbum={addAlbum}
               onAddPlaylist={addPlaylistToQueue}
               onAddToPlaylist={setPlaylistPickerTrack}
+              onDiscoverSimilar={canEditMetadata ? openDiscoverFromCatalog : undefined}
               canEditMetadata={canEditMetadata}
               canEnqueueAlbum={canEditMetadata}
               onEditTrack={setEditingTrack}
@@ -898,6 +922,30 @@ export function Remote() {
               onToast={toast.show}
             />
 
+            <section className="glass flex flex-col gap-2 p-3">
+              <div className="min-w-0">
+                <h3 className="text-sm font-semibold">Descoberta inteligente</h3>
+                <p className="text-xs text-zinc-400">
+                  Sugira e adicione músicas na mesma vibe das últimas faixas tocadas sem bloquear a fila.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setHostPanelOpen(false);
+                  setDiscoveryContext({
+                    mode: 'vibe',
+                    target: 'queue',
+                    title: 'Completar fila na vibe atual',
+                    subtitle: 'Recomendações baseadas nas últimas faixas tocadas',
+                  });
+                }}
+                className="rounded-xl border border-accent/40 bg-accent/20 px-3 py-2 text-xs font-semibold text-purple-100 transition hover:bg-accent/30"
+              >
+                ✨ Completar fila na vibe atual
+              </button>
+            </section>
+
             <PlaylistManagerPanel
               playlists={hostPlaylists}
               onChanged={() => {
@@ -934,6 +982,12 @@ export function Remote() {
         track={playlistPickerTrack}
         onClose={() => setPlaylistPickerTrack(null)}
         onChanged={() => setCatalogReloadKey((k) => k + 1)}
+        onToast={toast.show}
+      />
+      <DiscoveryModal
+        context={discoveryContext}
+        onClose={() => setDiscoveryContext(null)}
+        onPopulated={() => setCatalogReloadKey((k) => k + 1)}
         onToast={toast.show}
       />
       {toast.node}

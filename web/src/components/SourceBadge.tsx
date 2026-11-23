@@ -4,6 +4,7 @@ const LABELS: Record<TrackSource, { label: string; className: string }> = {
   youtube: { label: 'YouTube', className: 'bg-red-500/20 text-red-300' },
   spotify: { label: 'Spotify', className: 'bg-green-500/20 text-green-300' },
   local: { label: 'Acervo', className: 'bg-sky-500/20 text-sky-300' },
+  deezer: { label: 'Deezer', className: 'bg-fuchsia-500/20 text-fuchsia-300' },
 };
 
 export function SourceBadge({ source, cached }: { source: TrackSource; cached?: boolean }) {

@@ -12,6 +12,8 @@ export interface DownloadEvents {
   failed: [track: Track];
 }
 
+export type DownloadPriority = 'high' | 'low';
+
 export interface DownloadManagerOptions {
   videoMode?: VideoMode;
   videoMaxHeight?: number;
@@ -21,9 +23,11 @@ export interface DownloadManagerOptions {
 /**
  * Background download queue with smart caching: tracks whose audio is already on disk
  * are marked ready immediately; everything else is fetched by yt-dlp into the music dir.
+ * High-priority requests (e.g. guest queue orders) always preempt low-priority discovery batches.
  */
 export class DownloadManager extends EventEmitter<DownloadEvents> {
-  private readonly pending: string[] = [];
+  private readonly pendingHigh: string[] = [];
+  private readonly pendingLow: string[] = [];
   private readonly active = new Set<string>();
   private readonly videoActive = new Set<string>();
   private readonly lastEmit = new Map<string, number>();
@@ -48,7 +52,7 @@ export class DownloadManager extends EventEmitter<DownloadEvents> {
   }
 
   /** Ensures the track's audio (and cached video when enabled) is available. Returns true when audio was served from cache. */
-  ensure(trackId: string): boolean {
+  ensure(trackId: string, priority: DownloadPriority = 'high'): boolean {
     const track = this.tracks.get(trackId);
     if (!track) throw new Error(`Faixa ${trackId} não encontrada`);
     if (this.tracks.isCached(track)) {
@@ -69,9 +73,21 @@ export class DownloadManager extends EventEmitter<DownloadEvents> {
       }
     }
 
-    if (this.active.has(trackId) || this.pending.includes(trackId)) return false;
+    if (this.active.has(trackId)) return false;
+    if (this.pendingHigh.includes(trackId)) return false;
+    const lowIdx = this.pendingLow.indexOf(trackId);
+    if (lowIdx !== -1) {
+      if (priority === 'high') {
+        this.pendingLow.splice(lowIdx, 1);
+        this.pendingHigh.push(trackId);
+        this.pump();
+      }
+      return false;
+    }
+
     this.tracks.update(trackId, { status: 'pending', progress: 0, error: null });
-    this.pending.push(trackId);
+    if (priority === 'low') this.pendingLow.push(trackId);
+    else this.pendingHigh.push(trackId);
     this.pump();
     return false;
   }
@@ -82,7 +98,7 @@ export class DownloadManager extends EventEmitter<DownloadEvents> {
   }
 
   get activeCount(): number {
-    return this.active.size + this.pending.length;
+    return this.active.size + this.pendingHigh.length + this.pendingLow.length;
   }
 
   /** Resolves once all queued downloads (including background video backfills) have settled. */
@@ -91,8 +107,8 @@ export class DownloadManager extends EventEmitter<DownloadEvents> {
   }
 
   private pump(): void {
-    while (this.active.size < this.concurrency && this.pending.length > 0) {
-      const id = this.pending.shift()!;
+    while (this.active.size < this.concurrency && (this.pendingHigh.length > 0 || this.pendingLow.length > 0)) {
+      const id = this.pendingHigh.length > 0 ? this.pendingHigh.shift()! : this.pendingLow.shift()!;
       this.active.add(id);
       this.run(id).finally(() => {
         this.active.delete(id);

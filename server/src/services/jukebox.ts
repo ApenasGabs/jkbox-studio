@@ -14,6 +14,7 @@ import type {
   TrackSource,
 } from '../types.js';
 import { isCanonicalCategory, type AutocategorizeSummary, type ClassifierService } from './classifier.js';
+import type { DiscoveryService } from './discovery.js';
 import type { DownloadManager } from './downloads.js';
 import type { LyricsService } from './lyrics.js';
 import { PlaylistError, type PlaylistRepository } from './playlists.js';
@@ -111,6 +112,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     readonly settings?: Settings,
     readonly classifier?: ClassifierService,
     readonly playlists?: PlaylistRepository,
+    public discovery?: DiscoveryService,
   ) {
     super();
     this._autoDjEnabled = this.settings?.get<boolean>('autoDjEnabled') ?? false;
@@ -892,6 +894,13 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       duplicates,
       items: queuedItems,
     };
+  }
+
+  /** Mirrors a batch of newly queued tracks (e.g. from discovery) to the shared Spotify playlist. */
+  syncQueuedBatch(tracks: Track[]): void {
+    if (tracks.length > 0 && this.spotify.connected) {
+      void this.syncBatchToSpotify(tracks);
+    }
   }
 
   /** Mirrors a batch of newly enqueued playlist tracks to Spotify without concurrent bursts. */

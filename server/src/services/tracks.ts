@@ -255,6 +255,32 @@ export class TrackRepository {
     return new Set(rows.map((r) => r.file_path));
   }
 
+  /** Returns all non-error tracks' identifying fields for normalized deduplication. */
+  listDedupeEntries(): {
+    source: TrackSource;
+    sourceId: string;
+    title: string;
+    artist: string;
+    spotifyUri: string | null;
+  }[] {
+    const rows = this.db
+      .prepare("SELECT source, source_id, title, artist, spotify_uri FROM tracks WHERE status != 'error'")
+      .all() as unknown as {
+      source: TrackSource;
+      source_id: string;
+      title: string;
+      artist: string;
+      spotify_uri: string | null;
+    }[];
+    return rows.map((r) => ({
+      source: r.source,
+      sourceId: r.source_id,
+      title: r.title,
+      artist: r.artist,
+      spotifyUri: r.spotify_uri,
+    }));
+  }
+
   /** Returns all ready tracks whose audio file currently exists on disk. */
   listCached(): Track[] {
     const rows = this.db
