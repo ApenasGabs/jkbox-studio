@@ -702,8 +702,8 @@ export function Kiosk() {
       {/* Now playing */}
       <main
         ref={mainRef}
-        className={`relative z-10 flex min-h-0 flex-1 flex-col items-center justify-center gap-4 px-5 pt-4 sm:px-8 lg:gap-5 lg:p-8 lg:pt-20 ${
-          cinemaMode ? 'pb-24 sm:pb-14' : 'pb-12 sm:pb-14'
+        className={`relative z-10 flex min-h-0 flex-1 flex-col items-center justify-center gap-4 px-5 pt-4 sm:px-8 lg:gap-4 lg:px-8 lg:pt-20 ${
+          cinemaMode ? 'pb-24 sm:pb-14 lg:pb-14' : 'pb-12 sm:pb-14 lg:pb-14'
         }`}
       >
         {/* In the flow on mobile/tablet (never overlaps the cover); pinned to the corners on desktop. */}
@@ -851,7 +851,7 @@ export function Kiosk() {
                   src={current.track.thumbnail}
                   alt={current.track.title}
                   className={`aspect-square rounded-3xl shadow-2xl shadow-black/60 ${
-                    cinemaMode ? 'w-[min(56vh,84vw)] lg:w-[min(62vh,84vw)]' : 'w-[min(48vh,78vw)] lg:w-[min(52vh,80vw)]'
+                    cinemaMode ? 'w-[min(56vh,84vw)] lg:w-[min(50vh,84vw)]' : 'w-[min(48vh,78vw)] lg:w-[min(44vh,80vw)]'
                   }`}
                 />
                 <div className="max-w-3xl text-center">
@@ -933,7 +933,7 @@ export function Kiosk() {
               className={
                 effectiveStageMode === 'video'
                   ? `relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-3xl border border-white/10 bg-black shadow-2xl shadow-black/60 ${
-                      cinemaMode ? 'max-h-[62vh] max-w-6xl lg:max-h-[68vh]' : 'max-h-[48vh] max-w-4xl lg:max-h-[52vh]'
+                      cinemaMode ? 'max-h-[56vh] max-w-6xl lg:max-h-[54vh]' : 'max-h-[48vh] max-w-4xl lg:max-h-[48vh]'
                     }`
                   : 'pointer-events-none fixed left-0 top-0 h-px w-px overflow-hidden opacity-0'
               }

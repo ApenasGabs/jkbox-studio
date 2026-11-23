@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 import { createApp } from '../src/app.js';
-import { attachRealtime } from '../src/realtime.js';
+import { attachRealtime, type ServerMessage } from '../src/realtime.js';
 import { setup, ytResult } from './helpers.js';
 
 let server: http.Server | null = null;
@@ -71,9 +71,9 @@ describe('WebSocket realtime sync', () => {
       nextMessage(phone2, (m) => m.type === 'state'),
     ]);
 
-    const received: any[] = [];
+    const received: ServerMessage[] = [];
     kiosk.on('message', (raw) => {
-      const msg = JSON.parse(String(raw));
+      const msg = JSON.parse(String(raw)) as ServerMessage;
       if (msg.type === 'reaction') received.push(msg);
     });
 
@@ -124,9 +124,9 @@ describe('WebSocket realtime sync', () => {
       nextMessage(proxiedGuest, (m) => m.type === 'state'),
     ]);
 
-    const received: any[] = [];
+    const received: ServerMessage[] = [];
     kiosk.on('message', (raw) => {
-      const msg = JSON.parse(String(raw));
+      const msg = JSON.parse(String(raw)) as ServerMessage;
       if (msg.type === 'input') received.push(msg);
     });
 
