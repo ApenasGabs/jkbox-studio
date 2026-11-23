@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Db } from '../db.js';
-import type { PlaylistSummary, Track } from '../types.js';
+import type { PlaylistSource, PlaylistSummary, Track } from '../types.js';
 import type { TrackRepository } from './tracks.js';
 
 const MAX_PLAYLIST_NAME = 80;
@@ -19,6 +19,9 @@ interface PlaylistRow {
   id: string;
   name: string;
   description: string | null;
+  source: PlaylistSource | null;
+  source_id: string | null;
+  thumbnail: string | null;
   created_at: number;
   updated_at: number;
   track_count: number;
@@ -36,6 +39,9 @@ function toSummary(row: PlaylistRow): PlaylistSummary {
     id: row.id,
     name: row.name,
     description: row.description ?? null,
+    source: row.source ?? null,
+    sourceId: row.source_id ?? null,
+    thumbnail: row.thumbnail ?? null,
     trackCount: row.track_count,
     cover: row.cover ?? null,
     createdAt: row.created_at,
@@ -71,17 +77,20 @@ function normalizeDescription(raw: unknown): string | null {
 }
 
 const SUMMARY_SELECT = `
-  SELECT p.id, p.name, p.description, p.created_at, p.updated_at,
+  SELECT p.id, p.name, p.description, p.source, p.source_id, p.thumbnail, p.created_at, p.updated_at,
          COUNT(pt.track_id) AS track_count,
-         (
-           SELECT t2.thumbnail
-           FROM playlist_tracks pt2
-           JOIN tracks t2 ON t2.id = pt2.track_id
-           WHERE pt2.playlist_id = p.id
-             AND t2.thumbnail IS NOT NULL
-             AND TRIM(t2.thumbnail) <> ''
-           ORDER BY pt2.position ASC, pt2.added_at ASC
-           LIMIT 1
+         COALESCE(
+           NULLIF(TRIM(p.thumbnail), ''),
+           (
+             SELECT t2.thumbnail
+             FROM playlist_tracks pt2
+             JOIN tracks t2 ON t2.id = pt2.track_id
+             WHERE pt2.playlist_id = p.id
+               AND t2.thumbnail IS NOT NULL
+               AND TRIM(t2.thumbnail) <> ''
+             ORDER BY pt2.position ASC, pt2.added_at ASC
+             LIMIT 1
+           )
          ) AS cover
   FROM playlists p
   LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
@@ -299,6 +308,98 @@ export class PlaylistRepository {
       }
       this.db.prepare('UPDATE playlists SET updated_at = ? WHERE id = ?').run(Date.now(), playlist.id);
     });
+  }
+
+  findBySource(source: PlaylistSource, sourceId: string): PlaylistSummary | null {
+    const cleanSourceId = sourceId.trim();
+    if (!cleanSourceId) return null;
+    const row = this.db
+      .prepare(`${SUMMARY_SELECT} WHERE p.source = ? AND p.source_id = ? GROUP BY p.id`)
+      .get(source, cleanSourceId) as PlaylistRow | undefined;
+    return row ? toSummary(row) : null;
+  }
+
+  /**
+   * Idempotently creates or updates an imported playlist by `(source, sourceId)`
+   * and links its tracks in order without duplicating existing `playlist_tracks` rows.
+   */
+  upsertImported(input: {
+    source: PlaylistSource;
+    sourceId: string;
+    name: string;
+    description?: string | null;
+    thumbnail?: string | null;
+    trackIds: string[];
+  }): { playlist: PlaylistSummary; created: boolean; addedTracks: number } {
+    const cleanSourceId = input.sourceId.trim();
+    if (!cleanSourceId) throw new PlaylistError('sourceId obrigatório', 400);
+    const baseName = input.name.trim().slice(0, MAX_PLAYLIST_NAME) || 'Playlist Importada';
+    const description =
+      typeof input.description === 'string' && input.description.trim()
+        ? input.description.trim().slice(0, MAX_PLAYLIST_DESC)
+        : null;
+    const thumbnail = typeof input.thumbnail === 'string' && input.thumbnail.trim() ? input.thumbnail.trim() : null;
+    const uniqueTrackIds = [...new Set(input.trackIds.map((id) => id.trim()).filter(Boolean))];
+
+    return this.runInTransaction(() => {
+      const now = Date.now();
+      const existing = this.findBySource(input.source, cleanSourceId);
+      let playlistId: string;
+      let created = false;
+
+      if (existing) {
+        playlistId = existing.id;
+        const resolvedName = this.resolveUniqueName(baseName, existing.id);
+        const nextDescription = description ?? existing.description;
+        const nextThumbnail = thumbnail ?? existing.thumbnail ?? null;
+        this.db
+          .prepare('UPDATE playlists SET name = ?, description = ?, thumbnail = ?, updated_at = ? WHERE id = ?')
+          .run(resolvedName, nextDescription, nextThumbnail, now, playlistId);
+      } else {
+        created = true;
+        playlistId = randomUUID();
+        const resolvedName = this.resolveUniqueName(baseName);
+        this.db
+          .prepare(
+            'INSERT INTO playlists (id, name, description, source, source_id, thumbnail, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          )
+          .run(playlistId, resolvedName, description, input.source, cleanSourceId, thumbnail, now, now);
+      }
+
+      const existingTrackRows = this.db
+        .prepare('SELECT track_id FROM playlist_tracks WHERE playlist_id = ?')
+        .all(playlistId) as unknown as { track_id: string }[];
+      const linked = new Set(existingTrackRows.map((r) => r.track_id));
+      const maxRow = this.db
+        .prepare('SELECT COALESCE(MAX(position), 0) AS maxPos FROM playlist_tracks WHERE playlist_id = ?')
+        .get(playlistId) as { maxPos: number };
+
+      let nextPos = maxRow.maxPos;
+      let addedTracks = 0;
+      const insertStmt = this.db.prepare(
+        'INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position, added_at) VALUES (?, ?, ?, ?)',
+      );
+      for (const trackId of uniqueTrackIds) {
+        if (linked.has(trackId)) continue;
+        nextPos += 1;
+        const res = insertStmt.run(playlistId, trackId, nextPos, now);
+        if (res.changes > 0) addedTracks += 1;
+        linked.add(trackId);
+      }
+
+      return { playlist: this.get(playlistId)!, created, addedTracks };
+    });
+  }
+
+  private resolveUniqueName(baseName: string, excludeId?: string): string {
+    const cleanBase = baseName.trim().slice(0, MAX_PLAYLIST_NAME) || 'Playlist Importada';
+    if (!this.findByName(cleanBase, excludeId)) return cleanBase;
+    for (let suffix = 2; suffix < 1000; suffix++) {
+      const tag = ` (${suffix})`;
+      const candidate = `${cleanBase.slice(0, MAX_PLAYLIST_NAME - tag.length).trimEnd()}${tag}`;
+      if (!this.findByName(candidate, excludeId)) return candidate;
+    }
+    return `${cleanBase.slice(0, MAX_PLAYLIST_NAME - 9)}-${randomUUID().slice(0, 8)}`;
   }
 
   private findByName(name: string, excludeId?: string): { id: string } | undefined {

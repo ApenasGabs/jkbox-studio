@@ -3,6 +3,7 @@ import type { Config } from '../config.js';
 import type { Settings } from '../db.js';
 import { SPOTIFY_ID_RE } from '../lib/validate.js';
 import type { SearchResult, SpotifyDevice, SpotifyPlaybackState } from '../types.js';
+import type { ExtractedPlaylist } from './ytdlp.js';
 
 const ACCOUNTS = 'https://accounts.spotify.com';
 const API = 'https://api.spotify.com/v1';
@@ -59,6 +60,32 @@ interface SpotifyApiPlaybackState {
 interface PlaylistEntry {
   item?: SpotifyTrack | null;
   track?: SpotifyTrack | null;
+}
+
+interface SpotifyPlaylistPage {
+  items?: PlaylistEntry[];
+  next?: string | null;
+  total?: number;
+}
+
+interface SpotifyPlaylistMeta {
+  id?: string;
+  name?: string;
+  description?: string | null;
+  images?: { url: string; width?: number }[];
+  tracks?: SpotifyPlaylistPage;
+  items?: SpotifyPlaylistPage;
+}
+
+function mapPlaylistEntries(entries: PlaylistEntry[]): SearchResult[] {
+  const results: SearchResult[] = [];
+  for (const entry of entries) {
+    const track = entry.item ?? entry.track;
+    if (track && track.id && (track.type ?? 'track') === 'track') {
+      results.push(spotifyTrackToResult(track));
+    }
+  }
+  return results;
 }
 
 export type SpotifyErrorCode = 'PREMIUM_REQUIRED' | 'NO_ACTIVE_DEVICE' | 'INSUFFICIENT_SCOPE' | (string & {});
@@ -251,17 +278,66 @@ export class SpotifyService {
   /** Requires user OAuth: Spotify only returns items for playlists the user owns or collaborates on. */
   async getPlaylistTracks(id: string, limit = 100): Promise<SearchResult[]> {
     this.requireConfigured();
+    return this.fetchPlaylistItems(id, limit, 'user');
+  }
+
+  /** Fetches playlist metadata and tracks (up to `limit + 1` so callers can detect oversized playlists). */
+  async getPlaylistDetails(id: string, limit = 50): Promise<ExtractedPlaylist> {
+    this.requireConfigured();
+    if (!SPOTIFY_ID_RE.test(id)) throw new SpotifyError('ID de playlist do Spotify inválido', 400);
+    const meta = await this.api<SpotifyPlaylistMeta>(`/playlists/${encodeURIComponent(id)}`, {}, 'any');
+    const title = meta.name?.trim() || `Playlist Spotify (${id})`;
+    const description = meta.description?.trim() || null;
+    const thumbnail = [...(meta.images ?? [])].sort((a, b) => (b.width ?? 0) - (a.width ?? 0))[0]?.url ?? null;
+    const inlinePage = meta.tracks ?? meta.items;
+    const metaTotal = typeof inlinePage?.total === 'number' && Number.isFinite(inlinePage.total) ? inlinePage.total : null;
+
+    if (metaTotal !== null && metaTotal > limit) {
+      return { title, description, thumbnail, totalCount: metaTotal, tracks: [] };
+    }
+
+    const fetchLimit = Math.max(1, limit) + 1;
+    let tracks: SearchResult[];
+    let pageTotal: number | null = metaTotal;
+
+    if (Array.isArray(inlinePage?.items) && !inlinePage.next) {
+      tracks = mapPlaylistEntries(inlinePage.items).slice(0, fetchLimit);
+    } else {
+      const fetched = await this.fetchPlaylistItemsWithTotal(id, fetchLimit, 'any');
+      tracks = fetched.tracks;
+      if (pageTotal === null && fetched.total !== null) pageTotal = fetched.total;
+    }
+
+    return {
+      title,
+      description,
+      thumbnail: thumbnail ?? tracks[0]?.thumbnail ?? null,
+      totalCount: pageTotal ?? tracks.length,
+      tracks,
+    };
+  }
+
+  private async fetchPlaylistItems(id: string, limit: number, kind: 'user' | 'any'): Promise<SearchResult[]> {
+    return (await this.fetchPlaylistItemsWithTotal(id, limit, kind)).tracks;
+  }
+
+  private async fetchPlaylistItemsWithTotal(
+    id: string,
+    limit: number,
+    kind: 'user' | 'any',
+  ): Promise<{ tracks: SearchResult[]; total: number | null }> {
     const results: SearchResult[] = [];
+    let total: number | null = null;
     let path: string | null = `/playlists/${encodeURIComponent(id)}/items?limit=50`;
     while (path && results.length < limit) {
-      const page: { items: PlaylistEntry[]; next: string | null } = await this.api(path, {}, 'user');
-      for (const entry of page.items) {
-        const track = entry.item ?? entry.track;
-        if (track && track.id && (track.type ?? 'track') === 'track') results.push(spotifyTrackToResult(track));
+      const page: SpotifyPlaylistPage = await this.api(path, {}, kind);
+      if (total === null && typeof page.total === 'number' && Number.isFinite(page.total)) {
+        total = page.total;
       }
+      results.push(...mapPlaylistEntries(page.items ?? []));
       path = page.next ? page.next.replace(API, '') : null;
     }
-    return results.slice(0, limit);
+    return { tracks: results.slice(0, limit), total };
   }
 
   async getDevices(): Promise<SpotifyDevice[]> {

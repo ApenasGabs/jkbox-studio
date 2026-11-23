@@ -108,6 +108,15 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX IF NOT EXISTS idx_playlist_tracks_order ON playlist_tracks (playlist_id, position, added_at);
   `,
+  // v7 — external playlist import metadata & idempotency (#33).
+  `
+  ALTER TABLE playlists ADD COLUMN source TEXT;
+  ALTER TABLE playlists ADD COLUMN source_id TEXT;
+  ALTER TABLE playlists ADD COLUMN thumbnail TEXT;
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_playlists_source
+    ON playlists (source, source_id)
+    WHERE source IS NOT NULL AND source_id IS NOT NULL;
+  `,
 ];
 
 export function openDb(file: string): Db {
