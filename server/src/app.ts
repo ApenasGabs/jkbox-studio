@@ -26,7 +26,7 @@ function str(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
-export function createApp({ config, jukebox, mdns, version = '0.1.0' }: AppDeps): express.Express {
+export const createApp = ({ config, jukebox, mdns, version = '0.1.0' }: AppDeps): express.Express => {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', true);

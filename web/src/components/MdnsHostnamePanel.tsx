@@ -10,7 +10,7 @@ interface MdnsHostnamePanelProps {
 
 const HOSTNAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
-export function MdnsHostnamePanel({ mdns, onUpdated, onToast }: MdnsHostnamePanelProps) {
+export const MdnsHostnamePanel = ({ mdns, onUpdated, onToast }: MdnsHostnamePanelProps) => {
   const [hostname, setHostname] = useState(mdns?.hostname ?? 'jkbox');
   const [saving, setSaving] = useState(false);
 
@@ -24,7 +24,7 @@ export function MdnsHostnamePanel({ mdns, onUpdated, onToast }: MdnsHostnamePane
   const isValid = cleaned.length >= 2 && cleaned.length <= 63 && HOSTNAME_RE.test(cleaned);
   const changed = cleaned !== mdns.hostname;
 
-  async function handleSave() {
+  const handleSave = async () => {
     if (!isValid || saving) return;
     setSaving(true);
     try {
@@ -36,9 +36,9 @@ export function MdnsHostnamePanel({ mdns, onUpdated, onToast }: MdnsHostnamePane
     } finally {
       setSaving(false);
     }
-  }
+  };
 
-  async function handleToggleQr() {
+  const handleToggleQr = async () => {
     if (!mdns || saving) return;
     setSaving(true);
     try {
@@ -51,15 +51,15 @@ export function MdnsHostnamePanel({ mdns, onUpdated, onToast }: MdnsHostnamePane
     } finally {
       setSaving(false);
     }
-  }
+  };
 
-  function handleCopy() {
+  const handleCopy = () => {
     if (!mdns) return;
     void navigator.clipboard?.writeText(mdns.url).then(
       () => onToast(`Copiado: ${mdns.url}`),
       () => onToast(mdns.url),
     );
-  }
+  };
 
   const badge =
     mdns.mode === 'disabled'

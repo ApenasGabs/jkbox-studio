@@ -16,7 +16,7 @@ export class MdnsError extends Error {
  * Accepts optional trailing `.local` and strips it. Rejects anything unsafe
  * for DNS or shell/OS hostname commands.
  */
-export function normalizeMdnsHostname(raw: unknown): string {
+export const normalizeMdnsHostname = (raw: unknown): string => {
   if (typeof raw !== 'string') {
     throw new MdnsError('Hostname inválido');
   }
@@ -27,21 +27,21 @@ export function normalizeMdnsHostname(raw: unknown): string {
     );
   }
   return cleaned;
-}
+};
 
-export function isValidMdnsHostname(raw: unknown): boolean {
+export const isValidMdnsHostname = (raw: unknown): boolean => {
   try {
     normalizeMdnsHostname(raw);
     return true;
   } catch {
     return false;
   }
-}
+};
 
-export function buildMdnsUrl(hostname: string, port: number): string {
+export const buildMdnsUrl = (hostname: string, port: number): string => {
   const fqdn = `${hostname}.local`;
   return port === 80 ? `http://${fqdn}` : `http://${fqdn}:${port}`;
-}
+};
 
 // --- Minimal RFC 6762 mDNS packet helpers (zero external dependencies) ---
 
@@ -56,7 +56,7 @@ const DNS_TYPE_ANY = 255;
 const DNS_CLASS_IN = 1;
 const DNS_CLASS_IN_FLUSH = 0x8001;
 
-export function encodeDnsName(name: string): Buffer {
+export const encodeDnsName = (name: string): Buffer => {
   const labels = name
     .replace(/\.$/, '')
     .split('.')
@@ -71,9 +71,9 @@ export function encodeDnsName(name: string): Buffer {
   }
   parts.push(Buffer.from([0]));
   return Buffer.concat(parts);
-}
+};
 
-function readDnsName(buf: Buffer, startOffset: number): { name: string; nextOffset: number } | null {
+const readDnsName = (buf: Buffer, startOffset: number): { name: string; nextOffset: number } | null => {
   const labels: string[] = [];
   let offset = startOffset;
   let jumped = false;
@@ -101,10 +101,10 @@ function readDnsName(buf: Buffer, startOffset: number): { name: string; nextOffs
     offset += 1 + len;
   }
   return null;
-}
+};
 
 /** Parses standard mDNS query packets (QR = 0) and extracts its questions. */
-export function parseMdnsQuestions(packet: Buffer): DnsQuestion[] {
+export const parseMdnsQuestions = (packet: Buffer): DnsQuestion[] => {
   if (packet.length < 12) return [];
   const flags = packet.readUInt16BE(2);
   // Ignore responses (QR bit set)
@@ -123,9 +123,9 @@ export function parseMdnsQuestions(packet: Buffer): DnsQuestion[] {
     offset = parsed.nextOffset + 4;
   }
   return questions;
-}
+};
 
-export function matchesMdnsAQuery(questions: DnsQuestion[], fqdn: string): boolean {
+export const matchesMdnsAQuery = (questions: DnsQuestion[], fqdn: string): boolean => {
   const target = fqdn.toLowerCase().replace(/\.$/, '');
   return questions.some(
     (q) =>
@@ -133,10 +133,10 @@ export function matchesMdnsAQuery(questions: DnsQuestion[], fqdn: string): boole
       (q.type === DNS_TYPE_A || q.type === DNS_TYPE_ANY) &&
       (q.qclass === DNS_CLASS_IN || q.qclass === DNS_TYPE_ANY),
   );
-}
+};
 
 /** Builds an mDNS authoritative response containing A records for `<fqdn>`. */
-export function buildMdnsAResponse(fqdn: string, ipv4Addresses: string[], ttlSec = 120): Buffer {
+export const buildMdnsAResponse = (fqdn: string, ipv4Addresses: string[], ttlSec = 120): Buffer => {
   const validIps = ipv4Addresses.filter((ip) => /^\d{1,3}(\.\d{1,3}){3}$/.test(ip));
   const header = Buffer.alloc(12);
   header.writeUInt16BE(0, 0); // Transaction ID = 0 for mDNS

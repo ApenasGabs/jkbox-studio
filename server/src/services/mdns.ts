@@ -49,7 +49,7 @@ export interface MdnsOptions {
   detectDockerBridge?: () => boolean;
 }
 
-export function listLanIpv4Addresses(): string[] {
+export const listLanIpv4Addresses = (): string[] => {
   const nets = os.networkInterfaces();
   const ips: string[] = [];
   for (const entries of Object.values(nets)) {
@@ -60,16 +60,16 @@ export function listLanIpv4Addresses(): string[] {
     }
   }
   return [...new Set(ips)];
-}
+};
 
-export function detectDockerBridgeNetwork(ips: string[] = listLanIpv4Addresses()): boolean {
+export const detectDockerBridgeNetwork = (ips: string[] = listLanIpv4Addresses()): boolean => {
   if (!fs.existsSync('/.dockerenv')) return false;
   if (ips.length === 0) return true;
   // Default Docker bridge subnets live in 172.17.0.0/16 - 172.31.0.0/16 with a single veth.
   return ips.length === 1 && /^172\.(1[6-9]|2\d|3[0-1])\./.test(ips[0]!);
-}
+};
 
-async function defaultRunHelper(helperPath: string, hostname: string): Promise<void> {
+const defaultRunHelper = async (helperPath: string, hostname: string): Promise<void> => {
   const safe = normalizeMdnsHostname(hostname);
   const useSudo = typeof process.getuid === 'function' && process.getuid() !== 0;
   if (useSudo) {
@@ -77,7 +77,7 @@ async function defaultRunHelper(helperPath: string, hostname: string): Promise<v
   } else {
     await execFileAsync(helperPath, [safe], { timeout: 10_000 });
   }
-}
+};
 
 /**
  * Announces `<hostname>.local` on the LAN via embedded RFC 6762 mDNS responder

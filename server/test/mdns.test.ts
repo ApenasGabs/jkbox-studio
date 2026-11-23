@@ -14,7 +14,7 @@ import {
 import { MdnsService } from '../src/services/mdns.js';
 import { setup } from './helpers.js';
 
-function buildQueryPacket(name: string, qtype = 1): Buffer {
+const buildQueryPacket = (name: string, qtype = 1): Buffer => {
   const header = Buffer.alloc(12);
   header.writeUInt16BE(0, 0);
   header.writeUInt16BE(0, 2); // QR=0
@@ -24,7 +24,7 @@ function buildQueryPacket(name: string, qtype = 1): Buffer {
   tail.writeUInt16BE(qtype, 0);
   tail.writeUInt16BE(1, 2); // IN
   return Buffer.concat([header, qname, tail]);
-}
+};
 
 describe('mDNS hostname validation & DNS packets', () => {
   it('accepts valid RFC 1123 hostnames and strips trailing .local', () => {
