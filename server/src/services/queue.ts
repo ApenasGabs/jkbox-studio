@@ -28,6 +28,7 @@ export interface QueueEvents {
   change: [];
   progress: [positionSec: number, paused: boolean];
   started: [entry: QueueEntryView];
+  ended: [entry: QueueEntryView];
   drained: [];
 }
 
@@ -112,11 +113,33 @@ export class QueueService extends EventEmitter<QueueEvents> {
     if (!advanced && this.ordered().length === 0) this.emit('drained');
   }
 
-  /** Called by the kiosk when the audio element fires "ended" (idempotent per item). */
+  /** Called by the kiosk or Spotify poller when a track reaches its natural end (idempotent per item). */
   ended(queueId: number): void {
     const current = this.currentRow();
     if (!current || current.id !== queueId) return;
+    const finished = this.view(current);
     this.skip();
+    this.emit('ended', finished);
+  }
+
+  /**
+   * Adopts an externally-started track (e.g. Spotify Auto-DJ) directly as `nowPlaying`
+   * when the queue is completely idle, without emitting `started` to avoid restarting playback.
+   */
+  adoptPlaying(trackId: string, requesterId: string, requesterName: string, positionSec = 0): QueueEntryView | null {
+    if (!this.tracks.get(trackId)) throw new QueueError('Faixa não encontrada', 404);
+    if (this.currentRow() || this.ordered().length > 0) return null;
+    const safePos = Number.isFinite(positionSec) && positionSec > 0 ? positionSec : 0;
+    const now = Date.now();
+    const startedAt = now - Math.round(safePos * 1000);
+    const result = this.db
+      .prepare("INSERT INTO queue (track_id, requester_id, requester_name, added_at, status, started_at) VALUES (?, ?, ?, ?, 'playing', ?)")
+      .run(trackId, requesterId, requesterName.trim().slice(0, 40) || 'Convidado', now, startedAt);
+    this.positionSec = safePos;
+    this.paused = false;
+    const entry = this.view(this.getRow(Number(result.lastInsertRowid))!);
+    this.emit('change');
+    return entry;
   }
 
   reportProgress(positionSec: number, paused: boolean): void {

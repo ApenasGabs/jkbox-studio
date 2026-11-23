@@ -155,6 +155,7 @@ export interface SpotifyPlaybackState {
   trackUri: string | null;
   trackId: string | null;
   durationMs: number | null;
+  track: SearchResult | null;
 }
 
 export type PlaybackOutput =

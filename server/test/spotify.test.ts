@@ -2,6 +2,7 @@ import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { createJukebox } from '../src/container.js';
+import { pickYoutubeVideoCandidate } from '../src/services/spotify.js';
 import { FakeMedia, setup, ytResult } from './helpers.js';
 
 const SPOTIFY_ENV = { SPOTIFY_CLIENT_ID: 'cid', SPOTIFY_CLIENT_SECRET: 'secret', PUBLIC_URL: 'http://192.168.0.10:3000' };
@@ -501,6 +502,246 @@ describe('Spotify integration', () => {
     const tupleHeaders = new Headers(tupleCall[1]?.headers);
     expect(tupleHeaders.get('Authorization')).toBe('Bearer app-token');
     expect(tupleHeaders.get('X-Tuple')).toBe('ok');
+    jukebox.stop();
+  });
+
+  it('maps data.item into SpotifyPlaybackState.track and ignores non-track items', async () => {
+    const fake = fakeSpotify({
+      playbackState: {
+        is_playing: true,
+        progress_ms: 12_345,
+        item: track('auto1', 'Around the World'),
+      },
+    });
+    const { config, jukebox } = setup(SPOTIFY_ENV, fake.fetchFn);
+    const app = createApp({ config, jukebox });
+    const state = new URL((await request(app).get('/api/spotify/auth')).headers.location).searchParams.get('state');
+    await request(app).get('/api/spotify/callback').query({ code: 'c', state });
+
+    const pb = await jukebox.spotify.getPlaybackState();
+    expect(pb).toMatchObject({
+      isPlaying: true,
+      progressMs: 12_345,
+      trackUri: 'spotify:track:auto1',
+      trackId: 'auto1',
+      durationMs: 200_000,
+      track: {
+        source: 'spotify',
+        sourceId: 'auto1',
+        title: 'Around the World',
+        artist: 'Daft Punk',
+        album: 'Discovery',
+        durationSec: 200,
+        thumbnail: 'cover.jpg',
+        spotifyUri: 'spotify:track:auto1',
+      },
+    });
+
+    fake.setPlaybackState({
+      is_playing: true,
+      progress_ms: 5_000,
+      item: { ...track('ep1', 'Podcast Ep'), type: 'episode' },
+    });
+    const episodePb = await jukebox.spotify.getPlaybackState();
+    expect(episodePb?.track).toBeNull();
+    jukebox.stop();
+  });
+
+  it('adopts Spotify Autoplay tracks when queue drains or is idle without pause/restart, keeps history, and prioritizes Jukebox requests', async () => {
+    const fake = fakeSpotify();
+    const { config, jukebox, media } = setup(SPOTIFY_ENV, fake.fetchFn);
+    const ensureSpy = vi.spyOn(jukebox.downloads, 'ensure');
+    const app = createApp({ config, jukebox });
+    const state = new URL((await request(app).get('/api/spotify/auth')).headers.location).searchParams.get('state');
+    await request(app).get('/api/spotify/callback').query({ code: 'c', state });
+
+    await request(app).post('/api/spotify/device').send({ deviceId: 'spk-sala' }).expect(200);
+
+    // 1. Idle queue: Spotify starts playing a track directly on the connected speaker
+    fake.setPlaybackState({
+      is_playing: true,
+      progress_ms: 14_000,
+      item: track('auto1', 'Around the World'),
+    });
+    await jukebox.pollSpotifyPlayback();
+
+    const adopted1 = jukebox.queue.state().nowPlaying;
+    expect(adopted1).not.toBeNull();
+    expect(adopted1?.item.requesterId).toBe('spotify-autoplay');
+    expect(adopted1?.item.requesterName).toBe('Spotify Auto-DJ');
+    expect(adopted1?.item.track.title).toBe('Around the World');
+    expect(adopted1?.positionSec).toBe(14);
+    expect(adopted1?.paused).toBe(false);
+    // Must NOT call playTrack/pausePlayback or download immediately on adoption
+    expect(fake.calls.filter((c) => c.url.includes('/v1/me/player/play'))).toHaveLength(0);
+    expect(fake.calls.filter((c) => c.url.includes('/v1/me/player/pause'))).toHaveLength(0);
+    expect(ensureSpy).not.toHaveBeenCalled();
+
+    // 2. Successive Autoplay track change: auto1 finishes -> downloads auto1 in background, records in history, adopts auto2
+    fake.setPlaybackState({
+      is_playing: true,
+      progress_ms: 3_000,
+      item: track('auto2', 'Voyager'),
+    });
+    await jukebox.pollSpotifyPlayback();
+    await jukebox.downloads.idle();
+
+    expect(jukebox.queue.state().nowPlaying?.item.track.sourceId).toBe('auto2');
+    expect(jukebox.queue.state().nowPlaying?.item.requesterName).toBe('Spotify Auto-DJ');
+    expect(ensureSpy).toHaveBeenCalledTimes(1);
+    expect(media.downloads).toHaveLength(1);
+    expect(jukebox.queue.history().map((h) => h.track.sourceId)).toContain('auto1');
+
+    // Still must NOT call playTrack or pausePlayback for Spotify Auto-DJ transitions
+    expect(fake.calls.filter((c) => c.url.includes('/v1/me/player/play'))).toHaveLength(0);
+    expect(fake.calls.filter((c) => c.url.includes('/v1/me/player/pause'))).toHaveLength(0);
+
+    // 3. Replaying an already-cached track via Spotify Auto-DJ does NOT duplicate download on natural end
+    const auto1TrackId = adopted1!.item.trackId;
+    expect(jukebox.tracks.isCached(jukebox.tracks.get(auto1TrackId)!)).toBe(true);
+    ensureSpy.mockClear();
+
+    // 4. Guest enqueues a Jukebox request while auto2 is playing -> auto2 stays playing, request takes priority when auto2 ends
+    const t2 = (await request(app).get('/api/search').query({ q: 'https://open.spotify.com/track/t2' })).body.results[0];
+    await request(app).post('/api/queue').send({ result: t2, clientId: 'guest-1', name: 'Bia' }).expect(201);
+    expect(jukebox.queue.state().nowPlaying?.item.track.sourceId).toBe('auto2');
+    expect(jukebox.queue.state().queue).toHaveLength(1);
+    await jukebox.downloads.idle();
+
+    // Even if Spotify Autoplay started auto3 right as auto2 ended, Jukebox overrides with Bia's request (t2)
+    fake.setPlaybackState({
+      is_playing: true,
+      progress_ms: 2_000,
+      item: track('auto3', 'Superheroes'),
+    });
+    await jukebox.pollSpotifyPlayback();
+
+    expect(jukebox.queue.state().nowPlaying?.item.track.sourceId).toBe('t2');
+    expect(jukebox.queue.state().nowPlaying?.item.requesterName).toBe('Bia');
+    await vi.waitFor(() =>
+      expect(fake.calls.some((c) => c.url.includes('/v1/me/player/play') && c.body?.includes('spotify:track:t2'))).toBe(true),
+    );
+
+    // 5. When last Jukebox track (t2) finishes and Spotify starts Autoplay (auto1 cached), Jukebox adopts auto1 without pause/play
+    const playCallsBefore = fake.calls.filter((c) => c.url.includes('/v1/me/player/play')).length;
+    const pauseCallsBefore = fake.calls.filter((c) => c.url.includes('/v1/me/player/pause')).length;
+    fake.setPlaybackState({ is_playing: true, progress_ms: 30_000, item: track('t2', 'Digital Love') });
+    await jukebox.pollSpotifyPlayback();
+
+    fake.setPlaybackState({ is_playing: true, progress_ms: 1_500, item: track('auto1', 'Around the World') });
+    await jukebox.pollSpotifyPlayback();
+
+    expect(jukebox.queue.state().nowPlaying?.item.track.sourceId).toBe('auto1');
+    expect(jukebox.queue.state().nowPlaying?.item.requesterId).toBe('spotify-autoplay');
+    expect(fake.calls.filter((c) => c.url.includes('/v1/me/player/play')).length).toBe(playCallsBefore);
+    expect(fake.calls.filter((c) => c.url.includes('/v1/me/player/pause')).length).toBe(pauseCallsBefore);
+
+    // Finish auto1 naturally again -> already cached, so media.downloads must NOT increase
+    const downloadsBeforeReplay = media.downloads.length;
+    fake.setPlaybackState({ is_playing: true, progress_ms: 45_000, item: track('auto1', 'Around the World') });
+    await jukebox.pollSpotifyPlayback();
+    fake.setPlaybackState({ is_playing: false, progress_ms: 0, item: track('auto1', 'Around the World') });
+    await jukebox.pollSpotifyPlayback();
+    await jukebox.downloads.idle();
+    expect(media.downloads).toHaveLength(downloadsBeforeReplay);
+    expect(jukebox.queue.state().nowPlaying).toBeNull();
+    jukebox.stop();
+  });
+
+  it('does not download or immediately re-adopt when a Spotify Auto-DJ track is skipped or removed prematurely', async () => {
+    const fake = fakeSpotify();
+    const { config, jukebox } = setup(SPOTIFY_ENV, fake.fetchFn);
+    const ensureSpy = vi.spyOn(jukebox.downloads, 'ensure');
+    const app = createApp({ config, jukebox });
+    const state = new URL((await request(app).get('/api/spotify/auth')).headers.location).searchParams.get('state');
+    await request(app).get('/api/spotify/callback').query({ code: 'c', state });
+
+    await request(app).post('/api/spotify/device').send({ deviceId: 'spk-sala' }).expect(200);
+    fake.setPlaybackState({ is_playing: true, progress_ms: 20_000, item: track('autoSkip', 'Skipped Song') });
+    await jukebox.pollSpotifyPlayback();
+    expect(jukebox.queue.state().nowPlaying?.item.track.sourceId).toBe('autoSkip');
+
+    // Host skips prematurely while Spotify still reports autoSkip playing -> no download, no zombie re-adoption
+    await request(app).post('/api/player/skip').expect(200);
+    expect(jukebox.queue.state().nowPlaying).toBeNull();
+    expect(ensureSpy).not.toHaveBeenCalled();
+
+    await jukebox.pollSpotifyPlayback();
+    expect(jukebox.queue.state().nowPlaying).toBeNull();
+
+    // Once Spotify moves to a new track, adoption resumes normally
+    fake.setPlaybackState({ is_playing: true, progress_ms: 4_000, item: track('autoFresh', 'Fresh Song') });
+    await jukebox.pollSpotifyPlayback();
+    expect(jukebox.queue.state().nowPlaying?.item.track.sourceId).toBe('autoFresh');
+
+    // Host removes playing track prematurely -> no download
+    const playingId = jukebox.queue.state().nowPlaying!.item.id;
+    await request(app).delete(`/api/queue/${playingId}`).expect(204);
+    expect(ensureSpy).not.toHaveBeenCalled();
+    jukebox.stop();
+  });
+
+  it('prioritizes compatible official YouTube music videos and falls back safely to audio search', async () => {
+    const candidates = [
+      { source: 'youtube' as const, sourceId: 'react111111', title: 'Daft Punk - Digital Love Reaction!', artist: 'Reactor', durationSec: 205 },
+      { source: 'youtube' as const, sourceId: 'short222222', title: 'Daft Punk - Digital Love (Official Music Video)', artist: 'Daft Punk', durationSec: 45 },
+      { source: 'youtube' as const, sourceId: 'audio333333', title: 'Daft Punk - Digital Love (Official Audio)', artist: 'Daft Punk - Topic', durationSec: 200 },
+      { source: 'youtube' as const, sourceId: 'clip4444444', title: 'Daft Punk - Digital Love (Official Music Video)', artist: 'Daft Punk', durationSec: 208 },
+    ];
+    expect(pickYoutubeVideoCandidate(candidates, { title: 'Digital Love', artist: 'Daft Punk', durationSec: 200 })?.sourceId).toBe(
+      'clip4444444',
+    );
+
+    const fake = fakeSpotify();
+    const { jukebox, media } = setup(SPOTIFY_ENV, fake.fetchFn);
+    const searchSpy = vi.spyOn(media, 'search').mockImplementation(async (query: string) => {
+      media.searches.push(query);
+      if (query.includes('official video')) {
+        return [
+          { source: 'youtube', sourceId: 'audio000001', title: 'Daft Punk - Digital Love (Official Audio)', artist: 'Daft Punk - Topic', durationSec: 200 },
+          { source: 'youtube', sourceId: 'video000002', title: 'Daft Punk - Digital Love (Clipe Oficial)', artist: 'Daft Punk', durationSec: 206 },
+        ];
+      }
+      return [ytResult('fallback001', 'Digital Love Audio', 'Daft Punk')];
+    });
+
+    const spotifyTrack = jukebox.tracks.upsertFromResult({
+      source: 'spotify',
+      sourceId: 'sp-vid-1',
+      title: 'Digital Love',
+      artist: 'Daft Punk',
+      durationSec: 200,
+      spotifyUri: 'spotify:track:sp-vid-1',
+    });
+
+    expect(jukebox.downloads.ensure(spotifyTrack.id)).toBe(false);
+    await jukebox.downloads.idle();
+
+    expect(media.searches[0]).toBe('Daft Punk - Digital Love official video');
+    expect(media.downloads).toEqual(['video000002']);
+    expect(media.videoDownloads).toEqual(['video000002']);
+    const saved = jukebox.tracks.get(spotifyTrack.id)!;
+    expect(saved.status).toBe('ready');
+    expect(saved.youtubeId).toBe('video000002');
+    expect(saved.videoPath).toBeTruthy();
+
+    // Fallback when video search fails or has no compatible duration
+    searchSpy.mockImplementation(async (query: string) => {
+      media.searches.push(query);
+      if (query.includes('official video')) throw new Error('search failed');
+      return [ytResult('fallback999', 'Fallback Audio', 'Daft Punk')];
+    });
+    const fallbackTrack = jukebox.tracks.upsertFromResult({
+      source: 'spotify',
+      sourceId: 'sp-vid-2',
+      title: 'Harder Better Faster',
+      artist: 'Daft Punk',
+      durationSec: 224,
+      spotifyUri: 'spotify:track:sp-vid-2',
+    });
+    jukebox.downloads.ensure(fallbackTrack.id);
+    await jukebox.downloads.idle();
+    expect(jukebox.tracks.get(fallbackTrack.id)?.youtubeId).toBe('fallback999');
     jukebox.stop();
   });
 });
