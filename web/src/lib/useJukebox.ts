@@ -146,5 +146,18 @@ export function useJukebox() {
     if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
   }, []);
 
-  return { state, playbackOutput, position, downloads, lyricsOffset, mdns, reactions, notice, connected, send, subscribeInput };
+  return {
+    state,
+    playbackOutput,
+    position,
+    downloads,
+    lyricsOffset,
+    mdns,
+    setMdns,
+    reactions,
+    notice,
+    connected,
+    send,
+    subscribeInput,
+  };
 }

@@ -1,3 +1,5 @@
+import { EventEmitter } from 'node:events';
+import type { Socket } from 'node:dgram';
 import { describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../src/app.js';
@@ -155,5 +157,58 @@ describe('MdnsService & PATCH /api/config/hostname', () => {
       mdns.stop();
       jukebox.stop();
     }
+  });
+
+  it('closes and clears socket on bind error so start() can retry cleanly', () => {
+    const sockets: Array<
+      EventEmitter & {
+        bind: ReturnType<typeof vi.fn>;
+        close: ReturnType<typeof vi.fn>;
+        send: ReturnType<typeof vi.fn>;
+        addMembership: ReturnType<typeof vi.fn>;
+        setMulticastTTL: ReturnType<typeof vi.fn>;
+        setMulticastLoopback: ReturnType<typeof vi.fn>;
+      }
+    > = [];
+    const createSocket = vi.fn(() => {
+      const sock = Object.assign(new EventEmitter(), {
+        bind: vi.fn((_port: number, cb?: () => void) => {
+          if (sockets.length === 1) {
+            sock.emit('error', new Error('bind EADDRINUSE 0.0.0.0:5353'));
+          } else {
+            cb?.();
+          }
+        }),
+        close: vi.fn(),
+        send: vi.fn(),
+        addMembership: vi.fn(),
+        setMulticastTTL: vi.fn(),
+        setMulticastLoopback: vi.fn(),
+      });
+      sockets.push(sock);
+      return sock as unknown as Socket;
+    });
+
+    const mdns = new MdnsService({
+      port: 3000,
+      enabled: true,
+      log: () => {},
+      getIpv4Addresses: () => ['192.168.1.50'],
+      detectDockerBridge: () => false,
+      createSocket,
+    });
+
+    mdns.start();
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]!.close).toHaveBeenCalledTimes(1);
+    expect(mdns.status().active).toBe(false);
+    expect(mdns.status().lastError).toContain('EADDRINUSE');
+
+    // Because socket was cleaned up, a second start() creates a fresh socket and succeeds.
+    mdns.start();
+    expect(sockets).toHaveLength(2);
+    expect(mdns.status().active).toBe(true);
+    expect(mdns.status().lastError).toBeNull();
+    mdns.stop();
   });
 });

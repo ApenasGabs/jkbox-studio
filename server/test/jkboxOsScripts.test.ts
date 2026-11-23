@@ -53,6 +53,24 @@ describe('Phase 2 Etapa 3 OS scripts & manifests', () => {
         'short',
       ]),
     ).rejects.toThrow();
+
+    await expect(
+      execFileAsync('bash', [path.join(REPO_ROOT, 'os', 'install-kiosk.sh'), '--dry-run', '--hostname', 'a']),
+    ).rejects.toThrow();
+
+    await expect(
+      execFileAsync('bash', [path.join(REPO_ROOT, 'os', 'install-kiosk.sh'), '--dry-run', '--hostname', '-bad']),
+    ).rejects.toThrow();
+
+    const { stdout: normalizedOut } = await execFileAsync('bash', [
+      path.join(REPO_ROOT, 'os', 'install-kiosk.sh'),
+      '--dry-run',
+      '--hostname',
+      'Gabisa.local',
+      '--port',
+      '3000',
+    ]);
+    expect(normalizedOut).toContain('http://gabisa.local:3000');
   });
 
   it('automounts USB drive read-only into /data/music/usb-* and triggers /api/library/rescan with HOST_PIN', async () => {

@@ -22,7 +22,7 @@ import {
 import { cssImageUrl, formatTime, isLoopback, resolveRemoteQrUrl } from '../lib/format';
 import { activateFocusedElement, findNextSpatialCandidate, getFocusableElements } from '../lib/spatialNav';
 import { formatSpotifyOutputBadge } from '../lib/spotifyConnect';
-import type { AppConfig, KioskCommand, PlaybackOutput, QueueEntry, SearchResult, Track } from '../lib/types';
+import type { AppConfig, KioskCommand, MdnsStatus, PlaybackOutput, QueueEntry, SearchResult, Track } from '../lib/types';
 import { useInterpolatedTime } from '../lib/useInterpolatedTime';
 import { useJukebox } from '../lib/useJukebox';
 import { useKioskInput } from '../lib/useKioskInput';
@@ -91,7 +91,7 @@ function youtubeEmbedUrl(youtubeId: string, startSec: number, autoplay: boolean)
 }
 
 export function Kiosk() {
-  const { state, playbackOutput, position, downloads, lyricsOffset, mdns, reactions, notice, connected, send, subscribeInput } = useJukebox();
+  const { state, playbackOutput, position, downloads, lyricsOffset, mdns, setMdns, reactions, notice, connected, send, subscribeInput } = useJukebox();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [unlocked, setUnlocked] = useState(false);
   const [playing, setPlaying] = useState(false);
@@ -178,6 +178,13 @@ export function Kiosk() {
   );
 
   const refreshConfig = useCallback(() => api.config().then(setConfig).catch(() => {}), []);
+  const handleMdnsUpdated = useCallback(
+    (nextMdns: MdnsStatus) => {
+      setMdns(nextMdns);
+      setConfig((prev) => (prev ? { ...prev, mdns: nextMdns } : prev));
+    },
+    [setMdns],
+  );
 
   useEffect(() => {
     refreshConfig();
@@ -1299,6 +1306,7 @@ export function Kiosk() {
           }}
           onClose={() => setSettingsOpen(false)}
           onChanged={refreshConfig}
+          onMdnsUpdated={handleMdnsUpdated}
           run={run}
         />
       )}
@@ -1432,6 +1440,7 @@ interface HostPanelProps {
   onOpenCatalog: () => void;
   onClose: () => void;
   onChanged: () => void;
+  onMdnsUpdated: (mdns: MdnsStatus) => void;
   run: RunFn;
 }
 
@@ -1452,6 +1461,7 @@ function HostPanel({
   onOpenCatalog,
   onClose,
   onChanged,
+  onMdnsUpdated,
   run,
 }: HostPanelProps) {
   const [pin, setPin] = useState(getHostPin());
@@ -1491,7 +1501,7 @@ function HostPanel({
           </div>
         </section>
 
-        <MdnsHostnamePanel mdns={config?.mdns} onUpdated={() => onChanged()} onToast={onToast} />
+        <MdnsHostnamePanel mdns={config?.mdns} onUpdated={onMdnsUpdated} onToast={onToast} />
 
         {config?.hostPinRequired && (
           <section className="glass flex flex-col gap-2 p-4">

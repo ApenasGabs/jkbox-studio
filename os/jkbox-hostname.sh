@@ -22,7 +22,7 @@ if [ "${#HOSTNAME_CLEAN}" -lt 2 ] || [ "${#HOSTNAME_CLEAN}" -gt 63 ]; then
 fi
 
 if command -v hostnamectl >/dev/null 2>&1; then
-  hostnamectl set-hostname "$HOSTNAME_CLEAN"
+  hostnamectl set-hostname "$HOSTNAME_CLEAN" || true
 fi
 
 printf '%s\n' "$HOSTNAME_CLEAN" > /etc/hostname

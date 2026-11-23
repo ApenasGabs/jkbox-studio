@@ -129,8 +129,9 @@ if ! printf '%s' "$JKBOX_USER" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$'; then
   exit 2
 fi
 
-if ! printf '%s' "$JKBOX_HOSTNAME" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$'; then
-  err "Hostname inválido: ${JKBOX_HOSTNAME}"
+JKBOX_HOSTNAME="$(printf '%s' "$JKBOX_HOSTNAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/\.local\.?$//')"
+if [ "${#JKBOX_HOSTNAME}" -lt 2 ] || [ "${#JKBOX_HOSTNAME}" -gt 63 ] || ! printf '%s' "$JKBOX_HOSTNAME" | grep -Eq '^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$'; then
+  err "Hostname inválido (use 2-63 caracteres RFC 1123 lowercase): ${JKBOX_HOSTNAME}"
   exit 2
 fi
 

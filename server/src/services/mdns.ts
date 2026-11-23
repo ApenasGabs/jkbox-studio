@@ -49,6 +49,8 @@ export interface MdnsOptions {
   runHelper?: (helperPath: string, hostname: string) => Promise<void>;
   /** Overridable for tests. */
   detectDockerBridge?: () => boolean;
+  /** Overridable for tests. */
+  createSocket?: () => Socket;
 }
 
 export const listLanIpv4Addresses = (): string[] => {
@@ -103,6 +105,7 @@ export class MdnsService extends EventEmitter<MdnsEvents> {
   private readonly getIpv4Addresses: () => string[];
   private readonly runHelper: (helperPath: string, hostname: string) => Promise<void>;
   private readonly detectDockerBridge: () => boolean;
+  private readonly createSocket: () => Socket;
 
   constructor(options: MdnsOptions) {
     super();
@@ -114,6 +117,7 @@ export class MdnsService extends EventEmitter<MdnsEvents> {
     this.getIpv4Addresses = options.getIpv4Addresses ?? listLanIpv4Addresses;
     this.runHelper = options.runHelper ?? defaultRunHelper;
     this.detectDockerBridge = options.detectDockerBridge ?? (() => detectDockerBridgeNetwork(this.getIpv4Addresses()));
+    this.createSocket = options.createSocket ?? (() => dgram.createSocket({ type: 'udp4', reuseAddr: true }));
 
     const saved = this.settings?.get<string>('mdns_hostname');
     const fallback = isValidMdnsHostname(options.defaultHostname)
@@ -144,6 +148,15 @@ export class MdnsService extends EventEmitter<MdnsEvents> {
     };
   }
 
+  private cleanupSocket(sock: Socket): void {
+    if (this.socket === sock) this.socket = null;
+    try {
+      sock.close();
+    } catch {
+      // ignore close errors during cleanup
+    }
+  }
+
   start(): void {
     if (!this.enabled) {
       this.active = false;
@@ -156,11 +169,14 @@ export class MdnsService extends EventEmitter<MdnsEvents> {
     }
     if (this.socket) return;
 
+    let sock: Socket | null = null;
     try {
-      const sock = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+      sock = this.createSocket();
+      this.socket = sock;
       sock.on('error', (err) => {
         this.lastError = err.message;
         this.active = false;
+        this.cleanupSocket(sock!);
         this.log(`[jkbox] mDNS aviso: ${err.message}`);
       });
       sock.on('message', (msg) => {
@@ -174,9 +190,9 @@ export class MdnsService extends EventEmitter<MdnsEvents> {
       });
       sock.bind(MDNS_PORT, () => {
         try {
-          sock.addMembership(MDNS_ADDR);
-          sock.setMulticastTTL(255);
-          sock.setMulticastLoopback(true);
+          sock!.addMembership(MDNS_ADDR);
+          sock!.setMulticastTTL(255);
+          sock!.setMulticastLoopback(true);
           this.active = true;
           this.lastError = null;
           this.announceService();
@@ -184,11 +200,13 @@ export class MdnsService extends EventEmitter<MdnsEvents> {
         } catch (err) {
           this.lastError = (err as Error).message;
           this.active = false;
+          this.cleanupSocket(sock!);
           this.log(`[jkbox] mDNS multicast indisponível: ${this.lastError}`);
         }
       });
-      this.socket = sock;
     } catch (err) {
+      if (sock) this.cleanupSocket(sock);
+      else this.socket = null;
       this.lastError = (err as Error).message;
       this.active = false;
       this.log(`[jkbox] mDNS indisponível: ${this.lastError}`);

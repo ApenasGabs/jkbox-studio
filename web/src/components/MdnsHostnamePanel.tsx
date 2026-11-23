@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
+import { copyTextToClipboard } from '../lib/clipboard';
 import type { MdnsStatus } from '../lib/types';
 
 interface MdnsHostnamePanelProps {
@@ -54,12 +55,13 @@ export const MdnsHostnamePanel = ({ mdns, onUpdated, onToast }: MdnsHostnamePane
     }
   };
 
+  const targetUrl = changed && isValid ? previewUrl : mdns.url;
+
   const handleCopy = () => {
     if (!mdns) return;
-    void navigator.clipboard?.writeText(mdns.url).then(
-      () => onToast(`Copiado: ${mdns.url}`),
-      () => onToast(mdns.url),
-    );
+    void copyTextToClipboard(targetUrl).then((copied) => {
+      onToast(copied ? `Copiado: ${targetUrl}` : targetUrl);
+    });
   };
 
   const badge =
@@ -75,7 +77,7 @@ export const MdnsHostnamePanel = ({ mdns, onUpdated, onToast }: MdnsHostnamePane
     <section className="glass flex flex-col gap-3 p-4">
       <div className="flex items-center justify-between gap-2">
         <h3 className="font-semibold">Endereço na Rede (.local)</h3>
-        <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${badge.cls}`}>{badge.text}</span>
+        <span className={`shrink-0 whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-semibold ${badge.cls}`}>{badge.text}</span>
       </div>
 
       <p className="text-xs text-zinc-400">
@@ -83,7 +85,7 @@ export const MdnsHostnamePanel = ({ mdns, onUpdated, onToast }: MdnsHostnamePane
       </p>
 
       <div className="flex items-center gap-2">
-        <div className="flex flex-1 items-center rounded-lg bg-white/10 px-3 py-2 focus-within:ring-2 focus-within:ring-accent">
+        <div className="flex min-w-0 flex-1 items-center rounded-lg bg-white/10 px-3 py-2 focus-within:ring-2 focus-within:ring-accent">
           <input
             value={hostname}
             onChange={(e) => setHostname(e.target.value)}
@@ -105,7 +107,7 @@ export const MdnsHostnamePanel = ({ mdns, onUpdated, onToast }: MdnsHostnamePane
           type="button"
           disabled={!isValid || !changed || saving}
           onClick={() => void handleSave()}
-          className="rounded-lg bg-accent px-3 py-2 text-sm font-semibold text-white disabled:opacity-40"
+          className="shrink-0 rounded-lg bg-accent px-3 py-2 text-sm font-semibold text-white disabled:opacity-40"
         >
           {saving ? '...' : 'Salvar'}
         </button>
@@ -118,7 +120,7 @@ export const MdnsHostnamePanel = ({ mdns, onUpdated, onToast }: MdnsHostnamePane
       )}
 
       <div className="flex items-center justify-between gap-2 rounded-lg bg-black/25 px-3 py-2 text-xs">
-        <span className="min-w-0 truncate font-mono text-accent-2">{changed && isValid ? previewUrl : mdns.url}</span>
+        <span className="min-w-0 truncate font-mono text-accent-2">{targetUrl}</span>
         <button
           type="button"
           onClick={handleCopy}
