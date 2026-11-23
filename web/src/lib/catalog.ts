@@ -1,13 +1,21 @@
 import { formatTime } from './format';
 import type { CatalogAlbum, CatalogCategory, SearchResult, Track, TrackMetadataPatch } from './types';
 
-export type CatalogTab = 'categories' | 'albums' | 'artists' | 'all';
+export type CatalogTab = 'categories' | 'playlists' | 'albums' | 'artists' | 'all';
 
 export type CatalogRoute =
   | { kind: 'root' }
   | { kind: 'category'; name: string; subgenre?: string | null; uncategorized?: boolean }
+  | { kind: 'playlist'; id: string; name?: string }
   | { kind: 'album'; name: string; artist: string }
   | { kind: 'artist'; name: string };
+
+export interface PlaylistPickerTrack {
+  id: string;
+  title: string;
+  artist: string;
+  thumbnail: string | null;
+}
 
 export interface EditableTrack {
   id: string;
@@ -228,6 +236,25 @@ export function buildMetadataPatch(
       year,
       trackNumber,
     },
+  };
+}
+
+export function playlistTrackFromTrack(track: Track): PlaylistPickerTrack {
+  return {
+    id: track.id,
+    title: track.title,
+    artist: track.artist,
+    thumbnail: track.thumbnail,
+  };
+}
+
+export function playlistTrackFromResult(result: SearchResult): PlaylistPickerTrack | null {
+  if (!result.trackId) return null;
+  return {
+    id: result.trackId,
+    title: result.title,
+    artist: result.artist,
+    thumbnail: result.thumbnail ?? null,
   };
 }
 

@@ -4,6 +4,7 @@ import { ClassifierService } from './services/classifier.js';
 import { DownloadManager } from './services/downloads.js';
 import { Jukebox } from './services/jukebox.js';
 import { LyricsService } from './services/lyrics.js';
+import { PlaylistRepository } from './services/playlists.js';
 import { QueueService } from './services/queue.js';
 import { SpotifyService, type FetchFn } from './services/spotify.js';
 import { TrackRepository } from './services/tracks.js';
@@ -21,6 +22,7 @@ export function createJukebox(config: Config, overrides: ContainerOverrides = {}
   const db = openDb(config.dbPath);
   const settings = new Settings(db);
   const tracks = new TrackRepository(db);
+  const playlists = new PlaylistRepository(db, tracks);
   const media = overrides.media ?? new YtDlp(config.ytdlpPath, config.audioFormat, config.ytdlpExtraArgs);
   const spotify = new SpotifyService(config.spotify, settings, overrides.fetchFn);
   const lyrics = new LyricsService(db, config.musicDir, overrides.fetchFn, overrides.log);
@@ -46,6 +48,17 @@ export function createJukebox(config: Config, overrides: ContainerOverrides = {}
       log: overrides.log,
     },
   );
-  jukebox = new Jukebox(tracks, queue, downloads, media, spotify, lyrics, overrides.log, settings, classifier);
+  jukebox = new Jukebox(
+    tracks,
+    queue,
+    downloads,
+    media,
+    spotify,
+    lyrics,
+    overrides.log,
+    settings,
+    classifier,
+    playlists,
+  );
   return jukebox;
 }

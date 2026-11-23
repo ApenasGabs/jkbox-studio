@@ -16,6 +16,7 @@ import type {
 import { isCanonicalCategory, type AutocategorizeSummary, type ClassifierService } from './classifier.js';
 import type { DownloadManager } from './downloads.js';
 import type { LyricsService } from './lyrics.js';
+import { PlaylistError, type PlaylistRepository } from './playlists.js';
 import { QueueError, type QueueService } from './queue.js';
 import { SpotifyError, youtubeQueryFor, type SpotifyService } from './spotify.js';
 import type { TrackRepository } from './tracks.js';
@@ -94,6 +95,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
   private _autoDjMode: AutoDjMode;
   private _autoDjCategory: string | null;
   private _autoDjSubgenre: string | null;
+  private _autoDjPlaylistId: string | null;
   private _playbackOutput: PlaybackOutput;
   private autocategorizeInFlight: Promise<AutocategorizeSummary> | null = null;
   private readonly classifyingTrackIds = new Set<string>();
@@ -108,13 +110,22 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     private readonly log: (msg: string) => void = console.log,
     private readonly settings?: Settings,
     readonly classifier?: ClassifierService,
+    readonly playlists?: PlaylistRepository,
   ) {
     super();
     this._autoDjEnabled = this.settings?.get<boolean>('autoDjEnabled') ?? false;
     const savedMode = this.settings?.get<string>('autoDjMode');
-    this._autoDjMode = savedMode === 'category' || savedMode === 'random' ? savedMode : 'vibe';
+    this._autoDjMode =
+      savedMode === 'category' || savedMode === 'playlist' || savedMode === 'random' ? savedMode : 'vibe';
     this._autoDjCategory = this.settings?.get<string | null>('autoDjCategory') ?? null;
     this._autoDjSubgenre = this.settings?.get<string | null>('autoDjSubgenre') ?? null;
+    this._autoDjPlaylistId = this.settings?.get<string | null>('autoDjPlaylistId') ?? null;
+    if (this._autoDjMode === 'playlist' && this._autoDjPlaylistId && this.playlists && !this.playlists.get(this._autoDjPlaylistId)) {
+      this._autoDjMode = 'vibe';
+      this._autoDjPlaylistId = null;
+      this.settings?.set('autoDjMode', 'vibe');
+      this.settings?.set('autoDjPlaylistId', null);
+    }
     this._playbackOutput = normalizePlaybackOutput(this.settings?.get<unknown>('playback_output'), spotify.connected);
     queue.setPlayablePredicate((track) => track.status === 'ready' || this._playbackOutput.type === 'spotify');
     downloads.on('ready', (track) => {
@@ -543,6 +554,10 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     return this._autoDjSubgenre;
   }
 
+  get autoDjPlaylistId(): string | null {
+    return this._autoDjPlaylistId;
+  }
+
   setAutoDjEnabled(enabled: boolean): boolean {
     this._autoDjEnabled = enabled;
     this.settings?.set('autoDjEnabled', enabled);
@@ -554,6 +569,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     mode?: AutoDjMode;
     category?: string | null;
     subgenre?: string | null;
+    playlistId?: string | null;
   }): AutoDjConfig {
     if (patch.enabled !== undefined) {
       this._autoDjEnabled = patch.enabled;
@@ -577,12 +593,27 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       this._autoDjSubgenre = patch.subgenre?.trim() || null;
       this.settings?.set('autoDjSubgenre', this._autoDjSubgenre);
     }
+    if (patch.playlistId !== undefined) {
+      this._autoDjPlaylistId = patch.playlistId?.trim() || null;
+      this.settings?.set('autoDjPlaylistId', this._autoDjPlaylistId);
+    }
     return {
       enabled: this._autoDjEnabled,
       mode: this._autoDjMode,
       category: this._autoDjCategory,
       subgenre: this._autoDjSubgenre,
+      playlistId: this._autoDjPlaylistId,
     };
+  }
+
+  clearAutoDjPlaylistIfMatches(playlistId: string): void {
+    if (this._autoDjPlaylistId !== playlistId) return;
+    this._autoDjPlaylistId = null;
+    this.settings?.set('autoDjPlaylistId', null);
+    if (this._autoDjMode === 'playlist') {
+      this._autoDjMode = 'vibe';
+      this.settings?.set('autoDjMode', 'vibe');
+    }
   }
 
   private hasActiveTrack(trackIds: ReadonlySet<string>): boolean {
@@ -647,6 +678,10 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
 
     const recentTracks = this.queue.recentTracks(DEFAULT_AUTO_DJ_RECENT_WINDOW * 3);
     const recentIds = recentTracks.map((t) => t.id);
+    const playlistTrackIds =
+      this._autoDjMode === 'playlist' && this._autoDjPlaylistId && this.playlists
+        ? this.playlists.getTrackIds(this._autoDjPlaylistId)
+        : undefined;
     const picked = pickAutoDjTrack(cached, recentIds, {
       recentWindow: DEFAULT_AUTO_DJ_RECENT_WINDOW,
       random,
@@ -654,6 +689,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       lastTrack: recentTracks[0] ?? null,
       category: this._autoDjCategory,
       subgenre: this._autoDjSubgenre,
+      playlistTrackIds,
     });
     if (!picked) return null;
 
@@ -801,6 +837,51 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     const outcome = this.queue.enqueue(track.id, requesterId, requesterName);
     if (!outcome.duplicate && syncSpotify) void this.syncToSpotify(this.tracks.get(track.id)!);
     return { ...outcome, cached };
+  }
+
+  enqueuePlaylist(
+    playlistId: string,
+    options: { requesterId?: string; requesterName?: string; shuffle?: boolean; count?: number } = {},
+  ) {
+    if (!this.playlists) throw new PlaylistError('Serviço de playlists indisponível', 500);
+    const detail = this.playlists.getDetail(playlistId);
+    if (!detail) throw new PlaylistError('Playlist não encontrada', 404);
+
+    const requesterId = options.requesterId?.trim() || 'playlist';
+    const requesterName = options.requesterName?.trim() || detail.summary.name;
+
+    const items = [...detail.items];
+    if (options.shuffle) {
+      for (let i = items.length - 1; i > 0; i -= 1) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [items[i], items[j]] = [items[j], items[i]];
+      }
+    }
+    const selected =
+      typeof options.count === 'number' && options.count > 0 ? items.slice(0, options.count) : items;
+
+    let enqueued = 0;
+    let duplicates = 0;
+    const queuedItems: QueueEntryView[] = [];
+    for (const entry of selected) {
+      const outcome = this.enqueue({
+        result: this.trackToResult(entry.track),
+        requesterId,
+        requesterName,
+      });
+      if (outcome.duplicate) duplicates += 1;
+      else enqueued += 1;
+      queuedItems.push(outcome.item);
+    }
+
+    return {
+      playlistId: detail.summary.id,
+      playlistName: detail.summary.name,
+      total: selected.length,
+      enqueued,
+      duplicates,
+      items: queuedItems,
+    };
   }
 
   /** Best-effort: mirror enqueued songs into the shared Spotify playlist. */

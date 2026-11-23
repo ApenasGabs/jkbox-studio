@@ -66,7 +66,35 @@ export interface CatalogCategory {
   subcategories?: CatalogSubcategory[];
 }
 
-export type AutoDjMode = 'vibe' | 'category' | 'random';
+export type AutoDjMode = 'vibe' | 'category' | 'playlist' | 'random';
+
+export interface PlaylistSummary {
+  id: string;
+  name: string;
+  description: string | null;
+  trackCount: number;
+  cover: string | null;
+  createdAt: number;
+  updatedAt: number;
+  containsTrack?: boolean;
+}
+
+export interface PlaylistTrackResult extends SearchResult {
+  position: number;
+  addedAt: number;
+}
+
+export interface PlaylistDetail extends PlaylistSummary {
+  tracks: PlaylistTrackResult[];
+}
+
+export interface PlaylistEnqueueResponse {
+  playlistId: string;
+  playlistName: string;
+  total: number;
+  enqueued: number;
+  duplicates: number;
+}
 
 export interface CatalogAlbum {
   name: string;
@@ -149,6 +177,7 @@ export interface AppConfig {
   autoDjMode?: AutoDjMode;
   autoDjCategory?: string | null;
   autoDjSubgenre?: string | null;
+  autoDjPlaylistId?: string | null;
   playbackOutput: PlaybackOutput;
   spotify: SpotifyStatus;
 }
