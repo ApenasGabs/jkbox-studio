@@ -1,0 +1,16 @@
+[Unit]
+Description=jkbox-studio Wi-Fi Fallback Hotspot (jkbox-setup)
+Documentation=https://github.com/ApenasGabs/jkbox-studio
+After=NetworkManager.service NetworkManager-wait-online.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/jkbox/jkbox.env
+ExecStart=/opt/jkbox/current/os/jkbox-wifi-fallback.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

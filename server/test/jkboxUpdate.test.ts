@@ -409,6 +409,17 @@ describe('os/jkbox-update.sh', () => {
     expect(fs.existsSync(oldDir)).toBe(false);
     expect(fs.existsSync(olderDir)).toBe(false);
   });
+
+  it('supports --no-restart bootstrap mode without calling systemctl or healthcheck', async () => {
+    const fx = await createFixture({ latestTag: 'v0.2.0' });
+    fx.healthHandler = () => ({ status: 503, body: { ok: false } });
+
+    const res = await runUpdater(fx, ['--no-restart']);
+
+    expect(res.code).toBe(0);
+    expect(fs.realpathSync(fx.currentLink)).toBe(fs.realpathSync(path.join(fx.releasesDir, 'v0.2.0')));
+    expect(fs.existsSync(fx.systemctlLog)).toBe(false);
+  });
 });
 
 describe('release pipeline & systemd manifests', () => {

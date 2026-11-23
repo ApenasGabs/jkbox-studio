@@ -1,0 +1,13 @@
+[Unit]
+Description=jkbox-studio USB Music Automount (%i)
+Documentation=https://github.com/ApenasGabs/jkbox-studio
+After=jkbox.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/jkbox/jkbox.env
+ExecStart=/opt/jkbox/current/os/jkbox-usb-mount.sh add %i
+ExecStop=/opt/jkbox/current/os/jkbox-usb-mount.sh remove %i
+StandardOutput=journal
+StandardError=journal

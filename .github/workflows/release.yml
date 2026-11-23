@@ -86,7 +86,13 @@ jobs:
           cp -r server/dist "$STAGE_DIR/server/dist"
           cp -r web/dist "$STAGE_DIR/web/dist"
           cp -r os "$STAGE_DIR/os"
-          chmod +x "$STAGE_DIR/os/jkbox-update.sh"
+          chmod +x \
+            "$STAGE_DIR/os/jkbox-update.sh" \
+            "$STAGE_DIR/os/install-kiosk.sh" \
+            "$STAGE_DIR/os/jkbox-usb-mount.sh" \
+            "$STAGE_DIR/os/jkbox-wifi-fallback.sh" \
+            "$STAGE_DIR/os/jkbox-kiosk-browser.sh" \
+            "$STAGE_DIR/os/jkbox-buttons"
           cp .env.example "$STAGE_DIR/.env.example"
           printf '%s\n' "$RELEASE_TAG" > "$STAGE_DIR/VERSION"
 
