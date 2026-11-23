@@ -54,6 +54,7 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
       audioFormat: config.audioFormat,
       videoMode: config.videoMode,
       autoDjEnabled: jukebox.autoDjEnabled,
+      playbackOutput: jukebox.playbackOutput,
       spotify: spotify.status(),
     });
   });
@@ -72,7 +73,7 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
   });
 
   api.get('/state', (_req, res) => {
-    res.json(queue.state());
+    res.json({ ...queue.state(), playbackOutput: jukebox.playbackOutput });
   });
 
   api.get('/search', async (req, res, next) => {
@@ -324,8 +325,64 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
   });
 
   api.post('/spotify/disconnect', requireHost, (_req, res) => {
-    spotify.disconnect();
+    jukebox.disconnectSpotify();
     res.json(spotify.status());
+  });
+
+  api.get('/spotify/devices', requireSpotify, requireHost, async (_req, res, next) => {
+    try {
+      res.json(await jukebox.getSpotifyDevices());
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  api.post('/spotify/device', requireHost, async (req, res, next) => {
+    try {
+      const raw = req.body?.deviceId;
+      if (raw !== null && (typeof raw !== 'string' || !raw.trim() || raw.length > 128)) {
+        return void res.status(400).json({ error: 'deviceId deve ser uma string não vazia ou null' });
+      }
+      const deviceId = raw === null ? null : raw.trim();
+      if (deviceId !== null && !spotify.configured) {
+        return void res.status(503).json({ error: 'Spotify não configurado (defina SPOTIFY_CLIENT_ID e SPOTIFY_CLIENT_SECRET)' });
+      }
+      const playbackOutput = await jukebox.setPlaybackOutput(deviceId);
+      res.json({ playbackOutput });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  api.post('/spotify/player/pause', requireSpotify, requireHost, async (_req, res, next) => {
+    try {
+      await jukebox.pauseSpotifyPlayback();
+      res.json({ ok: true, paused: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  api.post('/spotify/player/resume', requireSpotify, requireHost, async (_req, res, next) => {
+    try {
+      await jukebox.resumeSpotifyPlayback();
+      res.json({ ok: true, paused: false });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  api.post('/spotify/player/volume', requireSpotify, requireHost, async (req, res, next) => {
+    try {
+      const volume = req.body?.volume;
+      if (typeof volume !== 'number' || !Number.isFinite(volume) || volume < 0 || volume > 100) {
+        return void res.status(400).json({ error: 'volume deve ser um número entre 0 e 100' });
+      }
+      const applied = await jukebox.setSpotifyVolume(volume);
+      res.json({ ok: true, volume: applied });
+    } catch (err) {
+      next(err);
+    }
   });
 
   api.use((_req, res) => {
@@ -342,7 +399,10 @@ export function createApp({ config, jukebox, version = '0.1.0' }: AppDeps): expr
   }
 
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    if (err instanceof QueueError || err instanceof SpotifyError || err instanceof LyricsError) {
+    if (err instanceof SpotifyError) {
+      return void res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+    }
+    if (err instanceof QueueError || err instanceof LyricsError) {
       return void res.status(err.status).json({ error: err.message });
     }
     console.error(err);

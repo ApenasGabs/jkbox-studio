@@ -5,6 +5,7 @@ import {
   type KioskCommand,
   type KioskInputEvent,
   type KioskInputPhase,
+  type PlaybackOutput,
   type ReactionEmoji,
   type ServerMessage,
   type TrackStatus,
@@ -31,20 +32,29 @@ export interface LiveReaction {
   senderName?: string;
 }
 
+export interface JukeboxNotice {
+  seq: number;
+  message: string;
+  error: boolean;
+}
+
 const REACTION_TTL_MS = 3000;
 const MAX_ACTIVE_REACTIONS = 24;
 
 /** Live jukebox state over WebSocket with automatic reconnection. */
 export function useJukebox() {
   const [state, setState] = useState<JukeboxState>({ nowPlaying: null, queue: [] });
+  const [playbackOutput, setPlaybackOutput] = useState<PlaybackOutput>({ type: 'local' });
   const [position, setPosition] = useState({ positionSec: 0, paused: false });
   const [downloads, setDownloads] = useState<Record<string, DownloadInfo>>({});
   const [lyricsOffset, setLyricsOffset] = useState<LyricsOffsetEvent | null>(null);
   const [reactions, setReactions] = useState<LiveReaction[]>([]);
+  const [notice, setNotice] = useState<JukeboxNotice | null>(null);
   const [connected, setConnected] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
   const offsetSeqRef = useRef(0);
   const reactionSeqRef = useRef(0);
+  const noticeSeqRef = useRef(0);
   const reactionTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
   const inputSubscribersRef = useRef<Set<(event: KioskInputEvent) => void>>(new Set());
 
@@ -77,6 +87,7 @@ export function useJukebox() {
         }
         if (msg.type === 'state') {
           setState(msg.state);
+          if (msg.playbackOutput) setPlaybackOutput(msg.playbackOutput);
           setPosition({ positionSec: msg.state.nowPlaying?.positionSec ?? 0, paused: msg.state.nowPlaying?.paused ?? false });
         } else if (msg.type === 'progress') {
           setPosition({ positionSec: msg.positionSec, paused: msg.paused });
@@ -85,6 +96,9 @@ export function useJukebox() {
         } else if (msg.type === 'lyrics_offset') {
           offsetSeqRef.current += 1;
           setLyricsOffset({ trackId: msg.trackId, offsetMs: msg.offsetMs, seq: offsetSeqRef.current });
+        } else if (msg.type === 'notice') {
+          noticeSeqRef.current += 1;
+          setNotice({ seq: noticeSeqRef.current, message: msg.message, error: Boolean(msg.error) });
         } else if (msg.type === 'reaction') {
           const id = ++reactionSeqRef.current;
           setReactions((prev) => [...prev.slice(-(MAX_ACTIVE_REACTIONS - 1)), { id, emoji: msg.emoji, senderName: msg.senderName }]);
@@ -128,5 +142,5 @@ export function useJukebox() {
     if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
   }, []);
 
-  return { state, position, downloads, lyricsOffset, reactions, connected, send, subscribeInput };
+  return { state, playbackOutput, position, downloads, lyricsOffset, reactions, notice, connected, send, subscribeInput };
 }

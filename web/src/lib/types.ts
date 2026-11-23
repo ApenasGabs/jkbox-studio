@@ -104,9 +104,24 @@ export interface JukeboxState {
   queue: QueueEntry[];
 }
 
+export interface SpotifyDevice {
+  id: string;
+  name: string;
+  type: string;
+  isActive: boolean;
+  isRestricted: boolean;
+  volumePercent: number | null;
+  supportsVolume: boolean;
+}
+
+export type PlaybackOutput =
+  | { type: 'local' }
+  | { type: 'spotify'; deviceId: string; deviceName: string };
+
 export interface SpotifyStatus {
   configured: boolean;
   connected: boolean;
+  playbackAuthorized: boolean;
   playlistId: string | null;
   playlistUrl: string | null;
   redirectUri: string | null;
@@ -118,6 +133,7 @@ export interface AppConfig {
   audioFormat: string;
   videoMode: VideoMode;
   autoDjEnabled: boolean;
+  playbackOutput: PlaybackOutput;
   spotify: SpotifyStatus;
 }
 
@@ -144,9 +160,10 @@ export interface KioskInputEvent {
 }
 
 export type ServerMessage =
-  | { type: 'state'; state: JukeboxState }
+  | { type: 'state'; state: JukeboxState; playbackOutput?: PlaybackOutput }
   | { type: 'progress'; positionSec: number; paused: boolean }
   | { type: 'download'; trackId: string; status: TrackStatus; progress: number; error: string | null }
   | { type: 'lyrics_offset'; trackId: string; offsetMs: number }
   | { type: 'reaction'; emoji: ReactionEmoji; senderName?: string }
+  | { type: 'notice'; message: string; error?: boolean }
   | { type: 'input'; command: KioskCommand; phase?: KioskInputPhase; source?: string };

@@ -22,6 +22,7 @@ async function main() {
   if (imported > 0) console.log(`[jkbox] ${imported} arquivo(s) importado(s) do acervo local`);
   jukebox.downloads.resumeInterrupted();
   jukebox.queue.advanceIfIdle();
+  jukebox.syncStartupPlayback();
   jukebox.startSpotifyImport(config.spotify.importIntervalSec);
 
   const app = createApp({ config, jukebox, version: pkg.version });

@@ -37,6 +37,11 @@ describe('WebSocket realtime sync', () => {
       nextMessage(phone, (m) => m.type === 'state'),
     ]);
     expect(initial[0].state).toEqual({ nowPlaying: null, queue: [] });
+    expect(initial[0].playbackOutput).toEqual({ type: 'local' });
+
+    const noticePromise = nextMessage(phone, (m) => m.type === 'notice');
+    jukebox.emit('notice', 'Faixa indisponível no Spotify', true);
+    expect(await noticePromise).toEqual({ type: 'notice', message: 'Faixa indisponível no Spotify', error: true });
 
     const phoneSeesPlaying = nextMessage(phone, (m) => m.type === 'state' && m.state.nowPlaying);
     jukebox.enqueue({ result: ytResult('dQw4w9WgXcQ'), requesterId: 'p', requesterName: 'Phone' });

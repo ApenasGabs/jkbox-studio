@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type { Db } from '../db.js';
 import { orderQueue } from '../lib/fairQueue.js';
-import type { JukeboxState, NowPlaying, QueueEntryView, QueueItem, QueueStatus } from '../types.js';
+import type { JukeboxState, NowPlaying, QueueEntryView, QueueItem, QueueStatus, Track } from '../types.js';
 import type { TrackRepository } from './tracks.js';
 
 interface QueueRow {
@@ -27,6 +27,7 @@ export class QueueError extends Error {
 export interface QueueEvents {
   change: [];
   progress: [positionSec: number, paused: boolean];
+  started: [entry: QueueEntryView];
   drained: [];
 }
 
@@ -40,12 +41,18 @@ export interface EnqueueResult {
 export class QueueService extends EventEmitter<QueueEvents> {
   private positionSec = 0;
   private paused = false;
+  private playablePredicate: (track: Track) => boolean = (track) => track.status === 'ready';
 
   constructor(
     private readonly db: Db,
     private readonly tracks: TrackRepository,
   ) {
     super();
+  }
+
+  /** Allows playback backends (e.g. Spotify Connect) to start tracks that don't require local download. */
+  setPlayablePredicate(predicate: (track: Track) => boolean): void {
+    this.playablePredicate = predicate;
   }
 
   enqueue(trackId: string, requesterId: string, requesterName: string): EnqueueResult {
@@ -122,12 +129,14 @@ export class QueueService extends EventEmitter<QueueEvents> {
   /** Starts the next ready track when nothing is playing. Called when downloads finish. */
   advanceIfIdle(): boolean {
     if (this.currentRow()) return false;
-    const next = this.ordered().find((entry) => entry.track.status === 'ready');
+    const next = this.ordered().find((entry) => this.playablePredicate(entry.track));
     if (!next) return false;
     this.db.prepare("UPDATE queue SET status = 'playing', started_at = ? WHERE id = ?").run(Date.now(), next.id);
     this.positionSec = 0;
     this.paused = false;
+    const started = this.view(this.getRow(next.id)!);
     this.emit('change');
+    this.emit('started', started);
     return true;
   }
 

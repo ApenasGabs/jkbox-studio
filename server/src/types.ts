@@ -116,6 +116,29 @@ export interface JukeboxState {
   queue: QueueEntryView[];
 }
 
+export interface SpotifyDevice {
+  id: string;
+  name: string;
+  type: string;
+  isActive: boolean;
+  isRestricted: boolean;
+  volumePercent: number | null;
+  supportsVolume: boolean;
+}
+
+export interface SpotifyPlaybackState {
+  isPlaying: boolean;
+  progressMs: number;
+  device: SpotifyDevice | null;
+  trackUri: string | null;
+  trackId: string | null;
+  durationMs: number | null;
+}
+
+export type PlaybackOutput =
+  | { type: 'local' }
+  | { type: 'spotify'; deviceId: string; deviceName: string };
+
 export type LyricsSource = 'lrclib' | 'local' | 'none';
 
 export interface TrackLyrics {
