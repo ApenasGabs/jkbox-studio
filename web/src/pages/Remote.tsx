@@ -121,6 +121,7 @@ export function Remote() {
   const [pinError, setPinError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const reactionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const importingPlaylistRef = useRef(false);
   const toast = useToast();
   const me = getClientId();
   const current = state.nowPlaying?.item;
@@ -231,6 +232,12 @@ export function Remote() {
   // The local catalog handles its own fetching via CatalogBrowser.
   const submit = (e: FormEvent) => {
     e.preventDefault();
+    const detected = detectPlaylistLink(query);
+    if (detected) {
+      if (source === 'local') setCatalogFilter('');
+      void importPlaylistByUrl(detected.url);
+      return;
+    }
     if (source === 'local') {
       setCatalogFilter(query);
       return;
@@ -243,7 +250,9 @@ export function Remote() {
     const nextSource: SearchSource = nextKaraoke && (source === 'spotify' || source === 'local') ? 'youtube' : source;
     setKaraoke(nextKaraoke);
     if (nextSource !== source) setSource(nextSource);
-    if (nextSource !== 'local' && query.trim()) void runSearch(applyKaraokeFilter(query, nextKaraoke), nextSource);
+    if (nextSource !== 'local' && query.trim() && !detectPlaylistLink(query)) {
+      void runSearch(applyKaraokeFilter(query, nextKaraoke), nextSource);
+    }
   };
 
   const add = async (result: SearchResult) => {
@@ -306,17 +315,18 @@ export function Remote() {
   };
 
   const importPlaylistByUrl = async (rawUrl: string): Promise<boolean> => {
-    if (importingPlaylist) return false;
+    if (importingPlaylistRef.current) return false;
+    const trimmedUrl = rawUrl.trim();
+    if (!trimmedUrl) return false;
+    importingPlaylistRef.current = true;
     setImportingPlaylist(true);
     setImportError(null);
     setImportResult(null);
     try {
-      const outcome = await api.importPlaylist(rawUrl);
+      const outcome = await api.importPlaylist(trimmedUrl);
       setImportResult(outcome);
-      if (query.trim() === rawUrl.trim()) {
-        setQuery('');
-        setCatalogFilter('');
-      }
+      setQuery((prev) => (prev.trim() === trimmedUrl ? '' : prev));
+      setCatalogFilter((prev) => (prev.trim() === trimmedUrl ? '' : prev));
       setCatalogReloadKey((k) => k + 1);
       toast.show(formatPlaylistImportSummary(outcome).toast);
       return true;
@@ -326,6 +336,7 @@ export function Remote() {
       toast.show(info.message, true);
       return false;
     } finally {
+      importingPlaylistRef.current = false;
       setImportingPlaylist(false);
     }
   };

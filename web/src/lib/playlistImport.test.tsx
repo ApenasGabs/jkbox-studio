@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PlaylistImportDetectedCard, PlaylistImportFeedback } from '../components/PlaylistImportBanner';
 import { PlaylistManagerPanel } from '../components/PlaylistManagerPanel';
+import { ToastBanner } from '../components/Toast';
 import { ApiError, api } from './api';
 import {
   describePlaylistImportError,
@@ -254,5 +255,16 @@ describe('Playlist import UI rendering', () => {
     expect(html).toContain('Sertanejo SP');
     expect(html).toContain('Spotify');
     expect(html).toContain('Manual');
+  });
+
+  it('renders mobile-safe responsive classes on ToastBanner for long import messages', () => {
+    const html = renderToStaticMarkup(
+      <ToastBanner text='Playlist "Churrasco Hits" importada: 12 importadas, 4 já em cache, 8 baixando' />,
+    );
+    expect(html).toContain('w-max');
+    expect(html).toContain('max-w-[calc(100vw-2rem)]');
+    expect(html).toContain('rounded-2xl');
+    expect(html).toContain('text-center');
+    expect(html).toContain('role="status"');
   });
 });

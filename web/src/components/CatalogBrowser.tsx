@@ -279,7 +279,12 @@ export function CatalogBrowser({
   const handleImportPlaylistForm = async (e: FormEvent) => {
     e.preventDefault();
     if (!onImportPlaylist || importingPlaylist) return;
-    const ok = await onImportPlaylist(importPlaylistUrl.trim());
+    const url = importPlaylistUrl.trim();
+    if (!url) {
+      onToast?.('Cole o link da playlist do YouTube ou Spotify', true);
+      return;
+    }
+    const ok = await onImportPlaylist(url);
     if (ok) {
       setImportPlaylistUrl('');
       setImportingPlaylistOpen(false);
@@ -1039,8 +1044,10 @@ export function CatalogBrowser({
                   />
                   <button
                     type="submit"
-                    disabled={importingPlaylist}
-                    className="shrink-0 rounded-xl bg-accent px-4 py-2 text-xs font-semibold text-white transition hover:brightness-110 disabled:cursor-wait disabled:opacity-60"
+                    disabled={importingPlaylist || !importPlaylistUrl.trim()}
+                    className={`shrink-0 rounded-xl bg-accent px-4 py-2 text-xs font-semibold text-white transition hover:brightness-110 disabled:opacity-60 ${
+                      importingPlaylist ? 'disabled:cursor-wait' : 'disabled:cursor-not-allowed'
+                    }`}
                   >
                     {importingPlaylist ? 'Importando…' : 'Importar Playlist'}
                   </button>
