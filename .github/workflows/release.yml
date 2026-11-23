@@ -148,6 +148,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.meta.outputs.tag }}
           TARBALL_NAME: ${{ steps.meta.outputs.tarball }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" \
@@ -155,14 +156,17 @@ jobs:
               dist-release/SHA256SUMS \
               --clobber
           else
-            EXTRA_FLAGS=""
+            EXTRA_ARGS=()
             case "$RELEASE_TAG" in
-              *-*) EXTRA_FLAGS="--prerelease" ;;
+              *-*) EXTRA_ARGS+=(--prerelease) ;;
             esac
+            if [ "$REF_TYPE" != "tag" ]; then
+              EXTRA_ARGS+=(--target "$GITHUB_SHA")
+            fi
             gh release create "$RELEASE_TAG" \
               "dist-release/${TARBALL_NAME}" \
               dist-release/SHA256SUMS \
               --title "$RELEASE_TAG" \
               --generate-notes \
-              $EXTRA_FLAGS
+              "${EXTRA_ARGS[@]}"
           fi

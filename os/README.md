@@ -12,7 +12,7 @@ Artefatos da **Etapa 2 da Fase 2** para rodar o `jkbox-studio` nativamente em Li
 └── current -> /opt/jkbox/releases/v0.2.0
 ```
 
-Dados persistentes ficam em `/var/lib/jkbox` (`StateDirectory=jkbox`) e variáveis opcionais em `/etc/jkbox/jkbox.env`.
+Dados persistentes ficam em `/var/lib/jkbox` (`StateDirectory=jkbox`) e variáveis opcionais em `/etc/jkbox/jkbox.env` (carregado automaticamente pelo `systemd` e também pelo `jkbox-update.sh` em execuções manuais, ou via `JKBOX_ENV_FILE`).
 
 ## Units `systemd`
 

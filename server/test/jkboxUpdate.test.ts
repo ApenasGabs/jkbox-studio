@@ -23,7 +23,6 @@ interface Fixture {
   baseUrl: string;
   tarDownloads: number;
   healthHandler: (currentTarget: string) => { status: number; body: unknown };
-  systemctlBehavior: (callCount: number, currentTarget: string) => number;
 }
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -105,7 +104,6 @@ async function createFixture(options: {
     baseUrl: '',
     tarDownloads: 0,
     healthHandler: () => ({ status: 200, body: { ok: true, version: latestTag.replace(/^v/, '') } }),
-    systemctlBehavior: () => 0,
   };
 
   // Mock systemctl tracks invocations and active symlink target.
@@ -184,23 +182,33 @@ exit 0
   return fixture;
 }
 
-async function runUpdater(fixture: Fixture, args: string[] = [], extraEnv: Record<string, string> = {}) {
+async function runUpdater(
+  fixture: Fixture,
+  args: string[] = [],
+  extraEnv: Record<string, string | undefined> = {},
+) {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    JKBOX_BASE_DIR: fixture.baseDir,
+    JKBOX_RELEASES_DIR: fixture.releasesDir,
+    JKBOX_CURRENT_LINK: fixture.currentLink,
+    JKBOX_API_URL: `${fixture.baseUrl}/releases/latest`,
+    JKBOX_HEALTH_URL: `${fixture.baseUrl}/api/health`,
+    JKBOX_HEALTH_TIMEOUT: '1',
+    JKBOX_HEALTH_INTERVAL: '0.1',
+    JKBOX_SYSTEMCTL: fixture.systemctlBin,
+    JKBOX_LOCK_FILE: path.join(fixture.root, 'update.lock'),
+    JKBOX_ENV_FILE: path.join(fixture.root, 'nonexistent.env'),
+  };
+  for (const [k, v] of Object.entries(extraEnv)) {
+    if (v === undefined) {
+      delete env[k];
+    } else {
+      env[k] = v;
+    }
+  }
   try {
-    const { stdout, stderr } = await execFileAsync('bash', [UPDATE_SCRIPT, ...args], {
-      env: {
-        ...process.env,
-        JKBOX_BASE_DIR: fixture.baseDir,
-        JKBOX_RELEASES_DIR: fixture.releasesDir,
-        JKBOX_CURRENT_LINK: fixture.currentLink,
-        JKBOX_API_URL: `${fixture.baseUrl}/releases/latest`,
-        JKBOX_HEALTH_URL: `${fixture.baseUrl}/api/health`,
-        JKBOX_HEALTH_TIMEOUT: '1',
-        JKBOX_HEALTH_INTERVAL: '0.1',
-        JKBOX_SYSTEMCTL: fixture.systemctlBin,
-        JKBOX_LOCK_FILE: path.join(fixture.root, 'update.lock'),
-        ...extraEnv,
-      },
-    });
+    const { stdout, stderr } = await execFileAsync('bash', [UPDATE_SCRIPT, ...args], { env });
     return { code: 0, stdout, stderr };
   } catch (err) {
     const e = err as { code?: number; stdout?: string; stderr?: string };
@@ -310,6 +318,96 @@ describe('os/jkbox-update.sh', () => {
     expect(res.code).not.toBe(0);
     expect(res.stderr).toContain('Tag de release inválida');
     expect(fs.realpathSync(fx.currentLink)).toBe(fs.realpathSync(path.join(fx.releasesDir, 'v0.1.0')));
+  });
+
+  it('rejects unsafe CLI --tag ../escape before building API URL', async () => {
+    const fx = await createFixture({
+      initialInstalledTag: 'v0.1.0',
+      latestTag: 'v0.2.0',
+    });
+
+    const res = await runUpdater(fx, ['--tag', '../escape'], { JKBOX_API_URL: undefined });
+
+    expect(res.code).not.toBe(0);
+    expect(res.stderr).toContain('Tag alvo inválida');
+    expect(fx.tarDownloads).toBe(0);
+    expect(fs.realpathSync(fx.currentLink)).toBe(fs.realpathSync(path.join(fx.releasesDir, 'v0.1.0')));
+  });
+
+  it('rejects unsafe JKBOX_HEALTH_URL', async () => {
+    const fx = await createFixture({
+      initialInstalledTag: 'v0.1.0',
+      latestTag: 'v0.2.0',
+    });
+
+    const res = await runUpdater(fx, [], { JKBOX_HEALTH_URL: 'http://example.com/api/health' });
+
+    expect(res.code).not.toBe(0);
+    expect(res.stderr).toContain('URL de healthcheck inválida');
+    expect(fx.tarDownloads).toBe(0);
+  });
+
+  it('cleanly rolls back --force on the same tag without leaving .bak-* or broken symlink', async () => {
+    const fx = await createFixture({ initialInstalledTag: 'v0.2.0', latestTag: 'v0.2.0' });
+    fx.healthHandler = () => ({ status: 503, body: { ok: false } });
+
+    const res = await runUpdater(fx, ['--force']);
+
+    expect(res.code).not.toBe(0);
+    expect(res.stderr).toContain('Healthcheck falhou');
+    expect(fs.realpathSync(fx.currentLink)).toBe(fs.realpathSync(path.join(fx.releasesDir, 'v0.2.0')));
+    expect(fs.readFileSync(path.join(fx.currentLink, 'server', 'dist', 'index.js'), 'utf8')).toBe('// v0.2.0\n');
+    expect(fs.readdirSync(fx.releasesDir)).toEqual(['v0.2.0']);
+
+    const logLines = fs.readFileSync(fx.systemctlLog, 'utf8').trim().split('\n');
+    expect(logLines).toHaveLength(2);
+    expect(logLines[0]).toContain(`target=${fs.realpathSync(path.join(fx.releasesDir, 'v0.2.0'))}`);
+    expect(logLines[1]).toContain(`target=${fs.realpathSync(path.join(fx.releasesDir, 'v0.2.0'))}`);
+  });
+
+  it('reads PORT from JKBOX_ENV_FILE when JKBOX_HEALTH_URL is not set in environment', async () => {
+    const fx = await createFixture({ initialInstalledTag: 'v0.1.0', latestTag: 'v0.2.0' });
+    const mockPort = new URL(fx.baseUrl).port;
+    const envFile = path.join(fx.root, 'jkbox.env');
+    fs.writeFileSync(envFile, `# custom port\nPORT=${mockPort}\n`);
+
+    const res = await runUpdater(fx, [], {
+      JKBOX_HEALTH_URL: undefined,
+      PORT: undefined,
+      JKBOX_ENV_FILE: envFile,
+    });
+
+    expect(res.code).toBe(0);
+    expect(fs.realpathSync(fx.currentLink)).toBe(fs.realpathSync(path.join(fx.releasesDir, 'v0.2.0')));
+  });
+
+  it('preserves rollback target during pruning even when JKBOX_RELEASES_DIR traverses a symlink', async () => {
+    const fx = await createFixture({ initialInstalledTag: 'v0.1.0', latestTag: 'v0.4.0' });
+    // Create older releases so JKBOX_KEEP_RELEASES=1 forces pruning, while v0.1.0 is PREV_TARGET
+    const oldDir = path.join(fx.releasesDir, 'v0.0.1');
+    fs.mkdirSync(oldDir, { recursive: true });
+    const olderDir = path.join(fx.releasesDir, 'v0.0.2');
+    fs.mkdirSync(olderDir, { recursive: true });
+
+    // Point a symlink to releasesDir so JKBOX_RELEASES_DIR is non-canonical
+    const symlinkReleasesDir = path.join(fx.root, 'releases-link');
+    fs.symlinkSync(fx.releasesDir, symlinkReleasesDir);
+
+    // Ensure v0.0.1 and v0.0.2 have older mtimes than v0.1.0
+    const past = new Date(Date.now() - 60_000);
+    fs.utimesSync(oldDir, past, past);
+    fs.utimesSync(olderDir, past, past);
+
+    const res = await runUpdater(fx, [], {
+      JKBOX_RELEASES_DIR: symlinkReleasesDir,
+      JKBOX_KEEP_RELEASES: '1',
+    });
+
+    expect(res.code).toBe(0);
+    expect(fs.existsSync(path.join(fx.releasesDir, 'v0.4.0'))).toBe(true);
+    expect(fs.existsSync(path.join(fx.releasesDir, 'v0.1.0'))).toBe(true);
+    expect(fs.existsSync(oldDir)).toBe(false);
+    expect(fs.existsSync(olderDir)).toBe(false);
   });
 });
 
