@@ -6,6 +6,8 @@ import {
   getCategoryTheme,
   getSubcategorySuggestions,
   mergeCategorySuggestions,
+  playlistTrackFromResult,
+  playlistTrackFromTrack,
   splitUncategorizedTracks,
 } from './catalog';
 
@@ -106,5 +108,44 @@ describe('catalog helpers', () => {
         cover: null,
       }),
     ).toBe('1 música · 4:10');
+  });
+
+  it('builds PlaylistPickerTrack from Track or SearchResult with trackId', () => {
+    expect(playlistTrackFromResult({ source: 'youtube', sourceId: 'abc', title: 'X', artist: 'Y' })).toBeNull();
+    expect(
+      playlistTrackFromResult({
+        source: 'local',
+        sourceId: '1',
+        title: 'Evidências',
+        artist: 'Chitãozinho',
+        trackId: 't-1',
+        thumbnail: 'https://img.test/a.jpg',
+      }),
+    ).toEqual({
+      id: 't-1',
+      title: 'Evidências',
+      artist: 'Chitãozinho',
+      thumbnail: 'https://img.test/a.jpg',
+    });
+    expect(
+      playlistTrackFromTrack({
+        id: 't-2',
+        source: 'local',
+        sourceId: '2',
+        title: 'Sina',
+        artist: 'Djavan',
+        album: null,
+        durationSec: 250,
+        thumbnail: null,
+        status: 'ready',
+        progress: 1,
+        error: null,
+      }),
+    ).toEqual({
+      id: 't-2',
+      title: 'Sina',
+      artist: 'Djavan',
+      thumbnail: null,
+    });
   });
 });

@@ -15,6 +15,7 @@ export interface AutoDjOptions {
   lastTrack?: AutoDjTrack | null;
   category?: string | null;
   subgenre?: string | null;
+  playlistTrackIds?: ReadonlySet<string> | readonly string[];
 }
 
 /**
@@ -102,6 +103,7 @@ function pickAvoidingRecent<T extends { id: string }>(
  * - `vibe` (default): 3-level cascade (same subgenre -> same genre -> safe affinity map),
  *   strictly isolating Gospel tracks in both directions.
  * - `category`: locks selection to `options.category` (and `options.subgenre` when provided).
+ * - `playlist`: locks selection to tracks inside `options.playlistTrackIds` respecting the recent window.
  * - `random`: picks uniformly across all cached tracks avoiding the recent window.
  */
 export function pickAutoDjTrack<T extends AutoDjTrack>(
@@ -117,6 +119,17 @@ export function pickAutoDjTrack<T extends AutoDjTrack>(
 
   if (mode === 'random') {
     return pickAvoidingRecent(cached, recentPlayedTrackIds, recentWindow, random);
+  }
+
+  if (mode === 'playlist') {
+    const allowedIds =
+      options.playlistTrackIds instanceof Set
+        ? options.playlistTrackIds
+        : new Set(options.playlistTrackIds ?? []);
+    if (allowedIds.size === 0) return null;
+    const playlistPool = cached.filter((t) => allowedIds.has(t.id));
+    if (playlistPool.length === 0) return null;
+    return pickAvoidingRecent(playlistPool, recentPlayedTrackIds, recentWindow, random);
   }
 
   if (mode === 'category') {

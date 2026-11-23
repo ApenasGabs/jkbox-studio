@@ -73,7 +73,7 @@ describe('lyrics service and API', () => {
 
     const db = openDb(config.dbPath);
     const version = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    expect(version).toBe(5);
+    expect(version).toBe(6);
 
     const tracks = new TrackRepository(db);
     expect(tracks.get('t-legacy')?.title).toBe('Never Gonna Give You Up');

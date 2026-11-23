@@ -220,6 +220,7 @@ describe('Jukebox Auto-DJ integration', () => {
       autoDjMode: 'category',
       autoDjCategory: 'Funk',
       autoDjSubgenre: 'Funk Mandelão',
+      autoDjPlaylistId: null,
     });
 
     const cfg = await request(app).get('/api/config').expect(200);
@@ -243,5 +244,35 @@ describe('Jukebox Auto-DJ integration', () => {
       .expect(200);
     const playingAfterDrain = jukebox.queue.state().nowPlaying!;
     expect([f1.id, f2.id]).toContain(playingAfterDrain.item.trackId);
+  });
+
+  it('locks selection to playlistTrackIds in playlist mode while respecting recent window', () => {
+    const library = [
+      { id: 'pl-1', genre: 'Sertanejo', subgenre: 'Sertanejo Raiz' },
+      { id: 'pl-2', genre: 'Funk', subgenre: 'Funk Mandelão' },
+      { id: 'other', genre: 'Rock', subgenre: 'Rock Nacional' },
+    ];
+
+    const first = pickAutoDjTrack(library, ['pl-1'], {
+      mode: 'playlist',
+      playlistTrackIds: ['pl-1', 'pl-2'],
+      recentWindow: 5,
+      random: () => 0,
+    });
+    expect(first?.id).toBe('pl-2');
+
+    // Empty playlist or no cached tracks matching playlist -> null
+    expect(
+      pickAutoDjTrack(library, [], {
+        mode: 'playlist',
+        playlistTrackIds: [],
+      }),
+    ).toBeNull();
+    expect(
+      pickAutoDjTrack(library, [], {
+        mode: 'playlist',
+        playlistTrackIds: ['not-cached'],
+      }),
+    ).toBeNull();
   });
 });

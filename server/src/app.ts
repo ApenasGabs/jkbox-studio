@@ -9,6 +9,7 @@ import type { Jukebox, SearchSource } from './services/jukebox.js';
 import { scanLibrary } from './services/library.js';
 import { LyricsError } from './services/lyrics.js';
 import { MdnsError, type MdnsService } from './services/mdns.js';
+import { PlaylistError } from './services/playlists.js';
 import { QueueError } from './services/queue.js';
 import { SpotifyError } from './services/spotify.js';
 import type { Track } from './types.js';
@@ -32,7 +33,7 @@ export const createApp = ({ config, jukebox, mdns, version = '0.1.0' }: AppDeps)
   app.set('trust proxy', true);
   app.use(express.json({ limit: '100kb' }));
 
-  const { tracks, queue, downloads, spotify, lyrics } = jukebox;
+  const { tracks, queue, downloads, spotify, lyrics, playlists } = jukebox;
   const isHost = (req: Request) => !config.hostPin || req.get('x-host-pin') === config.hostPin;
   const requireHost = (req: Request, res: Response, next: NextFunction) => {
     if (isHost(req)) return next();
@@ -59,6 +60,7 @@ export const createApp = ({ config, jukebox, mdns, version = '0.1.0' }: AppDeps)
       autoDjMode: jukebox.autoDjMode,
       autoDjCategory: jukebox.autoDjCategory,
       autoDjSubgenre: jukebox.autoDjSubgenre,
+      autoDjPlaylistId: jukebox.autoDjPlaylistId,
       playbackOutput: jukebox.playbackOutput,
       spotify: spotify.status(),
       mdns: mdns?.status() ?? null,
@@ -101,18 +103,28 @@ export const createApp = ({ config, jukebox, mdns, version = '0.1.0' }: AppDeps)
     const rawMode = body.mode ?? body.autoDjMode;
     const rawCategory = body.category ?? body.autoDjCategory;
     const rawSubgenre = body.subgenre ?? body.autoDjSubgenre;
+    const rawPlaylistId = body.playlistId ?? body.autoDjPlaylistId;
 
     if (rawEnabled !== undefined && typeof rawEnabled !== 'boolean') {
       return void res.status(400).json({ error: 'enabled deve ser booleano' });
     }
-    if (rawMode !== undefined && rawMode !== 'vibe' && rawMode !== 'category' && rawMode !== 'random') {
-      return void res.status(400).json({ error: 'mode deve ser vibe, category ou random' });
+    if (
+      rawMode !== undefined &&
+      rawMode !== 'vibe' &&
+      rawMode !== 'category' &&
+      rawMode !== 'playlist' &&
+      rawMode !== 'random'
+    ) {
+      return void res.status(400).json({ error: 'mode deve ser vibe, category, playlist ou random' });
     }
     if (rawCategory !== undefined && rawCategory !== null && typeof rawCategory !== 'string') {
       return void res.status(400).json({ error: 'category deve ser texto ou null' });
     }
     if (rawSubgenre !== undefined && rawSubgenre !== null && typeof rawSubgenre !== 'string') {
       return void res.status(400).json({ error: 'subgenre deve ser texto ou null' });
+    }
+    if (rawPlaylistId !== undefined && rawPlaylistId !== null && typeof rawPlaylistId !== 'string') {
+      return void res.status(400).json({ error: 'playlistId deve ser texto ou null' });
     }
 
     const nextMode = rawMode ?? jukebox.autoDjMode;
@@ -130,9 +142,23 @@ export const createApp = ({ config, jukebox, mdns, version = '0.1.0' }: AppDeps)
             ? null
             : jukebox.autoDjSubgenre;
     const shouldUpdateSubgenre = rawSubgenre !== undefined || categoryChanged || !nextCategory;
+    const nextPlaylistId =
+      rawPlaylistId !== undefined
+        ? rawPlaylistId === null
+          ? null
+          : rawPlaylistId.trim() || null
+        : jukebox.autoDjPlaylistId;
 
     if (nextMode === 'category' && !nextCategory) {
       return void res.status(400).json({ error: 'Selecione uma categoria para travar o Auto-DJ' });
+    }
+    if (nextMode === 'playlist') {
+      if (!nextPlaylistId) {
+        return void res.status(400).json({ error: 'Selecione uma playlist interna para travar o Auto-DJ' });
+      }
+      if (!playlists?.get(nextPlaylistId)) {
+        return void res.status(404).json({ error: 'Playlist não encontrada' });
+      }
     }
 
     jukebox.setAutoDjConfig({
@@ -140,6 +166,7 @@ export const createApp = ({ config, jukebox, mdns, version = '0.1.0' }: AppDeps)
       ...(rawMode !== undefined ? { mode: rawMode } : {}),
       ...(rawCategory !== undefined ? { category: nextCategory } : {}),
       ...(shouldUpdateSubgenre ? { subgenre: nextSubgenre } : {}),
+      ...(rawPlaylistId !== undefined ? { playlistId: nextPlaylistId } : {}),
     });
 
     res.json({
@@ -147,6 +174,7 @@ export const createApp = ({ config, jukebox, mdns, version = '0.1.0' }: AppDeps)
       autoDjMode: jukebox.autoDjMode,
       autoDjCategory: jukebox.autoDjCategory,
       autoDjSubgenre: jukebox.autoDjSubgenre,
+      autoDjPlaylistId: jukebox.autoDjPlaylistId,
     });
   });
 
@@ -228,6 +256,106 @@ export const createApp = ({ config, jukebox, mdns, version = '0.1.0' }: AppDeps)
     const artist = tracks.getArtist(str(req.params.name));
     if (!artist) return void res.status(404).json({ error: 'Artista não encontrado' });
     res.json({ ...artist, tracks: toResults(artist.tracks) });
+  });
+
+  // --- Internal Playlists (#28) -------------------------------------------
+  api.get('/playlists', (req, res) => {
+    if (!playlists) return void res.json({ playlists: [] });
+    const trackId = str(req.query.trackId).trim() || undefined;
+    res.json({ playlists: playlists.list(trackId) });
+  });
+
+  api.get('/playlists/:id', (req, res) => {
+    if (!playlists) return void res.status(404).json({ error: 'Playlist não encontrada' });
+    const detail = playlists.getDetail(str(req.params.id));
+    if (!detail) return void res.status(404).json({ error: 'Playlist não encontrada' });
+    res.json({
+      ...detail.summary,
+      tracks: detail.items.map((item) => ({
+        ...jukebox.trackToResult(item.track),
+        position: item.position,
+        addedAt: item.addedAt,
+      })),
+    });
+  });
+
+  api.post('/playlists', requireHost, (req, res, next) => {
+    try {
+      if (!playlists) throw new PlaylistError('Serviço de playlists indisponível', 500);
+      const { name, description } = req.body ?? {};
+      res.status(201).json(playlists.create({ name, description }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  api.patch('/playlists/:id', requireHost, (req, res, next) => {
+    try {
+      if (!playlists) throw new PlaylistError('Serviço de playlists indisponível', 500);
+      const { name, description } = req.body ?? {};
+      res.json(playlists.update(str(req.params.id), { name, description }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  api.delete('/playlists/:id', requireHost, (req, res, next) => {
+    try {
+      if (!playlists) throw new PlaylistError('Serviço de playlists indisponível', 500);
+      const id = str(req.params.id).trim();
+      if (!playlists.delete(id)) return void res.status(404).json({ error: 'Playlist não encontrada' });
+      jukebox.clearAutoDjPlaylistIfMatches(id);
+      res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  api.post('/playlists/:id/tracks', requireHost, (req, res, next) => {
+    try {
+      if (!playlists) throw new PlaylistError('Serviço de playlists indisponível', 500);
+      const outcome = playlists.addTrack(str(req.params.id), req.body?.trackId);
+      res.status(outcome.duplicate ? 200 : 201).json(outcome);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  api.delete('/playlists/:id/tracks/:trackId', requireHost, (req, res, next) => {
+    try {
+      if (!playlists) throw new PlaylistError('Serviço de playlists indisponível', 500);
+      playlists.removeTrack(str(req.params.id), str(req.params.trackId));
+      res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  api.post('/playlists/:id/enqueue', (req, res, next) => {
+    try {
+      const body = req.body ?? {};
+      const shuffle = body.shuffle;
+      if (shuffle !== undefined && typeof shuffle !== 'boolean') {
+        return void res.status(400).json({ error: 'shuffle deve ser booleano' });
+      }
+      const rawCount = body.count ?? body.limit;
+      let count: number | undefined;
+      if (rawCount !== undefined && rawCount !== null) {
+        if (typeof rawCount !== 'number' || !Number.isInteger(rawCount) || rawCount < 1 || rawCount > 200) {
+          return void res.status(400).json({ error: 'count deve ser um inteiro entre 1 e 200' });
+        }
+        count = rawCount;
+      }
+      const outcome = jukebox.enqueuePlaylist(str(req.params.id), {
+        requesterId: str(body.clientId),
+        requesterName: str(body.name),
+        shuffle: Boolean(shuffle),
+        count,
+      });
+      res.json(outcome);
+    } catch (err) {
+      next(err);
+    }
   });
 
   api.patch('/tracks/:id/metadata', requireHost, (req, res) => {
@@ -500,7 +628,7 @@ export const createApp = ({ config, jukebox, mdns, version = '0.1.0' }: AppDeps)
     if (err instanceof SpotifyError) {
       return void res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     }
-    if (err instanceof QueueError || err instanceof LyricsError) {
+    if (err instanceof QueueError || err instanceof LyricsError || err instanceof PlaylistError) {
       return void res.status(err.status).json({ error: err.message });
     }
     console.error(err);

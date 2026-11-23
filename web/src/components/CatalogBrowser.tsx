@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import {
   type CatalogRoute,
@@ -9,6 +9,8 @@ import {
   formatAlbumMeta,
   formatTrackCount,
   getCategoryTheme,
+  type PlaylistPickerTrack,
+  playlistTrackFromResult,
   splitUncategorizedTracks,
 } from '../lib/catalog';
 import { formatTime } from '../lib/format';
@@ -19,6 +21,8 @@ import type {
   CatalogArtistDetail,
   CatalogCategory,
   CatalogSubcategory,
+  PlaylistDetail,
+  PlaylistSummary,
   SearchResult,
 } from '../lib/types';
 import { Cover } from './Cover';
@@ -26,6 +30,7 @@ import { SourceBadge } from './SourceBadge';
 
 const SUB_TABS: { id: CatalogTab; label: string }[] = [
   { id: 'categories', label: 'Categorias' },
+  { id: 'playlists', label: 'Playlists' },
   { id: 'albums', label: 'Álbuns' },
   { id: 'artists', label: 'Artistas' },
   { id: 'all', label: 'Todas' },
@@ -43,10 +48,15 @@ interface Props {
   addingKey: string | null;
   onAdd: (result: SearchResult) => void;
   onAddAlbum?: (results: SearchResult[], albumName: string) => Promise<void>;
+  onAddPlaylist?: (playlist: PlaylistSummary, shuffle: boolean) => Promise<void>;
+  onAddToPlaylist?: (track: PlaylistPickerTrack) => void;
   canEditMetadata: boolean;
   canEnqueueAlbum?: boolean;
   onEditTrack: (track: EditableTrack) => void;
   onCategoriesLoaded?: (categories: CatalogCategory[]) => void;
+  onPlaylistsLoaded?: (playlists: PlaylistSummary[]) => void;
+  onPlaylistsChanged?: () => void;
+  onToast?: (message: string, error?: boolean) => void;
 }
 
 export function CatalogBrowser({
@@ -61,10 +71,15 @@ export function CatalogBrowser({
   addingKey,
   onAdd,
   onAddAlbum,
+  onAddPlaylist,
+  onAddToPlaylist,
   canEditMetadata,
   canEnqueueAlbum = false,
   onEditTrack,
   onCategoriesLoaded,
+  onPlaylistsLoaded,
+  onPlaylistsChanged,
+  onToast,
 }: Props) {
   const route = history[history.length - 1] ?? { kind: 'root' };
   const normalizedFilter = filterQuery.trim().toLowerCase();
@@ -72,8 +87,19 @@ export function CatalogBrowser({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [addingAlbum, setAddingAlbum] = useState(false);
+  const [addingPlaylistMode, setAddingPlaylistMode] = useState<'order' | 'shuffle' | null>(null);
+  const [creatingPlaylistOpen, setCreatingPlaylistOpen] = useState(false);
+  const [newPlaylistName, setNewPlaylistName] = useState('');
+  const [newPlaylistDesc, setNewPlaylistDesc] = useState('');
+  const [playlistBusy, setPlaylistBusy] = useState(false);
+  const [editingPlaylistOpen, setEditingPlaylistOpen] = useState(false);
+  const [editPlaylistName, setEditPlaylistName] = useState('');
+  const [editPlaylistDesc, setEditPlaylistDesc] = useState('');
+  const [confirmDeletePlaylist, setConfirmDeletePlaylist] = useState(false);
+  const [removingTrackId, setRemovingTrackId] = useState<string | null>(null);
 
   const [categories, setCategories] = useState<CatalogCategory[]>([]);
+  const [playlists, setPlaylists] = useState<PlaylistSummary[]>([]);
   const [uncategorized, setUncategorized] = useState<{ count: number; cover: string | null; tracks: SearchResult[] }>({
     count: 0,
     cover: null,
@@ -85,6 +111,7 @@ export function CatalogBrowser({
   const [detailTracks, setDetailTracks] = useState<SearchResult[]>([]);
   const [detailSubcategories, setDetailSubcategories] = useState<CatalogSubcategory[]>([]);
   const [artistDetail, setArtistDetail] = useState<CatalogArtistDetail | null>(null);
+  const [playlistDetail, setPlaylistDetail] = useState<PlaylistDetail | null>(null);
   const prevCategoryKeyRef = useRef<string | null>(null);
 
   const pushRoute = (next: CatalogRoute) => onHistoryChange([...history, next]);
@@ -98,14 +125,16 @@ export function CatalogBrowser({
   };
 
   useEffect(() => {
-    const controller = new AbortController();
-    const { signal } = controller;
     const categoryKey = route.kind === 'category' ? (route.uncategorized ? '__uncategorized__' : route.name) : null;
     if (prevCategoryKeyRef.current !== categoryKey) {
       prevCategoryKeyRef.current = categoryKey;
       setDetailSubcategories([]);
       if (route.kind === 'category') setDetailTracks([]);
     }
+    if (route.kind === 'root' && (tab === 'albums' || tab === 'all')) return;
+
+    const controller = new AbortController();
+    const { signal } = controller;
 
     const load = async () => {
       setLoading(true);
@@ -137,19 +166,55 @@ export function CatalogBrowser({
           return;
         }
 
-        // Root sub-tabs
+        if (route.kind === 'playlist') {
+          setPlaylistDetail(null);
+          setEditingPlaylistOpen(false);
+          setConfirmDeletePlaylist(false);
+          const res = await api.playlist(route.id, signal);
+          setPlaylistDetail(res);
+          return;
+        }
+
+        // Root sub-tabs with local filtering
         if (tab === 'categories') {
           const [catRes, libRes] = await Promise.all([api.catalogCategories(signal), api.library('', signal)]);
           const uncat = splitUncategorizedTracks(libRes.results);
           setCategories(catRes.categories);
           setUncategorized({ count: uncat.tracks.length, cover: uncat.cover, tracks: uncat.tracks });
           onCategoriesLoaded?.(catRes.categories);
-        } else if (tab === 'albums') {
-          const res = await api.catalogAlbums({ q: filterQuery }, signal);
-          setAlbums(res.albums);
+        } else if (tab === 'playlists') {
+          const res = await api.playlists(undefined, signal);
+          setPlaylists(res.playlists);
+          onPlaylistsLoaded?.(res.playlists);
         } else if (tab === 'artists') {
           const res = await api.catalogArtists(signal);
           setArtists(res.artists);
+        }
+      } catch (err) {
+        if ((err as Error).name !== 'AbortError') {
+          setError((err as Error).message);
+        }
+      } finally {
+        if (!signal.aborted) setLoading(false);
+      }
+    };
+
+    void load();
+    return () => controller.abort();
+  }, [route, tab, reloadKey]);
+
+  useEffect(() => {
+    if (route.kind !== 'root' || (tab !== 'albums' && tab !== 'all')) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+
+    const load = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        if (tab === 'albums') {
+          const res = await api.catalogAlbums({ q: filterQuery }, signal);
+          setAlbums(res.albums);
         } else {
           const q = karaoke ? applyKaraokeFilter(filterQuery, true) : filterQuery;
           const res = await api.library(q, signal);
@@ -166,7 +231,7 @@ export function CatalogBrowser({
 
     void load();
     return () => controller.abort();
-  }, [route, tab, filterQuery, karaoke, reloadKey]);
+  }, [route.kind, tab, filterQuery, karaoke, reloadKey]);
 
   const filterTracksLocally = (items: SearchResult[]) => {
     if (!normalizedFilter) return items;
@@ -177,10 +242,105 @@ export function CatalogBrowser({
     );
   };
 
-  const renderTrackRow = (result: SearchResult, index?: number, showTrackNumber = false) => {
+  const handleCreatePlaylist = async (e: FormEvent) => {
+    e.preventDefault();
+    const name = newPlaylistName.trim();
+    if (!name) {
+      onToast?.('Informe o nome da playlist', true);
+      return;
+    }
+    setPlaylistBusy(true);
+    try {
+      const created = await api.createPlaylist({ name, description: newPlaylistDesc.trim() || null });
+      setNewPlaylistName('');
+      setNewPlaylistDesc('');
+      setCreatingPlaylistOpen(false);
+      onToast?.(`Playlist "${created.name}" criada`);
+      onPlaylistsChanged?.();
+      pushRoute({ kind: 'playlist', id: created.id, name: created.name });
+    } catch (err) {
+      onToast?.((err as Error).message, true);
+    } finally {
+      setPlaylistBusy(false);
+    }
+  };
+
+  const handleSavePlaylistEdit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!playlistDetail) return;
+    const name = editPlaylistName.trim();
+    if (!name) {
+      onToast?.('Informe o nome da playlist', true);
+      return;
+    }
+    setPlaylistBusy(true);
+    try {
+      const updated = await api.updatePlaylist(playlistDetail.id, {
+        name,
+        description: editPlaylistDesc.trim() || null,
+      });
+      setPlaylistDetail((prev) => (prev ? { ...prev, ...updated } : prev));
+      setEditingPlaylistOpen(false);
+      onToast?.(`Playlist "${updated.name}" atualizada`);
+      onPlaylistsChanged?.();
+    } catch (err) {
+      onToast?.((err as Error).message, true);
+    } finally {
+      setPlaylistBusy(false);
+    }
+  };
+
+  const handleDeletePlaylist = async () => {
+    if (!playlistDetail) return;
+    setPlaylistBusy(true);
+    try {
+      await api.deletePlaylist(playlistDetail.id);
+      onToast?.(`Playlist "${playlistDetail.name}" excluída`);
+      setConfirmDeletePlaylist(false);
+      onPlaylistsChanged?.();
+      goBack();
+    } catch (err) {
+      onToast?.((err as Error).message, true);
+    } finally {
+      setPlaylistBusy(false);
+    }
+  };
+
+  const handleRemoveFromPlaylist = async (playlistId: string, result: SearchResult) => {
+    if (!result.trackId) return;
+    setRemovingTrackId(result.trackId);
+    try {
+      await api.removeTrackFromPlaylist(playlistId, result.trackId);
+      setPlaylistDetail((prev) => {
+        if (!prev || prev.id !== playlistId) return prev;
+        const nextTracks = prev.tracks.filter((t) => t.trackId !== result.trackId);
+        return {
+          ...prev,
+          trackCount: nextTracks.length,
+          cover: nextTracks.find((t) => Boolean(t.thumbnail))?.thumbnail ?? null,
+          tracks: nextTracks,
+        };
+      });
+      onToast?.(`"${result.title}" removida da playlist`);
+      onPlaylistsChanged?.();
+    } catch (err) {
+      onToast?.((err as Error).message, true);
+    } finally {
+      setRemovingTrackId(null);
+    }
+  };
+
+  const renderTrackRow = (result: SearchResult, index?: number, showTrackNumber = false, removePlaylistId?: string) => {
     const key = `${result.source}:${result.sourceId}`;
     const editable = canEditMetadata ? editableFromResult(result) : null;
-    const orderNum = showTrackNumber ? (result.trackNumber ?? (index != null ? index + 1 : null)) : null;
+    const playlistTrack = canEditMetadata && onAddToPlaylist ? playlistTrackFromResult(result) : null;
+    const orderNum = showTrackNumber
+      ? removePlaylistId
+        ? index != null
+          ? index + 1
+          : null
+        : (result.trackNumber ?? (index != null ? index + 1 : null))
+      : null;
 
     return (
       <li key={key} className="flex items-center gap-2.5 rounded-xl bg-white/5 p-2 sm:gap-3">
@@ -220,9 +380,33 @@ export function CatalogBrowser({
               onClick={() => onEditTrack(editable)}
               aria-label={`Editar metadados de ${result.title}`}
               title="Editar categoria, álbum ou metadados"
-              className="rounded-xl border border-white/10 bg-white/5 px-2.5 py-2 text-xs font-semibold text-zinc-300 transition hover:bg-white/15 hover:text-white"
+              className="rounded-xl border border-white/10 bg-white/5 px-2 py-2 text-xs font-semibold text-zinc-300 transition hover:bg-white/15 hover:text-white"
             >
               ✎
+            </button>
+          )}
+          {playlistTrack && !removePlaylistId && (
+            <button
+              type="button"
+              onClick={() => onAddToPlaylist?.(playlistTrack)}
+              aria-label={`Adicionar ${result.title} à playlist`}
+              title="Adicionar à playlist"
+              className="rounded-xl border border-white/10 bg-white/5 px-2.5 py-2 text-xs font-semibold text-zinc-200 transition hover:bg-white/15 hover:text-white"
+            >
+              <span className="sm:hidden">+ PL</span>
+              <span className="hidden sm:inline">+ Playlist</span>
+            </button>
+          )}
+          {removePlaylistId && canEditMetadata && result.trackId && (
+            <button
+              type="button"
+              disabled={removingTrackId === result.trackId}
+              onClick={() => void handleRemoveFromPlaylist(removePlaylistId, result)}
+              aria-label={`Remover ${result.title} da playlist`}
+              title="Remover desta playlist"
+              className="rounded-xl border border-red-400/25 bg-red-500/10 px-2.5 py-2 text-xs font-semibold text-red-200 transition hover:bg-red-500/25 disabled:opacity-50"
+            >
+              {removingTrackId === result.trackId ? '…' : '✕'}
             </button>
           )}
           <button
@@ -260,6 +444,13 @@ export function CatalogBrowser({
   const visibleCategories = normalizedFilter
     ? categories.filter((c) => c.name.toLowerCase().includes(normalizedFilter))
     : categories;
+  const visiblePlaylists = normalizedFilter
+    ? playlists.filter(
+        (p) =>
+          p.name.toLowerCase().includes(normalizedFilter) ||
+          (p.description?.toLowerCase().includes(normalizedFilter) ?? false),
+      )
+    : playlists;
   const showUncategorized =
     uncategorized.count > 0 && (!normalizedFilter || 'sem categoria'.includes(normalizedFilter));
 
@@ -287,7 +478,7 @@ export function CatalogBrowser({
       <div
         role="tablist"
         aria-label="Navegação do acervo"
-        className="grid grid-cols-4 gap-1 rounded-xl border border-white/10 bg-white/5 p-1"
+        className="grid grid-cols-3 gap-1 rounded-xl border border-white/10 bg-white/5 p-1 sm:grid-cols-5"
       >
         {SUB_TABS.map((item) => {
           const active = tab === item.id;
@@ -544,6 +735,303 @@ export function CatalogBrowser({
                 </ul>
               </div>
             </>
+          )}
+        </div>
+      ) : route.kind === 'playlist' ? (
+        <div className="flex flex-col gap-3">
+          {renderBreadcrumb(playlistDetail?.name ?? route.name ?? 'Playlist', 'Acervo · Playlists')}
+          {loading ? (
+            <p className="py-8 text-center text-sm text-zinc-500">Carregando playlist…</p>
+          ) : !playlistDetail ? (
+            <div className="glass flex flex-col items-center gap-2 px-5 py-8 text-center">
+              <p className="font-semibold">Playlist não encontrada</p>
+              <button
+                type="button"
+                onClick={goBack}
+                className="rounded-xl bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20"
+              >
+                ← Voltar às playlists
+              </button>
+            </div>
+          ) : (
+            (() => {
+              const totalSec = playlistDetail.tracks.reduce((sum, t) => sum + (t.durationSec ?? 0), 0);
+              const indexedTracks = playlistDetail.tracks.map((item, idx) => ({ item, playlistIndex: idx }));
+              const filteredSet = new Set(filterTracksLocally(playlistDetail.tracks));
+              const filtered = indexedTracks.filter(({ item }) => filteredSet.has(item));
+              const triggerPlaylistEnqueue = async (shuffle: boolean) => {
+                if (!onAddPlaylist) return;
+                setAddingPlaylistMode(shuffle ? 'shuffle' : 'order');
+                try {
+                  await onAddPlaylist(playlistDetail, shuffle);
+                } finally {
+                  setAddingPlaylistMode(null);
+                }
+              };
+
+              return (
+                <>
+                  <div className="glass flex flex-col gap-3 p-3 sm:p-4">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="flex min-w-0 items-center gap-3">
+                        <Cover
+                          src={playlistDetail.cover}
+                          alt={playlistDetail.name}
+                          className="h-16 w-16 shrink-0 rounded-2xl shadow-lg sm:h-20 sm:w-20"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <h4 className="truncate text-lg font-bold leading-tight">{playlistDetail.name}</h4>
+                          {playlistDetail.description && (
+                            <p className="mt-0.5 line-clamp-2 text-xs text-zinc-300">{playlistDetail.description}</p>
+                          )}
+                          <p className="mt-1 text-xs text-zinc-400">
+                            {formatTrackCount(playlistDetail.tracks.length)}
+                            {totalSec > 0 ? ` · ${formatTime(totalSec)}` : ''}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {onAddPlaylist && playlistDetail.tracks.length > 0 && (
+                          <>
+                            <button
+                              type="button"
+                              disabled={addingPlaylistMode !== null}
+                              onClick={() => void triggerPlaylistEnqueue(false)}
+                              className="rounded-xl bg-accent px-3 py-2 text-xs font-semibold text-white transition hover:brightness-110 disabled:opacity-50"
+                            >
+                              {addingPlaylistMode === 'order'
+                                ? 'Enfileirando…'
+                                : `▶ Enfileirar (${playlistDetail.tracks.length})`}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={addingPlaylistMode !== null}
+                              onClick={() => void triggerPlaylistEnqueue(true)}
+                              className="rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-xs font-semibold text-white transition hover:bg-white/20 disabled:opacity-50"
+                            >
+                              {addingPlaylistMode === 'shuffle' ? 'Embaralhando…' : '🔀 Embaralhar'}
+                            </button>
+                          </>
+                        )}
+                        {canEditMetadata && !editingPlaylistOpen && !confirmDeletePlaylist && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditPlaylistName(playlistDetail.name);
+                                setEditPlaylistDesc(playlistDetail.description ?? '');
+                                setEditingPlaylistOpen(true);
+                              }}
+                              aria-label="Editar playlist"
+                              className="rounded-xl border border-white/10 bg-white/5 px-2.5 py-2 text-xs font-semibold text-zinc-200 hover:bg-white/15"
+                            >
+                              ✎
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeletePlaylist(true)}
+                              aria-label="Excluir playlist"
+                              className="rounded-xl border border-red-400/25 bg-red-500/10 px-2.5 py-2 text-xs font-semibold text-red-200 hover:bg-red-500/25"
+                            >
+                              🗑
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    {canEditMetadata && editingPlaylistOpen && (
+                      <form
+                        onSubmit={(e) => void handleSavePlaylistEdit(e)}
+                        className="flex flex-col gap-2 border-t border-white/10 pt-3"
+                      >
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                          <input
+                            value={editPlaylistName}
+                            onChange={(e) => setEditPlaylistName(e.target.value)}
+                            maxLength={80}
+                            placeholder="Nome da playlist"
+                            className="rounded-xl bg-white/10 px-3 py-2 text-xs text-white outline-none focus:ring-2 focus:ring-accent"
+                          />
+                          <input
+                            value={editPlaylistDesc}
+                            onChange={(e) => setEditPlaylistDesc(e.target.value)}
+                            maxLength={300}
+                            placeholder="Descrição (opcional)"
+                            className="rounded-xl bg-white/10 px-3 py-2 text-xs text-white outline-none focus:ring-2 focus:ring-accent"
+                          />
+                        </div>
+                        <div className="flex justify-end gap-2">
+                          <button
+                            type="button"
+                            disabled={playlistBusy}
+                            onClick={() => setEditingPlaylistOpen(false)}
+                            className="rounded-xl bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20"
+                          >
+                            Cancelar
+                          </button>
+                          <button
+                            type="submit"
+                            disabled={playlistBusy}
+                            className="rounded-xl bg-accent px-3 py-1.5 text-xs font-semibold text-white hover:brightness-110 disabled:opacity-50"
+                          >
+                            {playlistBusy ? 'Salvando…' : 'Salvar'}
+                          </button>
+                        </div>
+                      </form>
+                    )}
+
+                    {canEditMetadata && confirmDeletePlaylist && (
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-red-400/20 pt-3">
+                        <span className="text-xs text-red-200">
+                          Excluir a playlist <strong>{playlistDetail.name}</strong>? As músicas continuam no acervo.
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            disabled={playlistBusy}
+                            onClick={() => setConfirmDeletePlaylist(false)}
+                            className="rounded-xl bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20"
+                          >
+                            Cancelar
+                          </button>
+                          <button
+                            type="button"
+                            disabled={playlistBusy}
+                            onClick={() => void handleDeletePlaylist()}
+                            className="rounded-xl bg-red-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-400 disabled:opacity-50"
+                          >
+                            {playlistBusy ? 'Excluindo…' : 'Confirmar exclusão'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {filtered.length === 0 ? (
+                    <div className="glass flex flex-col items-center gap-2 px-5 py-8 text-center">
+                      <p className="font-semibold">
+                        {playlistDetail.tracks.length === 0
+                          ? 'Esta playlist ainda não tem músicas'
+                          : 'Nenhuma música desta playlist combina com o filtro'}
+                      </p>
+                      <p className="text-xs text-zinc-400">
+                        {playlistDetail.tracks.length === 0
+                          ? 'Use o botão "+ Playlist" nas músicas do acervo ou na faixa tocando agora para preencher.'
+                          : 'Limpe o filtro acima para ver todas as faixas.'}
+                      </p>
+                    </div>
+                  ) : (
+                    <ol className="flex flex-col gap-2">
+                      {filtered.map(({ item, playlistIndex }) =>
+                        renderTrackRow(item, playlistIndex, true, playlistDetail.id),
+                      )}
+                    </ol>
+                  )}
+                </>
+              );
+            })()
+          )}
+        </div>
+      ) : tab === 'playlists' ? (
+        <div className="flex flex-col gap-3">
+          {canEditMetadata && (
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs text-zinc-400">
+                  Misture músicas de estilos diferentes em listas temáticas como Churrasco, Festa ou Esquenta.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setCreatingPlaylistOpen((v) => !v)}
+                  className="shrink-0 rounded-xl bg-accent px-3 py-1.5 text-xs font-semibold text-white transition hover:brightness-110"
+                >
+                  {creatingPlaylistOpen ? 'Cancelar' : '+ Nova playlist'}
+                </button>
+              </div>
+              {creatingPlaylistOpen && (
+                <form
+                  onSubmit={(e) => void handleCreatePlaylist(e)}
+                  className="glass flex flex-col gap-2 p-3"
+                >
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <input
+                      value={newPlaylistName}
+                      onChange={(e) => setNewPlaylistName(e.target.value)}
+                      maxLength={80}
+                      placeholder="Nome (ex.: Churrasco, Festa)"
+                      className="rounded-xl bg-white/10 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-accent"
+                    />
+                    <input
+                      value={newPlaylistDesc}
+                      onChange={(e) => setNewPlaylistDesc(e.target.value)}
+                      maxLength={300}
+                      placeholder="Descrição opcional"
+                      className="rounded-xl bg-white/10 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-accent"
+                    />
+                  </div>
+                  <div className="flex justify-end">
+                    <button
+                      type="submit"
+                      disabled={playlistBusy}
+                      className="rounded-xl bg-accent px-4 py-2 text-xs font-semibold text-white hover:brightness-110 disabled:opacity-50"
+                    >
+                      {playlistBusy ? 'Criando…' : 'Criar playlist'}
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+          )}
+
+          {loading && playlists.length === 0 ? (
+            <p className="py-8 text-center text-sm text-zinc-500">Carregando playlists…</p>
+          ) : visiblePlaylists.length === 0 ? (
+            <div className="glass flex flex-col items-center gap-2 px-6 py-10 text-center">
+              <span className="text-3xl">🎧</span>
+              <p className="font-semibold">
+                {normalizedFilter ? 'Nenhuma playlist combina com a busca' : 'Nenhuma playlist interna criada ainda'}
+              </p>
+              <p className="text-xs text-zinc-400">
+                {normalizedFilter
+                  ? 'Tente outro termo ou limpe o filtro acima.'
+                  : canEditMetadata
+                    ? 'Crie playlists temáticas acima ou usando o botão "+ Playlist" em qualquer faixa.'
+                    : 'Peça ao Host para montar playlists temáticas para a festa.'}
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+              {visiblePlaylists.map((pl) => {
+                const theme = getCategoryTheme(pl.name);
+                return (
+                  <button
+                    key={pl.id}
+                    type="button"
+                    onClick={() => pushRoute({ kind: 'playlist', id: pl.id, name: pl.name })}
+                    className={`group relative flex min-h-28 flex-col justify-between overflow-hidden rounded-2xl border bg-gradient-to-br p-3.5 text-left shadow-lg transition hover:-translate-y-0.5 ${theme.gradient} ${theme.border}`}
+                  >
+                    <div className="relative z-10 flex flex-col gap-1 pr-6">
+                      <span className="line-clamp-2 text-base font-bold leading-snug text-white">{pl.name}</span>
+                      <span className="text-xs text-white/80">{formatTrackCount(pl.trackCount)}</span>
+                    </div>
+                    {pl.description && (
+                      <p className="relative z-10 mt-2 line-clamp-2 pr-8 text-[11px] text-white/75">{pl.description}</p>
+                    )}
+                    {pl.cover && (
+                      <img
+                        src={pl.cover}
+                        alt=""
+                        aria-hidden="true"
+                        loading="lazy"
+                        referrerPolicy="no-referrer"
+                        className="pointer-events-none absolute -bottom-2 -right-2 h-14 w-14 rotate-12 rounded-lg object-cover opacity-80 shadow-xl transition duration-300 group-hover:scale-105"
+                      />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
           )}
         </div>
       ) : tab === 'categories' ? (

@@ -9,6 +9,9 @@ import type {
   JukeboxState,
   MdnsStatus,
   PlaybackOutput,
+  PlaylistDetail,
+  PlaylistEnqueueResponse,
+  PlaylistSummary,
   QueueEntry,
   SearchResult,
   SpotifyDevice,
@@ -108,6 +111,37 @@ export const api = {
     request<{ artists: CatalogArtist[] }>('/api/catalog/artists', { signal }),
   catalogArtist: (name: string, signal?: AbortSignal) =>
     request<CatalogArtistDetail>(`/api/catalog/artists/${encodeURIComponent(name)}`, { signal }),
+  playlists: (trackId?: string, signal?: AbortSignal) => {
+    const qs = trackId?.trim() ? `?${new URLSearchParams({ trackId: trackId.trim() })}` : '';
+    return request<{ playlists: PlaylistSummary[] }>(`/api/playlists${qs}`, { signal });
+  },
+  playlist: (id: string, signal?: AbortSignal) =>
+    request<PlaylistDetail>(`/api/playlists/${encodeURIComponent(id)}`, { signal }),
+  createPlaylist: (payload: { name: string; description?: string | null }) =>
+    post<PlaylistSummary>('/api/playlists', payload),
+  updatePlaylist: (id: string, payload: { name?: string; description?: string | null }) =>
+    request<PlaylistSummary>(`/api/playlists/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+  deletePlaylist: (id: string) =>
+    request<void>(`/api/playlists/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  addTrackToPlaylist: (playlistId: string, trackId: string) =>
+    post<{ added: boolean; duplicate: boolean; playlist: PlaylistSummary }>(
+      `/api/playlists/${encodeURIComponent(playlistId)}/tracks`,
+      { trackId },
+    ),
+  removeTrackFromPlaylist: (playlistId: string, trackId: string) =>
+    request<void>(`/api/playlists/${encodeURIComponent(playlistId)}/tracks/${encodeURIComponent(trackId)}`, {
+      method: 'DELETE',
+    }),
+  enqueuePlaylist: (playlistId: string, options?: { shuffle?: boolean; count?: number }) =>
+    post<PlaylistEnqueueResponse>(`/api/playlists/${encodeURIComponent(playlistId)}/enqueue`, {
+      clientId: getClientId(),
+      name: getName(),
+      ...(options?.shuffle !== undefined ? { shuffle: options.shuffle } : {}),
+      ...(options?.count !== undefined ? { count: options.count } : {}),
+    }),
   updateTrackMetadata: (trackId: string, patch: TrackMetadataPatch) =>
     request<Track>(`/api/tracks/${encodeURIComponent(trackId)}/metadata`, {
       method: 'PATCH',
@@ -146,12 +180,14 @@ export const api = {
     mode?: AutoDjMode;
     category?: string | null;
     subgenre?: string | null;
+    playlistId?: string | null;
   }) =>
     post<{
       autoDjEnabled: boolean;
       autoDjMode: AutoDjMode;
       autoDjCategory: string | null;
       autoDjSubgenre: string | null;
+      autoDjPlaylistId: string | null;
     }>('/api/config/autodj', settings),
   rescanLibrary: () => post<{ added: number }>('/api/library/rescan'),
   autocategorizeLibrary: () =>

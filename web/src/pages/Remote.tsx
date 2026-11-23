@@ -1,9 +1,11 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
 import { CatalogBrowser } from '../components/CatalogBrowser';
 import { Cover } from '../components/Cover';
 import { GenreBadges } from '../components/GenreBadges';
 import { LyricsView } from '../components/LyricsView';
 import { MdnsHostnamePanel } from '../components/MdnsHostnamePanel';
+import { PlaylistManagerPanel } from '../components/PlaylistManagerPanel';
 import { QueueList } from '../components/QueueList';
 import { SourceBadge } from '../components/SourceBadge';
 import { SpotifyConnectSelector } from '../components/SpotifyConnectSelector';
@@ -18,11 +20,22 @@ import {
   editableFromResult,
   editableFromTrack,
   mergeCategorySuggestions,
+  type PlaylistPickerTrack,
+  playlistTrackFromResult,
+  playlistTrackFromTrack,
 } from '../lib/catalog';
 import { formatTime } from '../lib/format';
 import { applyKaraokeFilter } from '../lib/karaoke';
 import { describeSpotifyConnectError, formatSpotifyOutputBadge } from '../lib/spotifyConnect';
-import { type AppConfig, type QueueEntry, REACTION_EMOJIS, type ReactionEmoji, type SearchResult, type Track } from '../lib/types';
+import {
+  type AppConfig,
+  type PlaylistSummary,
+  type QueueEntry,
+  REACTION_EMOJIS,
+  type ReactionEmoji,
+  type SearchResult,
+  type Track,
+} from '../lib/types';
 import { useInterpolatedTime } from '../lib/useInterpolatedTime';
 import { useJukebox } from '../lib/useJukebox';
 import { useTrackLyrics } from '../lib/useTrackLyrics';
@@ -82,6 +95,8 @@ export function Remote() {
   const [catalogReloadKey, setCatalogReloadKey] = useState(0);
   const [categorySuggestions, setCategorySuggestions] = useState<string[]>([...DEFAULT_CATEGORY_SUGGESTIONS]);
   const [editingTrack, setEditingTrack] = useState<EditableTrack | null>(null);
+  const [playlistPickerTrack, setPlaylistPickerTrack] = useState<PlaylistPickerTrack | null>(null);
+  const [hostPlaylists, setHostPlaylists] = useState<PlaylistSummary[]>([]);
   const [hostVerified, setHostVerified] = useState(false);
   const [hostPinOpen, setHostPinOpen] = useState(false);
   const [hostPanelOpen, setHostPanelOpen] = useState(false);
@@ -134,6 +149,22 @@ export function Remote() {
       if (reactionTimerRef.current) clearTimeout(reactionTimerRef.current);
     };
   }, []);
+
+  const loadHostPlaylists = useCallback((signal?: AbortSignal) => {
+    api
+      .playlists(undefined, signal)
+      .then((res) => {
+        if (!signal?.aborted) setHostPlaylists(res.playlists);
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!hostPanelOpen || !canEditMetadata) return;
+    const controller = new AbortController();
+    loadHostPlaylists(controller.signal);
+    return () => controller.abort();
+  }, [hostPanelOpen, canEditMetadata, catalogReloadKey, loadHostPlaylists]);
 
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true);
@@ -240,6 +271,25 @@ export function Remote() {
     }
   };
 
+  const addPlaylistToQueue = async (playlist: PlaylistSummary, shuffle: boolean) => {
+    try {
+      const outcome = await api.enqueuePlaylist(playlist.id, { shuffle });
+      if (outcome.total === 0) {
+        toast.show(`A playlist "${playlist.name}" está vazia`, true);
+        return;
+      }
+      if (outcome.enqueued > 0) {
+        toast.show(
+          `${outcome.enqueued} música${outcome.enqueued === 1 ? '' : 's'} de "${playlist.name}" adicionada${outcome.enqueued === 1 ? '' : 's'}${shuffle ? ' (embaralhadas)' : ''} ⚡`,
+        );
+      } else if (outcome.duplicates > 0) {
+        toast.show(`As faixas de "${playlist.name}" já estavam na fila 👍`);
+      }
+    } catch (err) {
+      toast.show((err as Error).message, true);
+    }
+  };
+
   const handleMetadataSaved = (updated: Track) => {
     toast.show(`Metadados de "${updated.title}" atualizados`);
     setCatalogReloadKey((k) => k + 1);
@@ -337,27 +387,41 @@ export function Remote() {
 
         {current && (
           <div className="glass flex flex-col gap-2 p-2">
-            <button
-              type="button"
-              onClick={() => setView('lyrics')}
-              title="Abrir letra sincronizada"
-              className="flex w-full items-center gap-3 rounded-xl p-0.5 text-left transition hover:bg-white/5"
-            >
-              <Cover src={current.track.thumbnail} alt={current.track.title} className="h-12 w-12 shrink-0 rounded-lg" />
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-semibold">
-                  {position.paused ? '⏸' : '▶'} {current.track.title}
-                </p>
-                <p className="truncate text-xs text-zinc-400">{current.track.artist}</p>
-                {spotifyBadge && (
-                  <p className="mt-0.5 truncate text-[11px] font-medium text-green-300">{spotifyBadge}</p>
-                )}
-                <div className="mt-1 h-1 overflow-hidden rounded-full bg-white/10">
-                  <div className="h-full bg-accent" style={{ width: `${duration ? Math.min(100, (livePositionSec / duration) * 100) : 0}%` }} />
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setView('lyrics')}
+                title="Abrir letra sincronizada"
+                className="flex min-w-0 flex-1 items-center gap-3 rounded-xl p-0.5 text-left transition hover:bg-white/5"
+              >
+                <Cover src={current.track.thumbnail} alt={current.track.title} className="h-12 w-12 shrink-0 rounded-lg" />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-semibold">
+                    {position.paused ? '⏸' : '▶'} {current.track.title}
+                  </p>
+                  <p className="truncate text-xs text-zinc-400">{current.track.artist}</p>
+                  {spotifyBadge && (
+                    <p className="mt-0.5 truncate text-[11px] font-medium text-green-300">{spotifyBadge}</p>
+                  )}
+                  <div className="mt-1 h-1 overflow-hidden rounded-full bg-white/10">
+                    <div className="h-full bg-accent" style={{ width: `${duration ? Math.min(100, (livePositionSec / duration) * 100) : 0}%` }} />
+                  </div>
                 </div>
-              </div>
-              <span className="shrink-0 text-xs text-zinc-400">{formatTime(livePositionSec)}</span>
-            </button>
+                <span className="shrink-0 text-xs text-zinc-400">{formatTime(livePositionSec)}</span>
+              </button>
+              {canEditMetadata && (
+                <button
+                  type="button"
+                  onClick={() => setPlaylistPickerTrack(playlistTrackFromTrack(current.track))}
+                  aria-label={`Adicionar ${current.track.title} à playlist`}
+                  title="Adicionar faixa tocando agora a uma playlist"
+                  className="shrink-0 rounded-xl border border-white/10 bg-white/5 px-2.5 py-2 text-xs font-semibold text-zinc-200 transition hover:bg-white/15 hover:text-white"
+                >
+                  <span className="sm:hidden">+ PL</span>
+                  <span className="hidden sm:inline">+ Playlist</span>
+                </button>
+              )}
+            </div>
             <div className="flex items-center justify-between gap-2 border-t border-white/10 pt-1.5">
               <span className="pl-1 text-[11px] text-zinc-400">Reagir na TV</span>
               <div className="flex items-center gap-1" role="group" aria-label="Reações ao vivo">
@@ -480,10 +544,14 @@ export function Remote() {
               addingKey={adding}
               onAdd={add}
               onAddAlbum={addAlbum}
+              onAddPlaylist={addPlaylistToQueue}
+              onAddToPlaylist={setPlaylistPickerTrack}
               canEditMetadata={canEditMetadata}
               canEnqueueAlbum={canEditMetadata}
               onEditTrack={setEditingTrack}
               onCategoriesLoaded={(cats) => setCategorySuggestions(mergeCategorySuggestions(cats))}
+              onPlaylistsChanged={() => setCatalogReloadKey((k) => k + 1)}
+              onToast={toast.show}
             />
           ) : (
             <>
@@ -513,6 +581,7 @@ export function Remote() {
                 {results.map((result) => {
                   const key = `${result.source}:${result.sourceId}`;
                   const editable = canEditMetadata ? editableFromResult(result) : null;
+                  const playlistTrack = canEditMetadata && result.cached !== false ? playlistTrackFromResult(result) : null;
                   return (
                     <li key={key} className="flex items-center gap-3 rounded-xl bg-white/5 p-2">
                       <Cover src={result.thumbnail} alt={result.title} className="h-14 w-14 shrink-0 rounded-lg" />
@@ -536,6 +605,18 @@ export function Remote() {
                             className="rounded-xl border border-white/10 bg-white/5 px-2.5 py-2 text-xs font-semibold text-zinc-300 transition hover:bg-white/15 hover:text-white"
                           >
                             ✎
+                          </button>
+                        )}
+                        {playlistTrack && (
+                          <button
+                            type="button"
+                            onClick={() => setPlaylistPickerTrack(playlistTrack)}
+                            aria-label={`Adicionar ${result.title} à playlist`}
+                            title="Adicionar à playlist"
+                            className="rounded-xl border border-white/10 bg-white/5 px-2.5 py-2 text-xs font-semibold text-zinc-200 transition hover:bg-white/15 hover:text-white"
+                          >
+                            <span className="sm:hidden">+ PL</span>
+                            <span className="hidden sm:inline">+ Playlist</span>
                           </button>
                         )}
                         <button
@@ -636,15 +717,27 @@ export function Remote() {
                     </div>
                     <div className="flex shrink-0 items-center gap-1.5">
                       {canEditMetadata && entry.track.status === 'ready' && (
-                        <button
-                          type="button"
-                          onClick={() => setEditingTrack(editableFromTrack(entry.track))}
-                          aria-label={`Editar metadados de ${entry.track.title}`}
-                          title="Editar categoria, álbum ou metadados"
-                          className="rounded-xl border border-white/10 bg-white/5 px-2.5 py-2 text-xs font-semibold text-zinc-300 transition hover:bg-white/15 hover:text-white"
-                        >
-                          ✎
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => setEditingTrack(editableFromTrack(entry.track))}
+                            aria-label={`Editar metadados de ${entry.track.title}`}
+                            title="Editar categoria, álbum ou metadados"
+                            className="rounded-xl border border-white/10 bg-white/5 px-2.5 py-2 text-xs font-semibold text-zinc-300 transition hover:bg-white/15 hover:text-white"
+                          >
+                            ✎
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPlaylistPickerTrack(playlistTrackFromTrack(entry.track))}
+                            aria-label={`Adicionar ${entry.track.title} à playlist`}
+                            title="Adicionar à playlist"
+                            className="rounded-xl border border-white/10 bg-white/5 px-2.5 py-2 text-xs font-semibold text-zinc-200 transition hover:bg-white/15 hover:text-white"
+                          >
+                            <span className="sm:hidden">+ PL</span>
+                            <span className="hidden sm:inline">+ Playlist</span>
+                          </button>
+                        </>
                       )}
                       <button
                         type="button"
@@ -784,6 +877,16 @@ export function Remote() {
                     ⏭ Pular faixa
                   </button>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHostPanelOpen(false);
+                    setPlaylistPickerTrack(playlistTrackFromTrack(current.track));
+                  }}
+                  className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-left text-xs font-medium text-zinc-200 hover:bg-white/15"
+                >
+                  + Playlist na faixa atual ({current.track.title})
+                </button>
               </div>
             )}
 
@@ -795,6 +898,21 @@ export function Remote() {
               onToast={toast.show}
             />
 
+            <PlaylistManagerPanel
+              playlists={hostPlaylists}
+              onChanged={() => {
+                loadHostPlaylists();
+                setCatalogReloadKey((k) => k + 1);
+              }}
+              onToast={toast.show}
+              onOpenPlaylistsTab={() => {
+                setHostPanelOpen(false);
+                setView('search');
+                setSource('local');
+                setCatalogTab('playlists');
+                setCatalogHistory([{ kind: 'root' }]);
+              }}
+            />
             <MdnsHostnamePanel
               mdns={mdns ?? config?.mdns}
               onUpdated={(nextMdns) => {
@@ -811,6 +929,12 @@ export function Remote() {
         categorySuggestions={categorySuggestions}
         onClose={() => setEditingTrack(null)}
         onSaved={handleMetadataSaved}
+      />
+      <AddToPlaylistModal
+        track={playlistPickerTrack}
+        onClose={() => setPlaylistPickerTrack(null)}
+        onChanged={() => setCatalogReloadKey((k) => k + 1)}
+        onToast={toast.show}
       />
       {toast.node}
     </div>

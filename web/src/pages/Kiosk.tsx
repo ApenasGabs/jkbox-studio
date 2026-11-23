@@ -1,10 +1,12 @@
 import { QRCodeSVG } from 'qrcode.react';
 import { type RefObject, useCallback, useEffect, useRef, useState } from 'react';
+import { AddToPlaylistModal } from '../components/AddToPlaylistModal';
 import { CatalogBrowser } from '../components/CatalogBrowser';
 import { Cover } from '../components/Cover';
 import { GenreBadges } from '../components/GenreBadges';
 import { LyricsView } from '../components/LyricsView';
 import { MdnsHostnamePanel } from '../components/MdnsHostnamePanel';
+import { PlaylistManagerPanel } from '../components/PlaylistManagerPanel';
 import { QueueList } from '../components/QueueList';
 import { SourceBadge } from '../components/SourceBadge';
 import { SpotifyConnectSelector } from '../components/SpotifyConnectSelector';
@@ -19,6 +21,8 @@ import {
   type EditableTrack,
   editableFromTrack,
   mergeCategorySuggestions,
+  type PlaylistPickerTrack,
+  playlistTrackFromTrack,
 } from '../lib/catalog';
 import { cssImageUrl, formatTime, isLoopback, resolveRemoteQrUrl } from '../lib/format';
 import { activateFocusedElement, findNextSpatialCandidate, getFocusableElements } from '../lib/spatialNav';
@@ -30,6 +34,7 @@ import type {
   KioskCommand,
   MdnsStatus,
   PlaybackOutput,
+  PlaylistSummary,
   QueueEntry,
   SearchResult,
   Track,
@@ -124,6 +129,7 @@ export function Kiosk() {
   const [catalogReloadKey, setCatalogReloadKey] = useState(0);
   const [categorySuggestions, setCategorySuggestions] = useState<string[]>([...DEFAULT_CATEGORY_SUGGESTIONS]);
   const [editingTrack, setEditingTrack] = useState<EditableTrack | null>(null);
+  const [playlistPickerTrack, setPlaylistPickerTrack] = useState<PlaylistPickerTrack | null>(null);
   const [addingKey, setAddingKey] = useState<string | null>(null);
   const [offsetBusy, setOffsetBusy] = useState(false);
   const [cinemaMode, setCinemaMode] = useState(false);
@@ -456,7 +462,7 @@ export function Kiosk() {
   const showUpNextBanner = Boolean(
     current && nextUp && effectiveDuration > 0 && remainingSec <= UP_NEXT_WINDOW_SEC && dismissedUpNextId !== current.id,
   );
-  const controlsHidden = cinemaMode && cinemaIdle && !settingsOpen && !catalogOpen && !editingTrack && unlocked;
+  const controlsHidden = cinemaMode && cinemaIdle && !settingsOpen && !catalogOpen && !editingTrack && !playlistPickerTrack && unlocked;
   const backdrop = cssImageUrl(current?.track.thumbnail);
 
   const enqueueFromCatalog = async (result: SearchResult) => {
@@ -475,6 +481,23 @@ export function Kiosk() {
       toast.show((err as Error).message, true);
     } finally {
       setAddingKey(null);
+    }
+  };
+
+  const enqueuePlaylistFromCatalog = async (playlist: PlaylistSummary, shuffle: boolean) => {
+    try {
+      const outcome = await api.enqueuePlaylist(playlist.id, { shuffle });
+      if (outcome.total === 0) {
+        toast.show(`A playlist "${playlist.name}" está vazia`, true);
+        return;
+      }
+      toast.show(
+        outcome.enqueued > 0
+          ? `${outcome.enqueued} música${outcome.enqueued === 1 ? '' : 's'} de "${playlist.name}" adicionada${outcome.enqueued === 1 ? '' : 's'}${shuffle ? ' (embaralhadas)' : ''} ⚡`
+          : `As faixas de "${playlist.name}" já estavam na fila`,
+      );
+    } catch (err) {
+      toast.show((err as Error).message, true);
     }
   };
 
@@ -497,17 +520,22 @@ export function Kiosk() {
 
   const activeScope = !unlocked
     ? 'unlock'
-    : editingTrack
-      ? 'metadata'
-      : catalogOpen
-        ? 'catalog'
-        : settingsOpen
-          ? 'host'
-          : 'main';
+    : playlistPickerTrack
+      ? 'playlist-picker'
+      : editingTrack
+        ? 'metadata'
+        : catalogOpen
+          ? 'catalog'
+          : settingsOpen
+            ? 'host'
+            : 'main';
 
   const getActiveScopeElements = useCallback((): HTMLElement[] => {
     if (activeScope === 'unlock') {
       return unlockBtnRef.current ? [unlockBtnRef.current] : [];
+    }
+    if (activeScope === 'playlist-picker') {
+      return getFocusableElements(document.querySelector('[data-kiosk-scope="playlist-picker"]'));
     }
     if (activeScope === 'metadata') {
       return getFocusableElements(document.querySelector('[data-kiosk-scope="metadata"]'));
@@ -560,12 +588,34 @@ export function Kiosk() {
     if (!dpadActiveRef.current) return;
     const raf = window.requestAnimationFrame(() => {
       const candidates = getActiveScopeElements();
-      if (!focusedElRef.current || !candidates.includes(focusedElRef.current)) {
+      if (!focusedElRef.current || !focusedElRef.current.isConnected || !candidates.includes(focusedElRef.current)) {
         focusDefaultInScope();
       }
     });
     return () => window.cancelAnimationFrame(raf);
   }, [activeScope, catalogHistory, catalogTab, current?.id, cinemaMode, getActiveScopeElements, focusDefaultInScope]);
+
+  useEffect(() => {
+    const root = kioskRef.current;
+    if (!root || typeof MutationObserver === 'undefined') return;
+    let scheduled = false;
+    const observer = new MutationObserver(() => {
+      if (!dpadActiveRef.current || scheduled) return;
+      const currentEl = focusedElRef.current;
+      if (currentEl && !currentEl.isConnected) {
+        scheduled = true;
+        queueMicrotask(() => {
+          scheduled = false;
+          if (!dpadActiveRef.current) return;
+          if (focusedElRef.current && !focusedElRef.current.isConnected) {
+            focusDefaultInScope();
+          }
+        });
+      }
+    });
+    observer.observe(root, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [focusDefaultInScope]);
 
   useEffect(() => {
     const onFullscreenChange = () => setIsFullscreen(Boolean(document.fullscreenElement));
@@ -613,6 +663,10 @@ export function Kiosk() {
       dpadActiveRef.current = true;
 
       if (command === 'BACK') {
+        if (playlistPickerTrack) {
+          setPlaylistPickerTrack(null);
+          return;
+        }
         if (editingTrack) {
           setEditingTrack(null);
           return;
@@ -636,6 +690,7 @@ export function Kiosk() {
       }
 
       if (command === 'MENU') {
+        if (playlistPickerTrack) setPlaylistPickerTrack(null);
         if (editingTrack) setEditingTrack(null);
         if (catalogOpen) setCatalogOpen(false);
         setSettingsOpen((v) => !v);
@@ -650,18 +705,21 @@ export function Kiosk() {
       if (command === 'PLAY') {
         if (current) {
           togglePlay();
-        } else if (focusedElRef.current && getActiveScopeElements().includes(focusedElRef.current)) {
-          activateFocusedElement(focusedElRef.current);
+        } else {
+          const candidates = getActiveScopeElements();
+          const currentEl = focusedElRef.current;
+          const target =
+            currentEl && currentEl.isConnected && candidates.includes(currentEl) ? currentEl : focusDefaultInScope();
+          activateFocusedElement(target);
         }
         return;
       }
 
       if (command === 'SELECT') {
         const candidates = getActiveScopeElements();
+        const currentEl = focusedElRef.current;
         const target =
-          focusedElRef.current && candidates.includes(focusedElRef.current)
-            ? focusedElRef.current
-            : focusDefaultInScope();
+          currentEl && currentEl.isConnected && candidates.includes(currentEl) ? currentEl : focusDefaultInScope();
         activateFocusedElement(target);
         return;
       }
@@ -670,7 +728,7 @@ export function Kiosk() {
       const candidates = getActiveScopeElements();
       if (candidates.length === 0) return;
       const currentEl = focusedElRef.current;
-      if (!currentEl || !candidates.includes(currentEl)) {
+      if (!currentEl || !currentEl.isConnected || !candidates.includes(currentEl)) {
         focusDefaultInScope();
         return;
       }
@@ -684,6 +742,7 @@ export function Kiosk() {
     },
     [
       unlocked,
+      playlistPickerTrack,
       editingTrack,
       catalogOpen,
       catalogHistory.length,
@@ -937,6 +996,14 @@ export function Kiosk() {
                   title="Alterar saída de áudio ou volume no painel do Host"
                 />
               )}
+              <button
+                type="button"
+                onClick={() => setPlaylistPickerTrack(playlistTrackFromTrack(current.track))}
+                title="Adicionar faixa tocando agora a uma playlist interna"
+                className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-zinc-200 transition hover:bg-white/15 hover:text-white sm:text-sm"
+              >
+                + Playlist
+              </button>
             </div>
 
             {effectiveStageMode === 'cover' ? (
@@ -1299,10 +1366,22 @@ export function Kiosk() {
             setSettingsOpen(false);
             setEditingTrack(editableFromTrack(current.track));
           }}
+          onAddCurrentToPlaylist={() => {
+            if (!current) return;
+            setSettingsOpen(false);
+            setPlaylistPickerTrack(playlistTrackFromTrack(current.track));
+          }}
           onOpenCatalog={() => {
             setSettingsOpen(false);
             setCatalogOpen(true);
           }}
+          onOpenPlaylistsTab={() => {
+            setSettingsOpen(false);
+            setCatalogTab('playlists');
+            setCatalogHistory([{ kind: 'root' }]);
+            setCatalogOpen(true);
+          }}
+          reloadKey={catalogReloadKey}
           onCatalogChanged={() => setCatalogReloadKey((k) => k + 1)}
           onClose={() => setSettingsOpen(false)}
           onChanged={refreshConfig}
@@ -1362,10 +1441,14 @@ export function Kiosk() {
                 addingKey={addingKey}
                 onAdd={enqueueFromCatalog}
                 onAddAlbum={enqueueAlbumFromCatalog}
+                onAddPlaylist={enqueuePlaylistFromCatalog}
+                onAddToPlaylist={setPlaylistPickerTrack}
                 canEditMetadata
                 canEnqueueAlbum
                 onEditTrack={setEditingTrack}
                 onCategoriesLoaded={(cats) => setCategorySuggestions(mergeCategorySuggestions(cats))}
+                onPlaylistsChanged={() => setCatalogReloadKey((k) => k + 1)}
+                onToast={toast.show}
               />
             </div>
           </div>
@@ -1380,6 +1463,13 @@ export function Kiosk() {
           toast.show(`Metadados de "${updated.title}" atualizados`);
           setCatalogReloadKey((k) => k + 1);
         }}
+      />
+
+      <AddToPlaylistModal
+        track={playlistPickerTrack}
+        onClose={() => setPlaylistPickerTrack(null)}
+        onChanged={() => setCatalogReloadKey((k) => k + 1)}
+        onToast={toast.show}
       />
 
       {!unlocked && (
@@ -1437,7 +1527,10 @@ interface HostPanelProps {
   reactionsEnabled: boolean;
   onToggleReactions: () => void;
   onEditCurrentTrack: () => void;
+  onAddCurrentToPlaylist: () => void;
   onOpenCatalog: () => void;
+  onOpenPlaylistsTab: () => void;
+  reloadKey: number;
   onCatalogChanged: () => void;
   onClose: () => void;
   onChanged: () => void;
@@ -1448,6 +1541,7 @@ interface HostPanelProps {
 const AUTO_DJ_MODES: { id: AutoDjMode; label: string; hint: string }[] = [
   { id: 'vibe', label: 'Seguir clima atual', hint: 'Mesma subcategoria → categoria → afinidade segura (Gospel isolado).' },
   { id: 'category', label: 'Travar em Categoria/Subcategoria', hint: 'Toca apenas faixas da categoria/subcategoria selecionada.' },
+  { id: 'playlist', label: 'Travar em Playlist Interna', hint: 'Toca apenas faixas prontas da playlist interna selecionada.' },
   { id: 'random', label: 'Aleatório', hint: 'Sorteia qualquer faixa em cache evitando repetições recentes.' },
 ];
 
@@ -1465,7 +1559,10 @@ function HostPanel({
   reactionsEnabled,
   onToggleReactions,
   onEditCurrentTrack,
+  onAddCurrentToPlaylist,
   onOpenCatalog,
+  onOpenPlaylistsTab,
+  reloadKey,
   onCatalogChanged,
   onClose,
   onChanged,
@@ -1475,25 +1572,43 @@ function HostPanel({
   const [pin, setPin] = useState(getHostPin());
   const [playlist, setPlaylist] = useState('');
   const [categories, setCategories] = useState<CatalogCategory[]>([]);
+  const [playlists, setPlaylists] = useState<PlaylistSummary[]>([]);
   const [pickingCategory, setPickingCategory] = useState(false);
+  const [pickingPlaylist, setPickingPlaylist] = useState(false);
   const [autocategorizing, setAutocategorizing] = useState(false);
   const spotify = config?.spotify;
   const activeMode: AutoDjMode = config?.autoDjMode ?? 'vibe';
   const showCategoryPicker = activeMode === 'category' || pickingCategory;
+  const showPlaylistPicker = activeMode === 'playlist' || pickingPlaylist;
   const activeCategoryName = config?.autoDjCategory ?? '';
   const activeSubcategoryName = config?.autoDjSubgenre ?? '';
+  const activePlaylistId = config?.autoDjPlaylistId ?? '';
   const activeCategoryObj = categories.find((c) => c.name.toLowerCase() === activeCategoryName.toLowerCase());
 
-  const loadCategories = useCallback(() => {
+  const loadCategories = useCallback((signal?: AbortSignal) => {
     api
-      .catalogCategories()
-      .then((res) => setCategories(res.categories))
+      .catalogCategories(signal)
+      .then((res) => {
+        if (!signal?.aborted) setCategories(res.categories);
+      })
+      .catch(() => {});
+  }, []);
+
+  const loadPlaylists = useCallback((signal?: AbortSignal) => {
+    api
+      .playlists(undefined, signal)
+      .then((res) => {
+        if (!signal?.aborted) setPlaylists(res.playlists);
+      })
       .catch(() => {});
   }, []);
 
   useEffect(() => {
-    loadCategories();
-  }, [loadCategories]);
+    const controller = new AbortController();
+    loadCategories(controller.signal);
+    loadPlaylists(controller.signal);
+    return () => controller.abort();
+  }, [loadCategories, loadPlaylists, reloadKey]);
 
   return (
     <div className="fixed inset-0 z-30 flex justify-end bg-black/50" onClick={onClose}>
@@ -1618,7 +1733,10 @@ function HostPanel({
 
           <div className="flex flex-col gap-1.5" role="group" aria-label="Modo do Auto-DJ">
             {AUTO_DJ_MODES.map((option) => {
-              const selected = activeMode === option.id && (!pickingCategory || option.id === 'category');
+              const selected =
+                (pickingCategory && option.id === 'category') ||
+                (pickingPlaylist && option.id === 'playlist') ||
+                (!pickingCategory && !pickingPlaylist && activeMode === option.id);
               return (
                 <button
                   key={option.id}
@@ -1630,27 +1748,49 @@ function HostPanel({
                     if (option.id === 'category') {
                       const targetCat = activeCategoryName || categories[0]?.name || '';
                       if (!targetCat) {
+                        setPickingPlaylist(false);
                         setPickingCategory(true);
                         onToast('Nenhuma categoria no acervo ainda — auto-categorize ou edite uma faixa.', true);
                         return;
                       }
-                      setPickingCategory(true);
-                      void run(
-                        () =>
-                          api.updateAutoDjConfig({
-                            mode: 'category',
-                            category: targetCat,
-                            subgenre: activeCategoryName ? activeSubcategoryName || null : null,
-                          }),
-                        `Auto-DJ travado em ${targetCat}`,
-                      ).then(onChanged);
+                      void run(async () => {
+                        await api.updateAutoDjConfig({
+                          mode: 'category',
+                          category: targetCat,
+                          subgenre: activeCategoryName ? activeSubcategoryName || null : null,
+                        });
+                        setPickingPlaylist(false);
+                        setPickingCategory(true);
+                        onChanged();
+                      }, `Auto-DJ travado em ${targetCat}`);
                       return;
                     }
-                    setPickingCategory(false);
-                    void run(
-                      () => api.updateAutoDjConfig({ mode: option.id }),
-                      `Modo Auto-DJ: ${option.label}`,
-                    ).then(onChanged);
+                    if (option.id === 'playlist') {
+                      const targetPlaylist =
+                        playlists.find((p) => p.id === activePlaylistId) ?? playlists[0] ?? null;
+                      if (!targetPlaylist) {
+                        setPickingCategory(false);
+                        setPickingPlaylist(true);
+                        onToast('Nenhuma playlist interna criada ainda — crie uma abaixo.', true);
+                        return;
+                      }
+                      void run(async () => {
+                        await api.updateAutoDjConfig({
+                          mode: 'playlist',
+                          playlistId: targetPlaylist.id,
+                        });
+                        setPickingCategory(false);
+                        setPickingPlaylist(true);
+                        onChanged();
+                      }, `Auto-DJ travado na playlist ${targetPlaylist.name}`);
+                      return;
+                    }
+                    void run(async () => {
+                      await api.updateAutoDjConfig({ mode: option.id });
+                      setPickingCategory(false);
+                      setPickingPlaylist(false);
+                      onChanged();
+                    }, `Modo Auto-DJ: ${option.label}`);
                   }}
                   className={`flex flex-col rounded-xl border px-3 py-2 text-left transition ${
                     selected
@@ -1664,6 +1804,49 @@ function HostPanel({
               );
             })}
           </div>
+
+          {showPlaylistPicker && (
+            <div className="flex flex-col gap-2 rounded-xl border border-white/10 bg-black/25 p-3">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
+                Playlist interna travada
+              </span>
+              {playlists.length === 0 ? (
+                <p className="text-xs text-zinc-400">
+                  Nenhuma playlist criada ainda. Use a seção &ldquo;Playlists internas&rdquo; abaixo para criar.
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-1.5">
+                  {playlists.map((pl) => {
+                    const active = activePlaylistId === pl.id;
+                    return (
+                      <button
+                        key={pl.id}
+                        type="button"
+                        aria-pressed={active}
+                        onClick={() => {
+                          void run(
+                            () =>
+                              api.updateAutoDjConfig({
+                                mode: 'playlist',
+                                playlistId: pl.id,
+                              }),
+                            `Auto-DJ travado na playlist ${pl.name}`,
+                          ).then(onChanged);
+                        }}
+                        className={`rounded-full border px-2.5 py-1 text-xs font-medium transition ${
+                          active
+                            ? 'border-accent bg-accent text-white'
+                            : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/15'
+                        }`}
+                      >
+                        {pl.name} ({pl.trackCount})
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
 
           {showCategoryPicker && (
             <div className="flex flex-col gap-2 rounded-xl border border-white/10 bg-black/25 p-3">
@@ -1932,15 +2115,35 @@ function HostPanel({
             {autocategorizing ? 'Categorizando acervo…' : '✨ Auto-categorizar acervo'}
           </button>
           {currentTrack && (
-            <button
-              type="button"
-              onClick={onEditCurrentTrack}
-              className="mt-1 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-xs font-medium text-zinc-200 hover:bg-white/15"
-            >
-              ✎ Editar metadados da faixa atual ({currentTrack.title})
-            </button>
+            <div className="mt-1 flex flex-col gap-2">
+              <button
+                type="button"
+                onClick={onEditCurrentTrack}
+                className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-xs font-medium text-zinc-200 hover:bg-white/15"
+              >
+                ✎ Editar metadados da faixa atual ({currentTrack.title})
+              </button>
+              <button
+                type="button"
+                onClick={onAddCurrentToPlaylist}
+                className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-xs font-medium text-zinc-200 hover:bg-white/15"
+              >
+                + Playlist na faixa atual ({currentTrack.title})
+              </button>
+            </div>
           )}
         </section>
+
+        <PlaylistManagerPanel
+          playlists={playlists}
+          onChanged={() => {
+            loadPlaylists();
+            onCatalogChanged();
+            onChanged();
+          }}
+          onToast={onToast}
+          onOpenPlaylistsTab={onOpenPlaylistsTab}
+        />
 
         <a href="/remote" target="_blank" rel="noreferrer" className="text-sm text-accent-2 underline">
           Abrir modo convidado nesta tela ↗

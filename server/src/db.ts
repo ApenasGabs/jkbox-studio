@@ -88,6 +88,26 @@ const MIGRATIONS: string[] = [
     fetched_at INTEGER NOT NULL
   );
   `,
+  // v6 — internal themed playlists (#28).
+  `
+  CREATE TABLE IF NOT EXISTS playlists (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_playlists_name ON playlists (name COLLATE NOCASE);
+
+  CREATE TABLE IF NOT EXISTS playlist_tracks (
+    playlist_id TEXT NOT NULL REFERENCES playlists (id) ON DELETE CASCADE,
+    track_id TEXT NOT NULL REFERENCES tracks (id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    added_at INTEGER NOT NULL,
+    PRIMARY KEY (playlist_id, track_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_playlist_tracks_order ON playlist_tracks (playlist_id, position, added_at);
+  `,
 ];
 
 export function openDb(file: string): Db {
