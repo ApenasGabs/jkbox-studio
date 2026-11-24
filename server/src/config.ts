@@ -14,6 +14,7 @@ export interface Config {
   videoMode: VideoMode;
   videoMaxHeight: number;
   downloadConcurrency: number;
+  playlistImportMaxTracks: number;
   hostPin: string;
   ytdlpPath: string;
   ytdlpExtraArgs: string[];
@@ -64,6 +65,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     videoMode,
     videoMaxHeight,
     downloadConcurrency: Math.max(1, int(env.DOWNLOAD_CONCURRENCY, 2)),
+    playlistImportMaxTracks: Math.min(2000, Math.max(1, int(env.PLAYLIST_IMPORT_MAX_TRACKS, 500))),
     hostPin: env.HOST_PIN ?? '',
     ytdlpPath: env.YTDLP_PATH || 'yt-dlp',
     ytdlpExtraArgs: splitArgs(env.YTDLP_EXTRA_ARGS),

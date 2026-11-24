@@ -117,6 +117,8 @@ export interface PlaylistImportResult {
   queued: number;
   downloading: number;
   skipped: number;
+  truncated?: boolean;
+  totalRemote?: number;
   tracks: PlaylistTrackResult[];
 }
 

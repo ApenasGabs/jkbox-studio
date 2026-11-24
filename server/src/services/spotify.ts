@@ -268,8 +268,8 @@ export class SpotifyService {
     return details.tracks.slice(0, limit);
   }
 
-  /** Fetches album metadata and tracks (up to `limit + 1` so callers can detect oversized albums). */
-  async getAlbumDetails(id: string, limit = 50): Promise<ExtractedPlaylist> {
+  /** Fetches album metadata and up to `limit` tracks (preserving real `totalCount`). */
+  async getAlbumDetails(id: string, limit = 500): Promise<ExtractedPlaylist> {
     this.requireConfigured();
     if (!SPOTIFY_ID_RE.test(id)) throw new SpotifyError('ID de álbum do Spotify inválido', 400);
     const album = await this.api<{
@@ -291,21 +291,17 @@ export class SpotifyService {
           ? album.tracks.total
           : null;
 
-    if (totalCount !== null && totalCount > limit) {
-      return { title, description, thumbnail, totalCount, tracks: [] };
-    }
-
-    const fetchLimit = Math.max(1, limit) + 1;
+    const maxTracks = Math.max(1, limit);
     const items: SpotifyTrack[] = [...(album.tracks?.items ?? [])];
     let nextPath = album.tracks?.next ? album.tracks.next.replace(API, '') : null;
-    while (nextPath && items.length < fetchLimit) {
+    while (nextPath && items.length < maxTracks) {
       const page = await this.api<{ items?: SpotifyTrack[]; next?: string | null }>(nextPath, {}, 'any');
       items.push(...(page.items ?? []));
       nextPath = page.next ? page.next.replace(API, '') : null;
     }
 
     const tracks = items
-      .slice(0, fetchLimit)
+      .slice(0, maxTracks)
       .map((t) => spotifyTrackToResult({ ...t, album: { name: title, images: album.images } }));
 
     return {
@@ -407,8 +403,8 @@ export class SpotifyService {
     }
   }
 
-  /** Fetches playlist metadata and tracks (up to `limit + 1` so callers can detect oversized playlists). */
-  async getPlaylistDetails(id: string, limit = 50): Promise<ExtractedPlaylist> {
+  /** Fetches playlist metadata and up to `limit` tracks (preserving real `totalCount`). */
+  async getPlaylistDetails(id: string, limit = 500): Promise<ExtractedPlaylist> {
     this.requireConfigured();
     if (!SPOTIFY_ID_RE.test(id)) throw new SpotifyError('ID de playlist do Spotify inválido', 400);
 
@@ -436,18 +432,14 @@ export class SpotifyService {
     const inlinePage = meta.tracks ?? meta.items;
     const metaTotal = typeof inlinePage?.total === 'number' && Number.isFinite(inlinePage.total) ? inlinePage.total : null;
 
-    if (metaTotal !== null && metaTotal > limit) {
-      return { title, description, thumbnail, totalCount: metaTotal, tracks: [] };
-    }
-
-    const fetchLimit = Math.max(1, limit) + 1;
+    const maxTracks = Math.max(1, limit);
     let tracks: SearchResult[];
     let pageTotal: number | null = metaTotal;
 
     if (Array.isArray(inlinePage?.items) && !inlinePage.next) {
-      tracks = mapPlaylistEntries(inlinePage.items).slice(0, fetchLimit);
+      tracks = mapPlaylistEntries(inlinePage.items).slice(0, maxTracks);
     } else {
-      const fetched = await this.fetchPlaylistItemsWithTotal(id, fetchLimit, 'any');
+      const fetched = await this.fetchPlaylistItemsWithTotal(id, maxTracks, 'any');
       tracks = fetched.tracks;
       if (pageTotal === null && fetched.total !== null) pageTotal = fetched.total;
     }
