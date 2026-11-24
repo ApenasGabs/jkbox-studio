@@ -1,7 +1,10 @@
 import type { Db } from '../db.js';
+import { artistsMatch, buildTokenRegex, fold, normalizeArtistForMatch } from '../lib/artistMatch.js';
 import type { Track, TrackSource } from '../types.js';
 import type { FetchFn, SpotifyService } from './spotify.js';
 import type { TrackRepository } from './tracks.js';
+
+export { artistsMatch };
 
 export const CANONICAL_CATEGORIES = [
   'Samba & Pagode',
@@ -156,32 +159,22 @@ const PIPE_CLASSIFICATION_NOISE_RE =
 const TRAILING_DASH_CLASSIFICATION_NOISE_RE =
   /\s+[-–—]\s+(?:official(?:\s+(?:music\s+)?(?:video|audio|lyric\s+video|lyrics?|visualizer))?|oficial(?:\s+(?:clipe|áudio|audio|v[ií]deo))?|lyric\s+video|lyrics?|audio|áudio|clipe\s+oficial|visualizer)\s*$/i;
 const TRAILING_FEAT_RE = /\s+(?:feat\.?|ft\.?|featuring)\s+(.+)$/i;
+const BRACKETED_FEAT_RE = /(?:\(|\[|\{)\s*(?:feat\.?|ft\.?|featuring)\s+([^)\]}]+)(?:\)|\]|\})/gi;
 const LEADING_NUMERIC_PREFIX_RE = /^\d{1,3}(?:_\s*|\.\s+)/;
 const UNSAFE_SPLIT_RIGHT_RE =
   /^(?:part\.?\s*\d+|pt\.?\s*\d+|ao\s+vivo|live|remix|ac[uú]stico|acoustic|instrumental|karaoke|karaok[eê]|playback|vers[aã]o\b.*|remaster(?:ed)?(?:\s+\d{4})?|intro|outro)$/i;
-const GENERIC_ARTIST_TOKENS = new Set(['dj', 'mc', 'the', 'os', 'as', 'da', 'de', 'do']);
 
 function normalizeSpaces(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
 
 function normCompact(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9\p{L}\p{N}]/gu, '');
+  return fold(value).replace(/[^a-z0-9]/g, '');
 }
 
-function fold(value: string): string {
-  return value
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .trim();
-}
-
-function normalizeArtistForMatch(value: string): string {
-  return fold(value)
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+function extractBracketedFeats(value: string): string[] {
+  if (!value) return [];
+  return [...value.matchAll(BRACKETED_FEAT_RE)].map((m) => m[1].trim()).filter(Boolean);
 }
 
 function cleanClassificationArtist(raw: string): string {
@@ -213,7 +206,11 @@ function isSafeArtistTitleSplit(left: string, right: string): boolean {
 }
 
 /** Splits multi-artist strings (`,` except `, The`, `feat.`, `ft.`, `&`, `x`) while preserving duos as first choice. */
-export function extractArtistCandidates(rawArtist: string, rawTitle = ''): string[] {
+export function extractArtistCandidates(
+  rawArtist: string,
+  rawTitle = '',
+  extraFeats: readonly string[] = [],
+): string[] {
   const candidates: string[] = [];
   const seen = new Set<string>();
   const pushCandidate = (name: string) => {
@@ -225,36 +222,35 @@ export function extractArtistCandidates(rawArtist: string, rawTitle = ''): strin
     candidates.push(cleaned);
   };
 
-  const artistCleaned = cleanClassificationArtist(rawArtist);
-  const featMatch = artistCleaned.match(TRAILING_FEAT_RE);
-  const primaryBase = artistCleaned.replace(TRAILING_FEAT_RE, '').trim();
-  const titleFeatMatch = rawTitle.match(TRAILING_FEAT_RE);
-
   const splitSecondary = (segment: string) =>
     segment
-      .split(/\s*(?:,(?!\s*the\b)\s*|;\s*|\s+(?:feat\.?|ft\.?|featuring|vs\.?|x)\s+)\s*/i)
+      .split(/\s*(?:,(?!\s*the\b)\s*|;\s*|\s+(?:feat\.?|ft\.?|featuring|vs\.?)\s+)\s*/i)
       .map((part) => part.trim())
       .filter(Boolean);
 
-  for (const unit of splitSecondary(primaryBase)) {
-    pushCandidate(unit);
-    if (/\s+&\s+/.test(unit)) {
-      for (const ampPart of unit.split(/\s+&\s+/)) {
-        pushCandidate(ampPart);
-      }
-    }
-  }
-
-  for (const extra of [featMatch?.[1], titleFeatMatch?.[1]]) {
-    if (!extra) continue;
-    for (const unit of splitSecondary(extra)) {
+  const pushWithDuoSplit = (segment: string) => {
+    for (const unit of splitSecondary(segment)) {
       pushCandidate(unit);
-      if (/\s+&\s+/.test(unit)) {
-        for (const ampPart of unit.split(/\s+&\s+/)) {
-          pushCandidate(ampPart);
+      if (/\s+(?:&|x)\s+/i.test(unit)) {
+        for (const duoPart of unit.split(/\s+(?:&|x)\s+/i)) {
+          pushCandidate(duoPart);
         }
       }
     }
+  };
+
+  const artistBracketedFeats = extractBracketedFeats(rawArtist);
+  const titleBracketedFeats = extractBracketedFeats(rawTitle);
+  const artistCleaned = cleanClassificationArtist(rawArtist);
+  const featMatch = artistCleaned.match(TRAILING_FEAT_RE);
+  const primaryBase = artistCleaned.replace(TRAILING_FEAT_RE, '').trim();
+  const titleFeatMatch = cleanClassificationTitle(rawTitle).match(TRAILING_FEAT_RE);
+
+  pushWithDuoSplit(primaryBase);
+
+  for (const extra of [featMatch?.[1], ...artistBracketedFeats, titleFeatMatch?.[1], ...titleBracketedFeats, ...extraFeats]) {
+    if (!extra) continue;
+    pushWithDuoSplit(extra);
   }
 
   return candidates;
@@ -272,6 +268,7 @@ export function cleanTrackMetadataForClassification(rawTitle: string, rawArtist:
     signals.push('mtg');
   }
 
+  const bracketedFeats = [...extractBracketedFeats(rawArtist), ...extractBracketedFeats(rawTitle)];
   const initialArtist = cleanClassificationArtist(rawArtist);
   const initialTitle = cleanClassificationTitle(rawTitle);
   let artist = initialArtist;
@@ -305,7 +302,7 @@ export function cleanTrackMetadataForClassification(rawTitle: string, rawArtist:
   if (!title) title = rawTitle.trim();
 
   const searchTitle = title.replace(TRAILING_FEAT_RE, '').trim() || title;
-  const artistCandidates = extractArtistCandidates(artist, title);
+  const artistCandidates = extractArtistCandidates(artist, title, bracketedFeats);
 
   return {
     title,
@@ -317,30 +314,12 @@ export function cleanTrackMetadataForClassification(rawTitle: string, rawArtist:
   };
 }
 
-function artistsMatch(expectedCandidates: readonly string[], returnedArtist: string): boolean {
-  const candNorm = normalizeArtistForMatch(returnedArtist);
-  if (!candNorm || candNorm.length < 2 || GENERIC_ARTIST_TOKENS.has(candNorm)) return false;
-
-  return expectedCandidates.some((expected) => {
-    const expNorm = normalizeArtistForMatch(expected);
-    if (!expNorm || expNorm.length < 2 || GENERIC_ARTIST_TOKENS.has(expNorm)) return false;
-    if (candNorm === expNorm) return true;
-    const shorterLen = Math.min(candNorm.length, expNorm.length);
-    if (shorterLen < 4) return false;
-    return tokenRegex(expNorm).test(candNorm) || tokenRegex(candNorm).test(expNorm);
-  });
-}
-
 const TOKEN_REGEX_CACHE = new Map<string, RegExp>();
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 function tokenRegex(needle: string): RegExp {
   let cached = TOKEN_REGEX_CACHE.get(needle);
   if (!cached) {
-    cached = new RegExp(`(?:^|[^a-z0-9])${escapeRegExp(needle)}(?:$|[^a-z0-9])`);
+    cached = buildTokenRegex(needle);
     TOKEN_REGEX_CACHE.set(needle, cached);
   }
   return cached;
@@ -866,7 +845,10 @@ export function normalizeGenreAndSubgenre(
   const hasDjMcSignal = hasDjAndMcCombo(artistFolded) || (!artistFolded && hasDjAndMcCombo(titleFolded));
   const hasStrongFunkArtist = matchesArtist(artistFolded, [...FUNK_ARTISTS_BRUXARIA, ...FUNK_ARTISTS_MANDELAO]);
   const hasStrongFunkKeyword = containsAny(signalText, [
-    'funk',
+    'funk carioca',
+    'funk brasileiro',
+    'baile funk',
+    'brega funk',
     'mandelao',
     'bruxaria',
     'ritmada',
@@ -876,7 +858,7 @@ export function normalizeGenreAndSubgenre(
     'tamborzao',
     'dz7',
   ]);
-  const hasBailePattern = /\bbaile\s+d[ao]\s+[a-z0-9]+/.test(`${titleFolded} ${albumFolded}`);
+  const hasBailePattern = /\bbaile\s+d[aeo]s?\s+[a-z0-9]+/.test(`${titleFolded} ${albumFolded}`);
   const rawContradictsBaile = containsAny(rawFolded, ['forro', 'piseiro', 'sertanejo', 'samba', 'pagode', 'rock', 'mpb']);
 
   if (
@@ -1057,6 +1039,17 @@ export function normalizeGenreAndSubgenre(
   };
 }
 
+function isValidDeezerGenreName(name: string | undefined): name is string {
+  const trimmed = name?.trim();
+  if (!trimmed) return false;
+  const folded = fold(trimmed);
+  return folded !== 'all' && folded !== 'todos';
+}
+
+function escapeLucenePhrase(value: string): string {
+  return value.replace(/[\\"]/g, '\\$&');
+}
+
 function parseReleaseYear(releaseDate: string | undefined): number | null {
   if (!releaseDate) return null;
   const match = releaseDate.match(/^(\d{4})\b/);
@@ -1185,7 +1178,7 @@ export class ClassifierService {
   }
 
   private async resolveDeezerGenreName(genreId: number): Promise<string | null> {
-    if (genreId <= 0) return null;
+    if (!Number.isInteger(genreId) || genreId <= 0) return null;
     const cached = this.deezerGenreCache.get(genreId);
     if (cached) return cached;
     try {
@@ -1194,8 +1187,8 @@ export class ClassifierService {
       });
       if (!res.ok) return null;
       const body = (await res.json()) as { id?: number; name?: string };
-      const name = body.name?.trim();
-      if (!name || fold(name) === 'all' || fold(name) === 'todos') return null;
+      if (!isValidDeezerGenreName(body.name)) return null;
+      const name = body.name.trim();
       this.deezerGenreCache.set(genreId, name);
       return name;
     } catch (err) {
@@ -1227,29 +1220,31 @@ export class ClassifierService {
           let year: number | null = null;
 
           for (const g of match.album?.genres?.data ?? []) {
-            const name = g.name?.trim();
-            if (name && fold(name) !== 'all' && fold(name) !== 'todos') genres.push(name);
+            if (isValidDeezerGenreName(g.name)) genres.push(g.name.trim());
           }
 
-          let genreId = typeof match.album?.genre_id === 'number' && match.album.genre_id > 0 ? match.album.genre_id : null;
-          if (genres.length === 0 && !genreId && match.album?.id) {
+          let genreId =
+            typeof match.album?.genre_id === 'number' && Number.isInteger(match.album.genre_id) && match.album.genre_id > 0
+              ? match.album.genre_id
+              : null;
+          const albumId = match.album?.id;
+          if (genres.length === 0 && !genreId && typeof albumId === 'number' && Number.isInteger(albumId) && albumId > 0) {
             try {
-              const albumRes = await this.fetchFn(`https://api.deezer.com/album/${match.album.id}`, {
+              const albumRes = await this.fetchFn(`https://api.deezer.com/album/${albumId}`, {
                 signal: AbortSignal.timeout(EXTERNAL_TIMEOUT_MS),
               });
               if (albumRes.ok) {
                 const albumBody = (await albumRes.json()) as DeezerAlbumResponse;
                 year = parseReleaseYear(albumBody.release_date);
                 for (const g of albumBody.genres?.data ?? []) {
-                  const name = g.name?.trim();
-                  if (name && fold(name) !== 'all' && fold(name) !== 'todos') genres.push(name);
+                  if (isValidDeezerGenreName(g.name)) genres.push(g.name.trim());
                 }
-                if (typeof albumBody.genre_id === 'number' && albumBody.genre_id > 0) {
+                if (typeof albumBody.genre_id === 'number' && Number.isInteger(albumBody.genre_id) && albumBody.genre_id > 0) {
                   genreId = albumBody.genre_id;
                 }
               }
             } catch (err) {
-              this.log(`[classifier] falha ao consultar álbum Deezer #${match.album.id}: ${err instanceof Error ? err.message : String(err)}`);
+              this.log(`[classifier] falha ao consultar álbum Deezer #${albumId}: ${err instanceof Error ? err.message : String(err)}`);
             }
           }
 
@@ -1357,7 +1352,7 @@ export class ClassifierService {
       try {
         await this.waitMusicBrainzRateLimit();
         const params = new URLSearchParams({
-          query: `artist:"${candidate}"`,
+          query: `artist:"${escapeLucenePhrase(candidate)}"`,
           fmt: 'json',
           limit: '5',
         });

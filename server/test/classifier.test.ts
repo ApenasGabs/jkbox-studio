@@ -6,6 +6,7 @@ import { createApp } from '../src/app.js';
 import { openDb } from '../src/db.js';
 import {
   ClassifierService,
+  artistsMatch,
   cleanTrackMetadataForClassification,
   extractArtistCandidates,
   normalizeGenreAndSubgenre,
@@ -392,6 +393,7 @@ describe('ClassifierService cascade, cache and manual protection', () => {
 
     expect(extractArtistCandidates('Tyler, The Creator')).toEqual(['Tyler, The Creator']);
     expect(extractArtistCandidates('Chitãozinho & Xororó')).toEqual(['Chitãozinho & Xororó', 'Chitãozinho', 'Xororó']);
+    expect(extractArtistCandidates('DJ Arana x MC Pipokinha')).toEqual(['DJ Arana x MC Pipokinha', 'DJ Arana', 'MC Pipokinha']);
     expect(extractArtistCandidates('DJ JZ, Mc Fael Halls')).toEqual(['DJ JZ', 'Mc Fael Halls']);
     expect(extractArtistCandidates('Anitta feat. MC Zaac & Tropkillaz')).toEqual([
       'Anitta',
@@ -399,6 +401,15 @@ describe('ClassifierService cascade, cache and manual protection', () => {
       'MC Zaac',
       'Tropkillaz',
     ]);
+    expect(extractArtistCandidates('Anitta', 'Minha Música (ft. Tropkillaz)')).toEqual(['Anitta', 'Tropkillaz']);
+    expect(cleanTrackMetadataForClassification('Minha Música (feat. MC Zaac) [Official Video]', 'Anitta').artistCandidates).toEqual([
+      'Anitta',
+      'MC Zaac',
+    ]);
+    expect(cleanTrackMetadataForClassification('Chitaozinho - Evidências', 'Chitãozinho')).toMatchObject({
+      artist: 'Chitaozinho',
+      title: 'Evidências',
+    });
   });
 
   it('accurately classifies all audited BR Funk, Eletrônica, Rap Intl and empty-artist cases without AI', async () => {
@@ -410,6 +421,21 @@ describe('ClassifierService cascade, cache and manual protection', () => {
     const fetchFn: FetchFn = async (input) => {
       const url = String(input);
       seenUrls.push(url);
+      if (url.includes('api.deezer.com/search') && url.includes('Tocanna')) {
+        return jsonResponse({
+          data: [
+            {
+              id: 777,
+              title: 'Noite Clara',
+              artist: { id: 77, name: 'Tocanna' },
+              album: { id: 88, title: 'Noite Clara', genre_id: 132 },
+            },
+          ],
+        });
+      }
+      if (url.includes('api.deezer.com/genre/132')) {
+        return jsonResponse({ id: 132, name: 'Pop' });
+      }
       if (url.includes('itunes.apple.com/search')) {
         // Homonymous wrong-artist match for "Baile do Bruxo" must be rejected by strict validation!
         if (url.includes('Baile+do+Bruxo') || url.includes('Tropa+do+Bruxo')) {
@@ -492,6 +518,7 @@ describe('ClassifierService cascade, cache and manual protection', () => {
     expect(tracks.get(djMc.id)).toMatchObject({ genre: 'Funk' });
     expect(tracks.get(afterclapp.id)).toMatchObject({ genre: 'Eletrônica', subgenre: 'Brazilian Bass' });
     expect(tracks.get(tyler.id)).toMatchObject({ genre: 'Rap & Trap', subgenre: 'Hip Hop Internacional' });
+    expect(tracks.get(tocanna.id)).toMatchObject({ genre: 'Pop' });
     expect(tracks.get(zeca.id)).toMatchObject({
       artist: 'Zeca Pagodinho',
       title: 'Quando A Gira Girou',
@@ -503,7 +530,6 @@ describe('ClassifierService cascade, cache and manual protection', () => {
     const tocannaUrls = seenUrls.filter((u) => u.includes('Tocanna') || u.includes('Noite'));
     expect(tocannaUrls.length).toBeGreaterThan(0);
     expect(tocannaUrls.every((u) => !u.includes('Topic') && !u.includes('Visualizer') && !u.includes('Remaster'))).toBe(true);
-    expect(tocanna.id).toBeTruthy();
 
     // Automotivo & Bololô deterministic heuristics
     expect(normalizeGenreAndSubgenre([], { title: 'Automotivo Sinistro', artist: 'DJ Desconhecido' })).toEqual({
@@ -687,5 +713,118 @@ describe('ClassifierService cascade, cache and manual protection', () => {
       subgenre: 'Nova MPB',
       genreManual: true,
     });
+  });
+
+  it('prevents Uptown Funk false positive, supports Baile de/dos/das, validates Deezer/MB queries, rejects blind Spotify items[0], and coalesces concurrent force runs', async () => {
+    // 1. Generic "funk" in title must NOT override Pop / Soul & Funk external genres, while Baile de/dos/das matches Funk BR.
+    expect(
+      normalizeGenreAndSubgenre(['Pop', 'Soul & Funk'], {
+        title: 'Uptown Funk',
+        artist: 'Mark Ronson',
+      }),
+    ).toEqual({ genre: 'Pop', subgenre: null });
+    expect(normalizeGenreAndSubgenre([], { title: 'Baile de Favela', artist: 'MC Joao' })?.genre).toBe('Funk');
+    expect(normalizeGenreAndSubgenre([], { title: 'Baile dos Cria', artist: 'MC Desconhecido' })?.genre).toBe('Funk');
+    expect(normalizeGenreAndSubgenre([], { title: 'Baile das Novinhas', artist: 'MC Desconhecido' })?.genre).toBe('Funk');
+
+    // 2. Strict artist match helper rejects generic tokens and matches accented variants.
+    expect(artistsMatch(['MC'], 'MC Marcinho')).toBe(false);
+    expect(artistsMatch(['Legiao Urbana'], 'Legião Urbana')).toBe(true);
+
+    // 3. Spotify searchArtistGenres must NOT pick unrelated items[0]; Deezer ignores non-integer album IDs; MusicBrainz escapes Lucene quotes/backslashes.
+    const config = tempConfig({
+      SPOTIFY_CLIENT_ID: 'cid',
+      SPOTIFY_CLIENT_SECRET: 'csec',
+    });
+    const db = openDb(config.dbPath);
+    const tracks = new TrackRepository(db);
+    const requestedUrls: string[] = [];
+
+    const fetchFn: FetchFn = async (input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url.includes('accounts.spotify.com/api/token')) {
+        return jsonResponse({ access_token: 'app-tok', expires_in: 3600 });
+      }
+      if (url.includes('api.spotify.com/v1/search')) {
+        return jsonResponse({
+          artists: { items: [{ id: 'wrong', name: 'Homônimo Totalmente Diferente', genres: ['country'] }] },
+        });
+      }
+      if (url.includes('api.deezer.com/search')) {
+        return jsonResponse({
+          data: [
+            {
+              id: 500,
+              title: 'Safe Track',
+              artist: { id: 50, name: 'Artista "Teste" \\ BR' },
+              album: { id: 'not-an-int' as unknown as number, title: 'EP' },
+            },
+          ],
+        });
+      }
+      if (url.includes('itunes.apple.com/search')) {
+        return jsonResponse({ results: [] });
+      }
+      if (url.includes('musicbrainz.org/ws/2/artist')) {
+        return jsonResponse({
+          artists: [
+            {
+              id: 'mb-esc',
+              name: 'Artista Teste BR',
+              score: 99,
+              genres: [{ count: 3, name: 'mpb' }],
+            },
+          ],
+        });
+      }
+      return jsonResponse({}, 404);
+    };
+
+    const { Settings } = await import('../src/db.js');
+    const settings = new Settings(db);
+    const spotify = new SpotifyService(config.spotify, settings, fetchFn);
+    expect(await spotify.searchArtistGenres('Artista Desconhecido')).toEqual([]);
+
+    const classifier = new ClassifierService(db, tracks, spotify, fetchFn, () => {}, true, {
+      musicBrainzMinIntervalMs: 0,
+    });
+    const tEscaped = tracks.insertLocal('/music/escaped.mp3', {
+      title: 'Safe Track',
+      artist: 'Artista "Teste" \\ BR',
+    });
+    const res = await classifier.classifyTrack(tEscaped);
+    expect(res).toMatchObject({ updated: true, genre: 'MPB', source: 'musicbrainz' });
+    expect(requestedUrls.some((u) => u.includes('api.deezer.com/album/'))).toBe(false);
+    const mbUrl = requestedUrls.find((u) => u.includes('musicbrainz.org/ws/2/artist')) ?? '';
+    const mbQuery = new URL(mbUrl).searchParams.get('query') ?? '';
+    expect(mbQuery).toBe('artist:"Artista \\"Teste\\" \\\\ BR"');
+    db.close();
+
+    // 4. Coalescing concurrent force:true calls while a non-forced run is in flight must execute force:true only once.
+    const { jukebox } = setup({ HOST_PIN: '1234' });
+    let releaseNonForced!: () => void;
+    const nonForcedGate = new Promise<void>((resolve) => {
+      releaseNonForced = resolve;
+    });
+    let forceCalls = 0;
+    const fakeClassifier = jukebox.classifier!;
+    fakeClassifier.autocategorizeAll = async ({ force } = {}) => {
+      if (!force) {
+        await nonForcedGate;
+        return { processed: 0, updated: 0, skippedManual: 0, failed: 0, updatedTrackIds: [] };
+      }
+      forceCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      return { processed: 1, updated: 1, skippedManual: 0, failed: 0, updatedTrackIds: [] };
+    };
+
+    const pNormal = jukebox.autocategorizeLibrary({ force: false });
+    const pForce1 = jukebox.autocategorizeLibrary({ force: true });
+    const pForce2 = jukebox.autocategorizeLibrary({ force: true });
+    releaseNonForced();
+    const [, rForce1, rForce2] = await Promise.all([pNormal, pForce1, pForce2]);
+    expect(forceCalls).toBe(1);
+    expect(rForce1).toEqual(rForce2);
   });
 });

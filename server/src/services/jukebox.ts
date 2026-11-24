@@ -742,7 +742,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       return { processed: 0, updated: 0, skippedManual: 0, failed: 0, updatedTrackIds: [] };
     }
     const force = options.force === true;
-    if (this.autocategorizeInFlight) {
+    while (this.autocategorizeInFlight) {
       if (!force || this.autocategorizeInFlightForce) {
         return this.autocategorizeInFlight;
       }
