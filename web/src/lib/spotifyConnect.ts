@@ -47,6 +47,12 @@ export function formatSpotifyOutputBadge(output: PlaybackOutput): string | null 
   return `🔊 ${output.deviceName} · Spotify Connect`;
 }
 
+/** Formats a discrete stage badge indicating muted video is synced with Spotify Connect audio. */
+export function formatSpotifyVideoSyncBadge(output: PlaybackOutput): string | null {
+  if (output.type !== 'spotify') return null;
+  return `🔊 ${output.deviceName} · Vídeo sincronizado`;
+}
+
 /** Normalizes Spotify Connect API errors into actionable messages and error codes. */
 export function describeSpotifyConnectError(err: unknown): { message: string; code?: string } {
   if (err instanceof ApiError) {

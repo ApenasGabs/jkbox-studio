@@ -139,15 +139,14 @@ export function attachRealtime(server: Server, jukebox: Jukebox, options: Realti
   queue.on('progress', (positionSec, paused) => broadcast({ type: 'progress', positionSec, paused }));
   const onDownload = (track: { id: string; status: string; progress: number; error: string | null }) =>
     broadcast({ type: 'download', trackId: track.id, status: track.status, progress: track.progress, error: track.error });
+  const onTrackUpdated = (track: { id: string; status: string; progress: number; error: string | null }) => {
+    onDownload(track);
+    pushState();
+  };
   downloads.on('progress', onDownload);
-  downloads.on('ready', (track) => {
-    onDownload(track);
-    pushState();
-  });
-  downloads.on('failed', (track) => {
-    onDownload(track);
-    pushState();
-  });
+  downloads.on('ready', onTrackUpdated);
+  downloads.on('video', onTrackUpdated);
+  downloads.on('failed', onTrackUpdated);
   lyrics.on('offset', (trackId, offsetMs) => broadcast({ type: 'lyrics_offset', trackId, offsetMs }));
   const onMdnsChange = (mdns: MdnsStatus) => broadcast({ type: 'mdns', mdns });
   options.mdns?.on('change', onMdnsChange);

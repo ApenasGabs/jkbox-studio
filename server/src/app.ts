@@ -524,15 +524,15 @@ export const createApp = ({ config, jukebox, mdns, version = '0.1.0' }: AppDeps)
   const streamVideo = (req: Request<{ id: string }>, res: Response) => {
     const track = tracks.get(req.params.id);
     if (!track) return void res.status(404).json({ error: 'Faixa não encontrada' });
+    if (track.videoPath && fs.existsSync(track.videoPath)) {
+      const ext = path.extname(track.videoPath).toLowerCase();
+      const contentType = ext === '.webm' ? 'video/webm' : 'video/mp4';
+      return void streamFile(req, res, track.videoPath, contentType);
+    }
     if (track.status !== 'ready') {
       return void res.status(409).json({ error: 'Faixa ainda não está pronta', status: track.status });
     }
-    if (!track.videoPath) {
-      return void res.status(404).json({ error: 'Vídeo não disponível para esta faixa' });
-    }
-    const ext = path.extname(track.videoPath).toLowerCase();
-    const contentType = ext === '.webm' ? 'video/webm' : 'video/mp4';
-    streamFile(req, res, track.videoPath, contentType);
+    return void res.status(404).json({ error: 'Vídeo não disponível para esta faixa' });
   };
   api.get('/tracks/:id/video', streamVideo);
   api.head('/tracks/:id/video', streamVideo);
