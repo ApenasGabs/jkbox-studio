@@ -3,6 +3,7 @@ import type { PlaylistImportResult, PlaylistSource } from './types';
 
 export interface DetectedPlaylistLink {
   source: PlaylistSource;
+  kind?: 'playlist' | 'album';
   id: string;
   url: string;
 }
@@ -27,9 +28,11 @@ export function detectPlaylistLink(raw: string): DetectedPlaylistLink | null {
   const input = raw.trim();
   if (!input) return null;
 
-  const spotifyUri = input.match(/^spotify:playlist:([A-Za-z0-9]+)$/);
+  const spotifyUri = input.match(/^spotify:(playlist|album):([A-Za-z0-9]+)$/);
   if (spotifyUri) {
-    return { source: 'spotify', id: spotifyUri[1], url: input };
+    return spotifyUri[1] === 'album'
+      ? { source: 'spotify', kind: 'album', id: spotifyUri[2], url: input }
+      : { source: 'spotify', id: spotifyUri[2], url: input };
   }
 
   let url: URL;
@@ -53,9 +56,11 @@ export function detectPlaylistLink(raw: string): DetectedPlaylistLink | null {
   }
 
   if (host === 'open.spotify.com') {
-    const match = url.pathname.match(/\/playlist\/([A-Za-z0-9]+)/);
+    const match = url.pathname.match(/\/(playlist|album)\/([A-Za-z0-9]+)/);
     if (match) {
-      return { source: 'spotify', id: match[1], url: input };
+      return match[1] === 'album'
+        ? { source: 'spotify', kind: 'album', id: match[2], url: input }
+        : { source: 'spotify', id: match[2], url: input };
     }
   }
 

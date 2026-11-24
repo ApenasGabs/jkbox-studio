@@ -3,6 +3,7 @@ import { ApiError } from './api';
 import {
   describeSpotifyConnectError,
   formatSpotifyOutputBadge,
+  formatSpotifyVideoSyncBadge,
   spotifyDeviceIcon,
   spotifyDeviceLabel,
 } from './spotifyConnect';
@@ -25,6 +26,10 @@ describe('spotifyConnect helpers', () => {
     expect(
       formatSpotifyOutputBadge({ type: 'spotify', deviceId: 'dev-1', deviceName: 'Sala' }),
     ).toBe('🔊 Sala · Spotify Connect');
+    expect(formatSpotifyVideoSyncBadge({ type: 'local' })).toBeNull();
+    expect(
+      formatSpotifyVideoSyncBadge({ type: 'spotify', deviceId: 'dev-2', deviceName: 'Home Theater 2' }),
+    ).toBe('🔊 Home Theater 2 · Vídeo sincronizado');
   });
 
   it('describes Spotify Connect API errors clearly', () => {

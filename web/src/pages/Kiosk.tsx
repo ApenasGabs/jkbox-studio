@@ -28,8 +28,10 @@ import {
 } from '../lib/catalog';
 import { cssImageUrl, formatTime, isLoopback, resolveRemoteQrUrl } from '../lib/format';
 import { computeStageLayoutFlags, type StageMode } from '../lib/immersiveStage';
+import { interpolatePlaybackSec } from '../lib/lrc';
 import { activateFocusedElement, findNextSpatialCandidate, getFocusableElements } from '../lib/spatialNav';
-import { formatSpotifyOutputBadge } from '../lib/spotifyConnect';
+import { formatSpotifyOutputBadge, formatSpotifyVideoSyncBadge } from '../lib/spotifyConnect';
+import { clampVideoSeekSec, planSpotifyVideoSync } from '../lib/videoSync';
 import type {
   AppConfig,
   AutoDjMode,
@@ -170,10 +172,17 @@ export function Kiosk() {
   const pendingOffsetRef = useRef<number | null>(null);
   const latestEmbedStartSecRef = useRef(0);
   const latestEmbedPlayingRef = useRef(false);
+  const latestSpotifyTimeSecRef = useRef(0);
+  const latestSpotifyPausedRef = useRef(false);
+  const lastSpotifyVideoSeekMsRef = useRef(0);
+  const lastSpotifyEmbedSeekMsRef = useRef(0);
+  const embedSyncRef = useRef<{ queueId: number; lastTimeSec: number; updatedAtMs: number; paused: boolean } | null>(null);
+  const wasSpotifyOutputRef = useRef(false);
   const toast = useToast();
 
   const isSpotifyOutput = playbackOutput.type === 'spotify';
   const spotifyBadge = formatSpotifyOutputBadge(playbackOutput);
+  const spotifyVideoBadge = formatSpotifyVideoSyncBadge(playbackOutput);
   const nowPlaying = state.nowPlaying;
   const current = nowPlaying?.item;
   const spotifyTimeSec = useInterpolatedTime(
@@ -182,12 +191,14 @@ export function Kiosk() {
     connected,
     current?.track.durationSec,
   );
+  latestSpotifyTimeSecRef.current = spotifyTimeSec;
+  latestSpotifyPausedRef.current = position.paused;
   const effectivePlaying = isSpotifyOutput ? !position.paused : playing;
   const effectiveCurrentSec = isSpotifyOutput ? spotifyTimeSec : time.current;
   latestEmbedStartSecRef.current = isSpotifyOutput ? spotifyTimeSec : (audioRef.current?.currentTime ?? 0);
   latestEmbedPlayingRef.current = isSpotifyOutput ? !position.paused : (audioRef.current ? !audioRef.current.paused : playing);
   const videoAvailableInCache =
-    !isSpotifyOutput && config?.videoMode === 'cache' && Boolean(current?.track.videoPath) && videoFailedQueueId !== current?.id;
+    config?.videoMode === 'cache' && Boolean(current?.track.videoPath) && videoFailedQueueId !== current?.id;
   const videoAvailableInEmbed = config?.videoMode === 'embed' && Boolean(current?.track.youtubeId);
   const hasVideoAvailable = Boolean(current) && (videoAvailableInCache || videoAvailableInEmbed);
   const effectiveStageMode: StageMode =
@@ -237,13 +248,15 @@ export function Kiosk() {
   }, [current?.id]);
 
   // Load the current queue item into <video> (when cached MP4 is available & VIDEO_MODE=cache)
-  // or <audio>. Switching between Capa / Letra / Clipe keeps the active element untouched so
-  // currentTime and play/pause state never reset. When Spotify Connect is active, keep local
-  // media paused and muted.
+  // or <audio>. Switching between Capa / Letra / Clipe keeps the active element untouched in local
+  // mode so currentTime and play/pause state never reset. When Spotify Connect is active, keep local
+  // <audio> paused/muted and drive muted <video> only while Clipe mode is visible.
   useEffect(() => {
     const audio = audioRef.current;
     const video = videoRef.current;
     if (!audio) return;
+    const prevWasSpotify = wasSpotifyOutputRef.current;
+    wasSpotifyOutputRef.current = isSpotifyOutput;
 
     const clearEl = (el: HTMLMediaElement | null) => {
       if (!el || !el.getAttribute('src')) return;
@@ -254,16 +267,40 @@ export function Kiosk() {
 
     if (isSpotifyOutput) {
       audio.muted = true;
-      if (video) video.muted = true;
       clearEl(audio);
-      clearEl(video);
-      loadedTarget.current = null;
-      setPlaying(false);
+      if (video) {
+        video.muted = true;
+        video.defaultMuted = true;
+      }
+
+      if (!current || !config || !videoAvailableInCache || effectiveStageMode !== 'video' || !video) {
+        clearEl(video);
+        loadedTarget.current = null;
+        setPlaying(false);
+        return;
+      }
+
+      const prev = loadedTarget.current;
+      if (prev && prev.queueId === current.id && prev.kind === 'video') return;
+
+      firstLoad.current = false;
+      loadedTarget.current = { queueId: current.id, kind: 'video' };
+      pendingSeek.current = latestSpotifyTimeSecRef.current > 0 ? latestSpotifyTimeSecRef.current : null;
+      lastSpotifyVideoSeekMsRef.current = 0;
+      video.muted = true;
+      video.defaultMuted = true;
+      video.src = api.videoUrl(current.trackId);
+      if (!latestSpotifyPausedRef.current) {
+        video.play().catch(() => {});
+      }
       return;
     }
 
     audio.muted = false;
-    if (video) video.muted = false;
+    if (video) {
+      video.muted = false;
+      video.defaultMuted = false;
+    }
 
     if (!current) {
       if (loadedTarget.current !== null) {
@@ -288,7 +325,16 @@ export function Kiosk() {
     if (activeMediaKind === 'video' && !video) return;
 
     const prev = loadedTarget.current;
-    if (prev && prev.queueId === current.id && prev.kind === activeMediaKind) return;
+    if (prev && prev.queueId === current.id && prev.kind === activeMediaKind) {
+      if (prevWasSpotify) {
+        const activeEl = activeMediaKind === 'video' ? video! : audio;
+        activeEl.volume = volume;
+        if (unlocked && activeEl.paused) {
+          activeEl.play().catch(() => setPlaying(false));
+        }
+      }
+      return;
+    }
 
     // Seamless handoff if switching media element on the same queue item (e.g. video error fallback).
     if (prev && prev.queueId === current.id && prev.kind !== activeMediaKind) {
@@ -316,7 +362,49 @@ export function Kiosk() {
       resumePlayRef.current = false;
       targetEl.play().catch(() => setPlaying(false));
     }
-  }, [current, nowPlaying, config, activeMediaKind, unlocked, isSpotifyOutput]);
+  }, [current, nowPlaying, config, activeMediaKind, unlocked, isSpotifyOutput, videoAvailableInCache, effectiveStageMode]);
+
+  // Sync muted <video> play/pause & position (only seeking when drift > ~2.75s) during Spotify Connect.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!isSpotifyOutput || effectiveStageMode !== 'video' || !videoAvailableInCache || !current || !video) {
+      return;
+    }
+    video.muted = true;
+    video.defaultMuted = true;
+    const nowMs = performance.now();
+    const plan = planSpotifyVideoSync({
+      readyState: video.readyState,
+      seeking: video.seeking,
+      currentTime: video.currentTime,
+      duration: Number.isFinite(video.duration) && video.duration > 0 ? video.duration : current.track.durationSec,
+      mediaPaused: video.paused,
+      targetTimeSec: spotifyTimeSec,
+      targetPaused: position.paused,
+      nowMs,
+      lastSeekAtMs: lastSpotifyVideoSeekMsRef.current,
+    });
+    if (plan.deferSeekSec !== null) {
+      pendingSeek.current = plan.deferSeekSec;
+    }
+    if (plan.seekSec !== null) {
+      video.currentTime = plan.seekSec;
+      lastSpotifyVideoSeekMsRef.current = nowMs;
+    }
+    if (plan.pause) {
+      video.pause();
+    } else if (plan.play) {
+      video.play().catch(() => {});
+    }
+  }, [
+    isSpotifyOutput,
+    effectiveStageMode,
+    videoAvailableInCache,
+    current?.id,
+    current?.track.durationSec,
+    spotifyTimeSec,
+    position.paused,
+  ]);
 
   useEffect(() => {
     if (audioRef.current) audioRef.current.volume = volume;
@@ -347,20 +435,115 @@ export function Kiosk() {
   // Manage YouTube embed URL only when entering/leaving Clipe mode in embed mode (never on time ticks).
   useEffect(() => {
     if (effectiveStageMode === 'video' && !videoAvailableInCache && videoAvailableInEmbed && current?.track.youtubeId) {
-      setEmbedSrc(
-        youtubeEmbedUrl(current.track.youtubeId, latestEmbedStartSecRef.current, latestEmbedPlayingRef.current),
-      );
+      const startSec = latestEmbedStartSecRef.current;
+      const shouldPlay = latestEmbedPlayingRef.current;
+      embedSyncRef.current = {
+        queueId: current.id,
+        lastTimeSec: startSec,
+        updatedAtMs: performance.now(),
+        paused: !shouldPlay,
+      };
+      lastSpotifyEmbedSeekMsRef.current = 0;
+      setEmbedSrc(youtubeEmbedUrl(current.track.youtubeId, startSec, shouldPlay));
     } else {
+      embedSyncRef.current = null;
       setEmbedSrc(null);
     }
   }, [effectiveStageMode, videoAvailableInCache, videoAvailableInEmbed, current?.id, current?.track.youtubeId, isSpotifyOutput]);
 
-  // Keep muted embed iframe play/pause synced with authoritative playback.
+  // Listen to YouTube embed postMessage time reports when active so drift sync stays accurate.
+  useEffect(() => {
+    if (!embedSrc || !current) return;
+    const queueId = current.id;
+    const onMessage = (event: MessageEvent) => {
+      if (event.origin !== 'https://www.youtube-nocookie.com' && event.origin !== 'https://www.youtube.com') {
+        return;
+      }
+      if (typeof event.data !== 'string') return;
+      let payload: { event?: string; info?: { currentTime?: unknown; playerState?: unknown } };
+      try {
+        payload = JSON.parse(event.data) as typeof payload;
+      } catch {
+        return;
+      }
+      if (payload.event !== 'infoDelivery' || !payload.info) return;
+      const reportedTime = payload.info.currentTime;
+      const playerState = payload.info.playerState;
+      const prev = embedSyncRef.current;
+      embedSyncRef.current = {
+        queueId,
+        lastTimeSec: typeof reportedTime === 'number' && Number.isFinite(reportedTime) ? reportedTime : (prev?.lastTimeSec ?? 0),
+        updatedAtMs: performance.now(),
+        paused: typeof playerState === 'number' ? playerState === 2 : (prev?.paused ?? false),
+      };
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [embedSrc, current?.id]);
+
+  // Keep muted embed iframe play/pause (and Spotify Connect drift) synced with authoritative playback.
   useEffect(() => {
     if (!embedSrc || !embedIframeRef.current?.contentWindow) return;
+    const win = embedIframeRef.current.contentWindow;
     const func = effectivePlaying ? 'playVideo' : 'pauseVideo';
-    embedIframeRef.current.contentWindow.postMessage(JSON.stringify({ event: 'command', func, args: [] }), '*');
-  }, [effectivePlaying, embedSrc]);
+    win.postMessage(JSON.stringify({ event: 'command', func, args: [] }), '*');
+    if (embedSyncRef.current && current && embedSyncRef.current.queueId === current.id) {
+      const nowMs = performance.now();
+      const elapsedMs = embedSyncRef.current.paused ? 0 : Math.max(0, nowMs - embedSyncRef.current.updatedAtMs);
+      embedSyncRef.current = {
+        queueId: current.id,
+        lastTimeSec: interpolatePlaybackSec(embedSyncRef.current.lastTimeSec, elapsedMs, embedSyncRef.current.paused, current.track.durationSec),
+        updatedAtMs: nowMs,
+        paused: !effectivePlaying,
+      };
+    }
+  }, [effectivePlaying, embedSrc, current?.id, current?.track.durationSec]);
+
+  useEffect(() => {
+    if (
+      !isSpotifyOutput ||
+      effectiveStageMode !== 'video' ||
+      videoAvailableInCache ||
+      !embedSrc ||
+      !current ||
+      !embedIframeRef.current?.contentWindow ||
+      embedSyncRef.current?.queueId !== current.id
+    ) {
+      return;
+    }
+    const nowMs = performance.now();
+    const syncState = embedSyncRef.current;
+    const elapsedMs = syncState.paused ? 0 : Math.max(0, nowMs - syncState.updatedAtMs);
+    const estimatedEmbedSec = interpolatePlaybackSec(
+      syncState.lastTimeSec,
+      elapsedMs,
+      syncState.paused,
+      current.track.durationSec,
+    );
+    const plan = planSpotifyVideoSync({
+      readyState: 1,
+      currentTime: estimatedEmbedSec,
+      duration: current.track.durationSec,
+      mediaPaused: syncState.paused,
+      targetTimeSec: spotifyTimeSec,
+      targetPaused: position.paused,
+      nowMs,
+      lastSeekAtMs: lastSpotifyEmbedSeekMsRef.current,
+    });
+    if (plan.seekSec !== null) {
+      embedIframeRef.current.contentWindow.postMessage(
+        JSON.stringify({ event: 'command', func: 'seekTo', args: [plan.seekSec, true] }),
+        '*',
+      );
+      lastSpotifyEmbedSeekMsRef.current = nowMs;
+      embedSyncRef.current = {
+        queueId: current.id,
+        lastTimeSec: plan.seekSec,
+        updatedAtMs: nowMs,
+        paused: position.paused,
+      };
+    }
+  }, [isSpotifyOutput, effectiveStageMode, videoAvailableInCache, embedSrc, current?.id, current?.track.durationSec, spotifyTimeSec, position.paused]);
 
   useEffect(() => {
     if (isSpotifyOutput || !playing) return;
@@ -853,18 +1036,32 @@ export function Kiosk() {
   }, [toast.show]);
 
   const handleMediaPlay = (kind: 'audio' | 'video', el: HTMLMediaElement) => {
-    if (activeMediaKind !== kind) return;
+    if (isSpotifyOutput || activeMediaKind !== kind) return;
     setPlaying(true);
     reportProgress(true, el);
   };
 
   const handleMediaPause = (kind: 'audio' | 'video', el: HTMLMediaElement) => {
-    if (activeMediaKind !== kind) return;
+    if (isSpotifyOutput || activeMediaKind !== kind) return;
     setPlaying(false);
     reportProgress(true, el);
   };
 
   const handleLoadedMetadata = (kind: 'audio' | 'video', el: HTMLMediaElement) => {
+    if (isSpotifyOutput) {
+      if (kind !== 'video') return;
+      const target = pendingSeek.current ?? latestSpotifyTimeSecRef.current;
+      pendingSeek.current = null;
+      const seek = clampVideoSeekSec(target, el.duration);
+      if (seek > 0 && Number.isFinite(el.duration) && el.duration > 0) {
+        el.currentTime = seek;
+        lastSpotifyVideoSeekMsRef.current = performance.now();
+      }
+      if (!latestSpotifyPausedRef.current && el.paused) {
+        el.play().catch(() => {});
+      }
+      return;
+    }
     if (activeMediaKind !== kind) return;
     const seek = pendingSeek.current;
     pendingSeek.current = null;
@@ -874,13 +1071,13 @@ export function Kiosk() {
   };
 
   const handleTimeUpdate = (kind: 'audio' | 'video', el: HTMLMediaElement) => {
-    if (activeMediaKind !== kind) return;
+    if (isSpotifyOutput || activeMediaKind !== kind) return;
     setTime({ current: el.currentTime, duration: el.duration || current?.track.durationSec || 0 });
     reportProgress(false, el);
   };
 
   const handleMediaEnded = (kind: 'audio' | 'video') => {
-    if (activeMediaKind !== kind || !current) return;
+    if (isSpotifyOutput || activeMediaKind !== kind || !current) return;
     api.ended(current.id).catch(() => {});
   };
 
@@ -1128,21 +1325,7 @@ export function Kiosk() {
             ) : effectiveStageMode === 'lyrics' ? (
               <>
                 {!isDesktopImmersive && (
-                  <div className="flex w-full max-w-3xl shrink-0 items-center gap-3 px-1">
-                    <Cover src={current.track.thumbnail} alt={current.track.title} className="h-12 w-12 shrink-0 rounded-xl sm:h-14 sm:w-14" />
-                    <div className="min-w-0 flex-1">
-                      <h1 className="truncate text-lg font-bold leading-tight sm:text-2xl">{current.track.title}</h1>
-                      <p className="truncate text-sm text-zinc-300">
-                        {current.track.artist}
-                        {current.track.album ? ` · ${current.track.album}` : ''}
-                      </p>
-                    </div>
-                    <div className="hidden shrink-0 items-center gap-2 text-xs text-zinc-400 sm:flex">
-                      <SourceBadge source={current.track.source} />
-                      <GenreBadges genre={current.track.genre} subgenre={current.track.subgenre} variant="kiosk-compact" />
-                      <span>pedido por {current.requesterName}</span>
-                    </div>
-                  </div>
+                  <CompactTrackHeader track={current.track} requesterName={current.requesterName} maxWidthClass="max-w-3xl" />
                 )}
                 <LyricsView
                   variant="kiosk"
@@ -1165,21 +1348,7 @@ export function Kiosk() {
               </>
             ) : (
               !isDesktopImmersive && (
-                <div className="flex w-full max-w-4xl shrink-0 items-center gap-3 px-1">
-                  <Cover src={current.track.thumbnail} alt={current.track.title} className="h-12 w-12 shrink-0 rounded-xl sm:h-14 sm:w-14" />
-                  <div className="min-w-0 flex-1">
-                    <h1 className="truncate text-lg font-bold leading-tight sm:text-2xl">{current.track.title}</h1>
-                    <p className="truncate text-sm text-zinc-300">
-                      {current.track.artist}
-                      {current.track.album ? ` · ${current.track.album}` : ''}
-                    </p>
-                  </div>
-                  <div className="hidden shrink-0 items-center gap-2 text-xs text-zinc-400 sm:flex">
-                    <SourceBadge source={current.track.source} />
-                    <GenreBadges genre={current.track.genre} subgenre={current.track.subgenre} variant="kiosk-compact" />
-                    <span>pedido por {current.requesterName}</span>
-                  </div>
-                </div>
+                <CompactTrackHeader track={current.track} requesterName={current.requesterName} maxWidthClass="max-w-4xl" />
               )
             )}
 
@@ -1199,6 +1368,7 @@ export function Kiosk() {
             >
               <video
                 ref={videoRef}
+                muted={isSpotifyOutput}
                 playsInline
                 preload="auto"
                 className={videoAvailableInCache ? 'h-full w-full object-contain' : 'hidden'}
@@ -1208,11 +1378,19 @@ export function Kiosk() {
                 onTimeUpdate={(e) => handleTimeUpdate('video', e.currentTarget)}
                 onEnded={() => handleMediaEnded('video')}
                 onError={() => {
-                  if (isSpotifyOutput || activeMediaKind !== 'video' || !current || current.track.status !== 'ready' || !videoRef.current?.src) {
+                  if (
+                    !current ||
+                    !videoRef.current?.src ||
+                    !videoAvailableInCache ||
+                    (!isSpotifyOutput && (activeMediaKind !== 'video' || current.track.status !== 'ready'))
+                  ) {
                     return;
                   }
                   setVideoFailedQueueId(current.id);
-                  toast.show('Videoclipe indisponível — reproduzindo áudio.', true);
+                  toast.show(
+                    isSpotifyOutput ? 'Videoclipe indisponível no momento.' : 'Videoclipe indisponível — reproduzindo áudio.',
+                    true,
+                  );
                 }}
               />
               {effectiveStageMode === 'video' && !videoAvailableInCache && embedSrc && (
@@ -1222,7 +1400,24 @@ export function Kiosk() {
                   src={embedSrc}
                   allow="autoplay; encrypted-media; picture-in-picture"
                   className="h-full w-full border-0"
+                  onLoad={() => {
+                    const win = embedIframeRef.current?.contentWindow;
+                    if (!win) return;
+                    win.postMessage(JSON.stringify({ event: 'listening', id: 1 }), '*');
+                    const func = effectivePlaying ? 'playVideo' : 'pauseVideo';
+                    win.postMessage(JSON.stringify({ event: 'command', func, args: [] }), '*');
+                  }}
                 />
+              )}
+              {effectiveStageMode === 'video' && spotifyVideoBadge && (
+                <div
+                  role="status"
+                  className={`pointer-events-none absolute left-3 z-20 max-w-[calc(100%-1.5rem)] truncate rounded-full border border-green-400/35 bg-black/65 px-3 py-1 text-[11px] font-semibold text-green-200 shadow-lg backdrop-blur-md transition-[top] duration-300 sm:text-xs ${
+                    isDesktopImmersive && !controlsHidden ? 'top-3 lg:top-32' : 'top-3'
+                  }`}
+                >
+                  {spotifyVideoBadge}
+                </div>
               )}
               {effectiveStageMode === 'video' && videoLyricsOverlay && (
                 <VideoLyricsOverlay
@@ -1431,7 +1626,7 @@ export function Kiosk() {
           <div className="rounded-lg bg-white p-1">
             <QRCodeSVG value={url} size={56} />
           </div>
-          <div className="hidden max-w-[140px] pr-1 sm:block">
+          <div className="hidden max-w-[140px] pr-1 xl:block">
             <p className="text-xs font-semibold text-white">Peça sua música</p>
             <p className="truncate text-[11px] text-accent-2">{url}</p>
           </div>
@@ -1637,6 +1832,35 @@ export function Kiosk() {
 }
 
 type RunFn = <T>(action: () => Promise<T>, ok?: string | ((result: T) => string)) => Promise<void>;
+
+/** Compact single-line track header shown above non-immersive Lyrics and Video stages. */
+function CompactTrackHeader({
+  track,
+  requesterName,
+  maxWidthClass,
+}: {
+  track: Track;
+  requesterName: string;
+  maxWidthClass: string;
+}) {
+  return (
+    <div className={`flex w-full ${maxWidthClass} shrink-0 items-center gap-3 px-1`}>
+      <Cover src={track.thumbnail} alt={track.title} className="h-12 w-12 shrink-0 rounded-xl sm:h-14 sm:w-14" />
+      <div className="min-w-0 flex-1">
+        <h1 className="truncate text-lg font-bold leading-tight sm:text-2xl">{track.title}</h1>
+        <p className="truncate text-sm text-zinc-300">
+          {track.artist}
+          {track.album ? ` · ${track.album}` : ''}
+        </p>
+      </div>
+      <div className="hidden shrink-0 items-center gap-2 text-xs text-zinc-400 sm:flex">
+        <SourceBadge source={track.source} />
+        <GenreBadges genre={track.genre} subgenre={track.subgenre} variant="kiosk-compact" />
+        <span>pedido por {requesterName}</span>
+      </div>
+    </div>
+  );
+}
 
 function StageTabsControls({
   effectiveStageMode,

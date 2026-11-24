@@ -1038,7 +1038,7 @@ export function CatalogBrowser({
                   <input
                     value={importPlaylistUrl}
                     onChange={(e) => setImportPlaylistUrl(e.target.value)}
-                    placeholder="Cole o link da playlist do YouTube ou Spotify…"
+                    placeholder="Cole o link de playlist (YouTube/Spotify) ou álbum do Spotify…"
                     aria-label="URL da playlist para importar"
                     className="min-w-0 flex-1 rounded-xl bg-white/10 px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-accent"
                   />

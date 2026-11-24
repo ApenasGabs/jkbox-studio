@@ -146,6 +146,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
         }
         this.resetSpotifyActiveState();
         void this.playCurrentOnSpotify(entry);
+        this.ensureCurrentVideoForSpotify(entry.trackId);
       }
     });
     queue.on('ended', (entry) => {
@@ -195,11 +196,22 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     return run;
   }
 
+  private ensureCurrentVideoForSpotify(trackId: string): void {
+    if (this._playbackOutput.type !== 'spotify') return;
+    void this.downloads.ensureVideo(trackId).catch((err) => {
+      this.log(`[video] falha ao preparar vídeo no modo Spotify Connect: ${errorMessage(err)}`);
+    });
+  }
+
   private commitSpotifyOutput(device: Pick<SpotifyDevice, 'id' | 'name'>): void {
     this._playbackOutput = { type: 'spotify', deviceId: device.id, deviceName: device.name };
     this.settings?.set('playback_output', this._playbackOutput);
     this.suppressedSpotifyUri = null;
     this.consecutiveSpotifyMisses = 0;
+    const current = this.queue.state().nowPlaying;
+    if (current) {
+      this.ensureCurrentVideoForSpotify(current.item.trackId);
+    }
     this.emit('output', this._playbackOutput);
     this.queue.emit('change');
   }
@@ -414,6 +426,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       this.startSpotifyPolling();
       return;
     }
+    this.ensureCurrentVideoForSpotify(current.item.trackId);
     if (this.activeSpotifyQueueId === current.item.id) return;
     void this.playCurrentOnSpotify(current.item, Math.round(current.positionSec * 1000));
   }
@@ -525,6 +538,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     this.spotifyStartedAtMs = Date.now();
     this.spotifySeenPlaying = true;
     this.spotifyLastProgressMs = playback.progressMs;
+    this.ensureCurrentVideoForSpotify(track.id);
   }
 
   private finishActiveSpotifyTrack(queueId: number): void {
@@ -1041,6 +1055,9 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     try {
       return await this.spotify.getPlaylistDetails(playlistId, MAX_BATCH);
     } catch (err) {
+      if (err instanceof SpotifyError && err.code === 'SPOTIFY_EDITORIAL_BLOCKED') {
+        throw new PlaylistError(err.message, 404);
+      }
       if (
         err instanceof SpotifyError &&
         (err.status === 404 || (err.status === 403 && err.code !== 'INSUFFICIENT_SCOPE'))
@@ -1051,8 +1068,19 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     }
   }
 
+  private async extractSpotifyAlbum(albumId: string): Promise<ExtractedPlaylist> {
+    try {
+      return await this.spotify.getAlbumDetails(albumId, MAX_BATCH);
+    } catch (err) {
+      if (err instanceof SpotifyError && (err.status === 404 || err.status === 403)) {
+        throw new PlaylistError('Álbum do Spotify não encontrado ou inacessível', 404);
+      }
+      throw err;
+    }
+  }
+
   /**
-   * Imports a YouTube or Spotify playlist by URL:
+   * Imports a YouTube/Spotify playlist or Spotify album by URL:
    * persists tracks + playlist idempotently by `(source, sourceId)`,
    * enqueues tracks with deduplication, triggers video-first background downloads,
    * and runs background auto-categorization without overwriting manual genres.
@@ -1065,7 +1093,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
   }): Promise<PlaylistImportResult> {
     if (!this.playlists) throw new PlaylistError('Serviço de playlists indisponível', 500);
     if (typeof input.url !== 'string' || !input.url.trim()) {
-      throw new PlaylistError('Informe a URL da playlist do YouTube ou Spotify', 400);
+      throw new PlaylistError('Informe a URL da playlist (YouTube/Spotify) ou álbum do Spotify', 400);
     }
     if (input.enqueue !== undefined && typeof input.enqueue !== 'boolean') {
       throw new PlaylistError('enqueue deve ser booleano', 400);
@@ -1073,16 +1101,30 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     const shouldEnqueue = input.enqueue ?? true;
 
     const parsed = parseInput(input.url);
-    if (parsed.kind !== 'youtube-playlist' && parsed.kind !== 'spotify-playlist') {
-      throw new PlaylistError('URL inválida ou não suportada. Cole um link de playlist do YouTube ou Spotify.', 400);
+    if (
+      parsed.kind !== 'youtube-playlist' &&
+      parsed.kind !== 'spotify-playlist' &&
+      parsed.kind !== 'spotify-album'
+    ) {
+      throw new PlaylistError(
+        'URL inválida ou não suportada. Cole um link de playlist do YouTube/Spotify ou álbum do Spotify.',
+        400,
+      );
     }
 
     const source: PlaylistSource = parsed.kind === 'youtube-playlist' ? 'youtube' : 'spotify';
-    const sourceId = parsed.kind === 'youtube-playlist' ? parsed.playlistId : parsed.id;
+    const sourceId =
+      parsed.kind === 'youtube-playlist'
+        ? parsed.playlistId
+        : parsed.kind === 'spotify-album'
+          ? `album:${parsed.id}`
+          : parsed.id;
     const extracted =
       parsed.kind === 'youtube-playlist'
         ? await this.extractYoutubePlaylist(parsed.playlistId)
-        : await this.extractSpotifyPlaylist(parsed.id);
+        : parsed.kind === 'spotify-album'
+          ? await this.extractSpotifyAlbum(parsed.id)
+          : await this.extractSpotifyPlaylist(parsed.id);
 
     const totalRemote = extracted.totalCount ?? extracted.tracks.length;
     if (totalRemote > MAX_BATCH || extracted.tracks.length > MAX_BATCH) {

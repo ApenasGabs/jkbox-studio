@@ -15,6 +15,7 @@ interface DetectedCardProps {
 
 export function PlaylistImportDetectedCard({ detected, importing, onImport }: DetectedCardProps) {
   const platformName = detected.source === 'youtube' ? 'YouTube' : 'Spotify';
+  const isAlbum = detected.kind === 'album';
   return (
     <div
       data-testid="playlist-import-detected"
@@ -23,7 +24,9 @@ export function PlaylistImportDetectedCard({ detected, importing, onImport }: De
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <SourceBadge source={detected.source} />
-          <p className="text-sm font-semibold text-white">Playlist do {platformName} detectada</p>
+          <p className="text-sm font-semibold text-white">
+            {isAlbum ? `Álbum do ${platformName} detectado` : `Playlist do ${platformName} detectada`}
+          </p>
         </div>
         <p className="mt-0.5 text-xs text-zinc-300">
           Salva no catálogo para tocar depois, baixa as faixas em segundo plano e adiciona à fila.
@@ -35,7 +38,7 @@ export function PlaylistImportDetectedCard({ detected, importing, onImport }: De
         onClick={onImport}
         className="shrink-0 rounded-xl bg-accent px-4 py-2 text-xs font-semibold text-white shadow transition hover:brightness-110 disabled:cursor-wait disabled:opacity-60 sm:text-sm"
       >
-        {importing ? 'Importando…' : 'Importar Playlist'}
+        {importing ? 'Importando…' : isAlbum ? 'Importar Álbum' : 'Importar Playlist'}
       </button>
     </div>
   );

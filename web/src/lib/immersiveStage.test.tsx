@@ -119,6 +119,7 @@ describe('immersiveStage', () => {
 
     expect(html).toContain('data-kiosk-stage="lyrics"');
     expect(html).toContain('lg:text-5xl');
+    expect(html).toContain('bottom-40');
     expect(html).toContain('pointer-events-none opacity-0');
     expect(html).not.toContain('class="glass');
   });
