@@ -122,15 +122,15 @@ describe('POST /api/playlists/import', () => {
     const ctx = setup(SPOTIFY_ENV, fetchFn);
     const app = createApp({ config: ctx.config, jukebox: ctx.jukebox });
 
-    // 400: missing, non-playlist, single track, album, invalid domain
+    // 400: missing, non-playlist, single track, invalid domain
     await request(app).post('/api/playlists/import').send({}).expect(400);
     await request(app).post('/api/playlists/import').send({ url: 'churrasco pagode' }).expect(400);
     await request(app).post('/api/playlists/import').send({ url: 'https://youtu.be/dQw4w9WgXcQ' }).expect(400);
     await request(app).post('/api/playlists/import').send({ url: 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC' }).expect(400);
-    await request(app).post('/api/playlists/import').send({ url: 'https://open.spotify.com/album/abc123' }).expect(400);
     await request(app).post('/api/playlists/import').send({ url: 'https://example.com/playlist?list=123' }).expect(400);
 
-    // 404: private / non-existent Spotify & YouTube playlists
+    // 404: private / non-existent Spotify playlists, albums & YouTube playlists
+    await request(app).post('/api/playlists/import').send({ url: 'https://open.spotify.com/album/abc123' }).expect(404);
     await request(app).post('/api/playlists/import').send({ url: 'https://open.spotify.com/playlist/privatePl' }).expect(404);
     await request(app).post('/api/playlists/import').send({ url: 'https://open.spotify.com/playlist/missingPl' }).expect(404);
 

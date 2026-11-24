@@ -73,6 +73,21 @@ describe('detectPlaylistLink', () => {
     });
   });
 
+  it('detects Spotify album URLs and URIs', () => {
+    expect(detectPlaylistLink('https://open.spotify.com/album/2eiEUZlcSFCm5bmFi2SyWB?si=xyz')).toEqual({
+      source: 'spotify',
+      kind: 'album',
+      id: '2eiEUZlcSFCm5bmFi2SyWB',
+      url: 'https://open.spotify.com/album/2eiEUZlcSFCm5bmFi2SyWB?si=xyz',
+    });
+    expect(detectPlaylistLink('spotify:album:2eiEUZlcSFCm5bmFi2SyWB')).toEqual({
+      source: 'spotify',
+      kind: 'album',
+      id: '2eiEUZlcSFCm5bmFi2SyWB',
+      url: 'spotify:album:2eiEUZlcSFCm5bmFi2SyWB',
+    });
+  });
+
   it('ignores search terms, single-track URLs, and non-http schemes', () => {
     expect(detectPlaylistLink('evidencias chitaozinho')).toBeNull();
     expect(detectPlaylistLink('https://www.youtube.com/watch?v=dQw4w9WgXcQ')).toBeNull();

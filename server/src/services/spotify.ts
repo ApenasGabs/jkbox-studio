@@ -264,13 +264,57 @@ export class SpotifyService {
   }
 
   async getAlbumTracks(id: string, limit = 50): Promise<SearchResult[]> {
+    const details = await this.getAlbumDetails(id, limit);
+    return details.tracks.slice(0, limit);
+  }
+
+  /** Fetches album metadata and tracks (up to `limit + 1` so callers can detect oversized albums). */
+  async getAlbumDetails(id: string, limit = 50): Promise<ExtractedPlaylist> {
     this.requireConfigured();
-    const album = await this.api<{ name: string; images: { url: string }[]; tracks: { items: SpotifyTrack[] } }>(
-      `/albums/${encodeURIComponent(id)}`,
-    );
-    return album.tracks.items.slice(0, limit).map((t) =>
-      spotifyTrackToResult({ ...t, album: { name: album.name, images: album.images } }),
-    );
+    if (!SPOTIFY_ID_RE.test(id)) throw new SpotifyError('ID de álbum do Spotify inválido', 400);
+    const album = await this.api<{
+      name: string;
+      artists?: { name: string }[];
+      images?: { url: string; width?: number }[];
+      total_tracks?: number;
+      tracks: { items: SpotifyTrack[]; next?: string | null; total?: number };
+    }>(`/albums/${encodeURIComponent(id)}`, {}, 'any');
+
+    const title = album.name?.trim() || `Álbum Spotify (${id})`;
+    const artistNames = (album.artists ?? []).map((a) => a.name).filter(Boolean).join(', ');
+    const description = artistNames ? `Álbum · ${artistNames}` : null;
+    const thumbnail = [...(album.images ?? [])].sort((a, b) => (b.width ?? 0) - (a.width ?? 0))[0]?.url ?? null;
+    const totalCount =
+      typeof album.total_tracks === 'number' && Number.isFinite(album.total_tracks)
+        ? album.total_tracks
+        : typeof album.tracks?.total === 'number' && Number.isFinite(album.tracks.total)
+          ? album.tracks.total
+          : null;
+
+    if (totalCount !== null && totalCount > limit) {
+      return { title, description, thumbnail, totalCount, tracks: [] };
+    }
+
+    const fetchLimit = Math.max(1, limit) + 1;
+    const items: SpotifyTrack[] = [...(album.tracks?.items ?? [])];
+    let nextPath = album.tracks?.next ? album.tracks.next.replace(API, '') : null;
+    while (nextPath && items.length < fetchLimit) {
+      const page = await this.api<{ items?: SpotifyTrack[]; next?: string | null }>(nextPath, {}, 'any');
+      items.push(...(page.items ?? []));
+      nextPath = page.next ? page.next.replace(API, '') : null;
+    }
+
+    const tracks = items
+      .slice(0, fetchLimit)
+      .map((t) => spotifyTrackToResult({ ...t, album: { name: title, images: album.images } }));
+
+    return {
+      title,
+      description,
+      thumbnail: thumbnail ?? tracks[0]?.thumbnail ?? null,
+      totalCount: totalCount ?? tracks.length,
+      tracks,
+    };
   }
 
   /** Requires user OAuth: Spotify only returns items for playlists the user owns or collaborates on. */
@@ -279,11 +323,113 @@ export class SpotifyService {
     return this.fetchPlaylistItems(id, limit, 'user');
   }
 
+  /**
+   * Public embed fallback for Spotify editorial/algorithmic playlists (e.g. `37i9dQZF1...` Radios/Mixes)
+   * that Spotify's Web API blocks with 404 for third-party apps.
+   */
+  private async fetchPlaylistFromPublicEmbed(id: string, limit: number): Promise<ExtractedPlaylist | null> {
+    try {
+      const res = await this.fetchFn(`https://open.spotify.com/embed/playlist/${encodeURIComponent(id)}`, {
+        headers: { 'user-agent': 'Mozilla/5.0' },
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (!res.ok) return null;
+      const html = await res.text();
+      const match = html.match(/<script\s+id="__NEXT_DATA__"\s+type="application\/json">([\s\S]*?)<\/script>/);
+      if (!match?.[1]) return null;
+
+      const parsed = JSON.parse(match[1]) as {
+        props?: {
+          pageProps?: {
+            state?: {
+              data?: {
+                entity?: {
+                  name?: string;
+                  subtitle?: string;
+                  coverArt?: { sources?: { url?: string; width?: number }[] };
+                  trackList?: {
+                    uri?: string;
+                    title?: string;
+                    subtitle?: string;
+                    duration?: number;
+                    entityType?: string;
+                  }[];
+                };
+              };
+            };
+          };
+        };
+      };
+
+      const entity = parsed?.props?.pageProps?.state?.data?.entity;
+      const list = entity?.trackList;
+      if (!entity || !Array.isArray(list) || list.length === 0) return null;
+
+      const title = entity.name?.trim() || `Playlist Spotify (${id})`;
+      const description = entity.subtitle?.trim() || null;
+      const covers = (entity.coverArt?.sources ?? []).filter((s): s is { url: string; width?: number } => Boolean(s.url));
+      const thumbnail = [...covers].sort((a, b) => (b.width ?? 0) - (a.width ?? 0))[0]?.url ?? null;
+
+      const fetchLimit = Math.max(1, limit) + 1;
+      const tracks: SearchResult[] = [];
+      for (const item of list) {
+        if (tracks.length >= fetchLimit) break;
+        const uriMatch = item.uri?.match(/^spotify:track:([A-Za-z0-9]+)$/);
+        const trackTitle = item.title?.trim();
+        if (!uriMatch || !trackTitle) continue;
+        const artist = (item.subtitle ?? '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+        const durationSec =
+          typeof item.duration === 'number' && Number.isFinite(item.duration) && item.duration > 0
+            ? Math.round(item.duration / 1000)
+            : null;
+        tracks.push({
+          source: 'spotify',
+          sourceId: uriMatch[1]!,
+          title: trackTitle,
+          artist,
+          album: null,
+          durationSec,
+          thumbnail,
+          spotifyUri: item.uri!,
+        });
+      }
+
+      if (tracks.length === 0) return null;
+      return {
+        title,
+        description,
+        thumbnail,
+        totalCount: list.length,
+        tracks,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   /** Fetches playlist metadata and tracks (up to `limit + 1` so callers can detect oversized playlists). */
   async getPlaylistDetails(id: string, limit = 50): Promise<ExtractedPlaylist> {
     this.requireConfigured();
     if (!SPOTIFY_ID_RE.test(id)) throw new SpotifyError('ID de playlist do Spotify inválido', 400);
-    const meta = await this.api<SpotifyPlaylistMeta>(`/playlists/${encodeURIComponent(id)}`, {}, 'any');
+
+    let meta: SpotifyPlaylistMeta;
+    try {
+      meta = await this.api<SpotifyPlaylistMeta>(`/playlists/${encodeURIComponent(id)}`, {}, 'any');
+    } catch (err) {
+      if (err instanceof SpotifyError && (err.status === 404 || err.status === 403)) {
+        const embedded = await this.fetchPlaylistFromPublicEmbed(id, limit);
+        if (embedded) return embedded;
+        if (id.startsWith('37i9dQZF1')) {
+          throw new SpotifyError(
+            'Rádio/Mix oficial do Spotify indisponível via API. Salve as faixas em uma playlist sua no Spotify e cole o link dela.',
+            404,
+            'SPOTIFY_EDITORIAL_BLOCKED',
+          );
+        }
+      }
+      throw err;
+    }
+
     const title = meta.name?.trim() || `Playlist Spotify (${id})`;
     const description = meta.description?.trim() || null;
     const thumbnail = [...(meta.images ?? [])].sort((a, b) => (b.width ?? 0) - (a.width ?? 0))[0]?.url ?? null;
