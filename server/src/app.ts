@@ -214,9 +214,14 @@ export const createApp = ({ config, jukebox, mdns, version = '0.1.0' }: AppDeps)
     }
   });
 
-  api.post('/library/autocategorize', requireHost, async (_req, res, next) => {
+  api.post('/library/autocategorize', requireHost, async (req, res, next) => {
     try {
-      res.json(await jukebox.autocategorizeLibrary());
+      const rawForce = req.body?.force;
+      if (rawForce !== undefined && typeof rawForce !== 'boolean') {
+        res.status(400).json({ error: 'force deve ser booleano' });
+        return;
+      }
+      res.json(await jukebox.autocategorizeLibrary({ force: rawForce === true }));
     } catch (err) {
       next(err);
     }

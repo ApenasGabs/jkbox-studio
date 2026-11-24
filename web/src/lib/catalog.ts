@@ -156,7 +156,16 @@ export const DEFAULT_CATEGORY_SUGGESTIONS = [
 ] as const;
 
 export const SUBCATEGORY_SUGGESTIONS_BY_CATEGORY: Record<string, readonly string[]> = {
-  funk: ['Funk Anos 2000', 'Funk Mandelão', 'Funk Bruxaria', 'Funk Melody', 'Funk Ostentação', 'Funk Pop'],
+  funk: [
+    'Funk Anos 2000',
+    'Funk Mandelão',
+    'Funk Bruxaria',
+    'Funk MTG',
+    'Funk Automotivo',
+    'Funk Melody',
+    'Funk Ostentação',
+    'Funk Pop',
+  ],
   'samba & pagode': ['Pagode 90', 'Pagode Atual', 'Samba Raiz'],
   pagode: ['Pagode 90', 'Pagode Atual', 'Samba Raiz'],
   sertanejo: ['Sertanejo Raiz', 'Sertanejo Universitário', 'Feminejo', 'Agronejo'],

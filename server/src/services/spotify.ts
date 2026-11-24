@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type { Config } from '../config.js';
 import type { Settings } from '../db.js';
+import { artistsMatch, normalizeArtistForMatch } from '../lib/artistMatch.js';
 import { SPOTIFY_ID_RE } from '../lib/validate.js';
 import type { SearchResult, SpotifyDevice, SpotifyPlaybackState } from '../types.js';
 import type { ExtractedPlaylist } from './ytdlp.js';
@@ -246,7 +247,7 @@ export class SpotifyService {
     };
   }
 
-  /** Searches Spotify artists by name and returns genres for the closest match. */
+  /** Searches Spotify artists by name and returns genres for the closest strict match. */
   async searchArtistGenres(artistName: string): Promise<string[]> {
     this.requireConfigured();
     const query = artistName.trim();
@@ -255,14 +256,11 @@ export class SpotifyService {
     const data = await this.api<{ artists?: { items?: SpotifyArtist[] } }>(`/search?${params}`);
     const items = (data.artists?.items ?? []).filter(Boolean);
     if (items.length === 0) return [];
-    const normalizedTarget = query.toLowerCase();
-    const exact = items.find((a) => a.name.trim().toLowerCase() === normalizedTarget);
-    const partial = items.find((a) => {
-      const n = a.name.trim().toLowerCase();
-      return n.includes(normalizedTarget) || normalizedTarget.includes(n);
-    });
-    const picked = exact ?? partial ?? items[0];
-    return Array.isArray(picked.genres) ? picked.genres : [];
+    const normalizedTarget = normalizeArtistForMatch(query);
+    const exact = items.find((a) => normalizeArtistForMatch(a.name) === normalizedTarget);
+    const matched = exact ?? items.find((a) => artistsMatch([query], a.name));
+    if (!matched) return [];
+    return Array.isArray(matched.genres) ? matched.genres : [];
   }
 
   async getAlbumTracks(id: string, limit = 50): Promise<SearchResult[]> {

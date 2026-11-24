@@ -207,8 +207,11 @@ export const api = {
       autoDjPlaylistId: string | null;
     }>('/api/config/autodj', settings),
   rescanLibrary: () => post<{ added: number }>('/api/library/rescan'),
-  autocategorizeLibrary: () =>
-    post<{ processed: number; updated: number; skippedManual: number; failed: number }>('/api/library/autocategorize'),
+  autocategorizeLibrary: (options?: { force?: boolean }) =>
+    post<{ processed: number; updated: number; skippedManual: number; failed: number }>(
+      '/api/library/autocategorize',
+      options?.force ? { force: true } : undefined,
+    ),
   discoverySuggest: (
     payload: {
       mode: DiscoveryMode;

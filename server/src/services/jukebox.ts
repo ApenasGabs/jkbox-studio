@@ -102,6 +102,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
   private _autoDjPlaylistId: string | null;
   private _playbackOutput: PlaybackOutput;
   private autocategorizeInFlight: Promise<AutocategorizeSummary> | null = null;
+  private autocategorizeInFlightForce = false;
   private readonly classifyingTrackIds = new Set<string>();
   private readonly pendingClassifications = new Set<Promise<void>>();
 
@@ -736,26 +737,32 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     }
   }
 
-  async autocategorizeLibrary(): Promise<AutocategorizeSummary> {
+  async autocategorizeLibrary(options: { force?: boolean } = {}): Promise<AutocategorizeSummary> {
     if (!this.classifier) {
       return { processed: 0, updated: 0, skippedManual: 0, failed: 0, updatedTrackIds: [] };
     }
-    if (this.autocategorizeInFlight) {
-      return this.autocategorizeInFlight;
+    const force = options.force === true;
+    while (this.autocategorizeInFlight) {
+      if (!force || this.autocategorizeInFlightForce) {
+        return this.autocategorizeInFlight;
+      }
+      await this.autocategorizeInFlight.catch(() => {});
     }
     const run = (async () => {
-      const summary = await this.classifier!.autocategorizeAll();
+      const summary = await this.classifier!.autocategorizeAll({ force });
       if (summary.updatedTrackIds.length > 0 && this.hasActiveTrack(new Set(summary.updatedTrackIds))) {
         this.queue.emit('change');
       }
       return summary;
     })();
     this.autocategorizeInFlight = run;
+    this.autocategorizeInFlightForce = force;
     try {
       return await run;
     } finally {
       if (this.autocategorizeInFlight === run) {
         this.autocategorizeInFlight = null;
+        this.autocategorizeInFlightForce = false;
       }
     }
   }
