@@ -8,6 +8,8 @@ interface LyricsViewProps {
   error: string | null;
   currentTimeSec: number;
   variant?: 'kiosk' | 'remote';
+  immersive?: boolean;
+  controlsHidden?: boolean;
   onRetry?: () => void;
   onAdjustOffset?: (deltaMs: number) => void;
   onResetOffset?: () => void;
@@ -26,6 +28,8 @@ export function LyricsView({
   error,
   currentTimeSec,
   variant = 'kiosk',
+  immersive = false,
+  controlsHidden = false,
   onRetry,
   onAdjustOffset,
   onResetOffset,
@@ -33,6 +37,8 @@ export function LyricsView({
   className = '',
 }: LyricsViewProps) {
   const isKiosk = variant === 'kiosk';
+  const isImmersiveKiosk = isKiosk && immersive;
+  const containerSurfaceClass = isImmersiveKiosk ? 'bg-black/25' : 'glass';
   const containerRef = useRef<HTMLDivElement>(null);
   const lineRefs = useRef<(HTMLParagraphElement | null)[]>([]);
   const pauseTimerRef = useRef<number | null>(null);
@@ -97,7 +103,10 @@ export function LyricsView({
 
   if (loading) {
     return (
-      <div className={`glass flex flex-col items-center justify-center gap-3 p-6 text-center ${className}`}>
+      <div
+        data-kiosk-stage={isImmersiveKiosk ? 'lyrics' : undefined}
+        className={`${containerSurfaceClass} flex flex-col items-center justify-center gap-3 p-6 text-center ${className}`}
+      >
         <div className="h-7 w-7 animate-spin rounded-full border-2 border-accent border-t-transparent" />
         <p className="text-sm text-zinc-300">Buscando letra…</p>
       </div>
@@ -106,7 +115,10 @@ export function LyricsView({
 
   if (error) {
     return (
-      <div className={`glass flex flex-col items-center justify-center gap-3 p-6 text-center ${className}`}>
+      <div
+        data-kiosk-stage={isImmersiveKiosk ? 'lyrics' : undefined}
+        className={`${containerSurfaceClass} flex flex-col items-center justify-center gap-3 p-6 text-center ${className}`}
+      >
         <span className="text-3xl">⚠️</span>
         <p className="font-semibold text-red-300">Não foi possível carregar a letra</p>
         <p className="text-xs text-zinc-400">{error}</p>
@@ -130,7 +142,10 @@ export function LyricsView({
     : [];
 
   return (
-    <div className={`glass relative flex flex-col overflow-hidden ${className}`}>
+    <div
+      data-kiosk-stage={isImmersiveKiosk ? 'lyrics' : undefined}
+      className={`${containerSurfaceClass} relative flex flex-col overflow-hidden ${className}`}
+    >
       {hasSynced ? (
         <div className="relative min-h-0 flex-1">
           <div
@@ -139,19 +154,35 @@ export function LyricsView({
             onTouchStart={handleUserScrollIntent}
             style={FADE_MASK_STYLE}
             className={`relative h-full overflow-y-auto scroll-smooth ${
-              isKiosk ? 'px-5 py-24 sm:px-8 sm:py-32' : 'px-4 py-20'
+              isImmersiveKiosk
+                ? 'px-6 py-[36vh] sm:px-12 lg:px-20 lg:py-[40vh]'
+                : isKiosk
+                  ? 'px-5 py-24 sm:px-8 sm:py-32'
+                  : 'px-4 py-20'
             }`}
           >
             {activeIndex === -1 && (
               <p
                 className={`mb-5 font-semibold tracking-[0.25em] text-accent-2/80 ${
-                  isKiosk ? 'text-base sm:text-lg' : 'text-sm'
+                  isImmersiveKiosk
+                    ? 'mx-auto w-full max-w-5xl text-xl sm:text-2xl lg:text-3xl'
+                    : isKiosk
+                      ? 'text-base sm:text-lg'
+                      : 'text-sm'
                 }`}
               >
                 ♪ •••
               </p>
             )}
-            <div className={isKiosk ? 'flex flex-col gap-5 sm:gap-6' : 'flex flex-col gap-3.5'}>
+            <div
+              className={
+                isImmersiveKiosk
+                  ? 'mx-auto flex w-full max-w-5xl flex-col gap-6 sm:gap-7 lg:gap-8'
+                  : isKiosk
+                    ? 'flex flex-col gap-5 sm:gap-6'
+                    : 'flex flex-col gap-3.5'
+              }
+            >
               {parsedLines.map((line, index) => {
                 const isActive = index === activeIndex;
                 const isPast = activeIndex >= 0 && index < activeIndex;
@@ -163,17 +194,23 @@ export function LyricsView({
                     }}
                     aria-current={isActive ? 'true' : undefined}
                     className={`transition-all duration-300 ease-out [overflow-wrap:anywhere] ${
-                      isKiosk
+                      isImmersiveKiosk
                         ? isActive
-                          ? 'origin-left scale-[1.02] text-2xl font-extrabold leading-snug text-white drop-shadow-[0_0_24px_rgba(168,85,247,0.45)] sm:text-3xl lg:text-4xl'
+                          ? 'origin-left scale-[1.03] text-3xl font-extrabold leading-snug text-white drop-shadow-[0_0_28px_rgba(168,85,247,0.5)] sm:text-4xl lg:text-5xl'
                           : isPast
-                            ? 'text-xl font-semibold leading-snug text-white/30 sm:text-2xl lg:text-3xl'
-                            : 'text-xl font-semibold leading-snug text-white/55 sm:text-2xl lg:text-3xl'
-                        : isActive
-                          ? 'text-lg font-bold leading-snug text-white drop-shadow-[0_0_14px_rgba(168,85,247,0.4)] sm:text-xl'
-                          : isPast
-                            ? 'text-base font-medium leading-snug text-white/35'
-                            : 'text-base font-medium leading-snug text-white/60'
+                            ? 'text-2xl font-semibold leading-snug text-white/30 sm:text-3xl lg:text-4xl'
+                            : 'text-2xl font-semibold leading-snug text-white/55 sm:text-3xl lg:text-4xl'
+                        : isKiosk
+                          ? isActive
+                            ? 'origin-left scale-[1.02] text-2xl font-extrabold leading-snug text-white drop-shadow-[0_0_24px_rgba(168,85,247,0.45)] sm:text-3xl lg:text-4xl'
+                            : isPast
+                              ? 'text-xl font-semibold leading-snug text-white/30 sm:text-2xl lg:text-3xl'
+                              : 'text-xl font-semibold leading-snug text-white/55 sm:text-2xl lg:text-3xl'
+                          : isActive
+                            ? 'text-lg font-bold leading-snug text-white drop-shadow-[0_0_14px_rgba(168,85,247,0.4)] sm:text-xl'
+                            : isPast
+                              ? 'text-base font-medium leading-snug text-white/35'
+                              : 'text-base font-medium leading-snug text-white/60'
                     }`}
                   >
                     {line.text}
@@ -187,7 +224,9 @@ export function LyricsView({
             <button
               type="button"
               onClick={resumeAutoScroll}
-              className="absolute bottom-3 left-1/2 z-10 -translate-x-1/2 rounded-full border border-white/15 bg-panel/90 px-3.5 py-1.5 text-xs font-semibold text-white shadow-lg backdrop-blur hover:bg-panel"
+              className={`absolute left-1/2 z-20 -translate-x-1/2 rounded-full border border-white/15 bg-panel/90 px-3.5 py-1.5 text-xs font-semibold text-white shadow-lg backdrop-blur hover:bg-panel ${
+                isImmersiveKiosk ? 'bottom-44' : 'bottom-3'
+              }`}
             >
               ↻ Acompanhar letra
             </button>
@@ -195,37 +234,59 @@ export function LyricsView({
         </div>
       ) : plainParagraphs.length > 0 ? (
         <div className="flex min-h-0 flex-1 flex-col">
-          <div className="flex items-center justify-between border-b border-white/10 px-4 py-2 text-xs text-zinc-400">
+          <div
+            className={`flex items-center justify-between border-b border-white/10 text-xs text-zinc-400 ${
+              isImmersiveKiosk ? 'px-6 pb-2 pt-24 lg:px-12 lg:pt-28' : 'px-4 py-2'
+            }`}
+          >
             <span>Letra sem sincronização</span>
             <span>Role manualmente</span>
           </div>
-          <div className={`min-h-0 flex-1 overflow-y-auto ${isKiosk ? 'space-y-3 px-6 py-5 sm:px-8' : 'space-y-2.5 px-4 py-4'}`}>
-            {plainParagraphs.map((line, index) =>
-              line.trim() ? (
-                <p
-                  key={index}
-                  className={`[overflow-wrap:anywhere] ${
-                    isKiosk ? 'text-lg leading-relaxed text-zinc-200 sm:text-xl lg:text-2xl' : 'text-base leading-relaxed text-zinc-200'
-                  }`}
-                >
-                  {line}
-                </p>
-              ) : (
-                <div key={index} className="h-3" aria-hidden="true" />
-              ),
-            )}
+          <div
+            className={`min-h-0 flex-1 overflow-y-auto ${
+              isImmersiveKiosk
+                ? 'px-6 py-6 pb-32 sm:px-12 lg:px-20'
+                : isKiosk
+                  ? 'space-y-3 px-6 py-5 sm:px-8'
+                  : 'space-y-2.5 px-4 py-4'
+            }`}
+          >
+            <div className={isImmersiveKiosk ? 'mx-auto w-full max-w-5xl space-y-4' : 'space-y-3'}>
+              {plainParagraphs.map((line, index) =>
+                line.trim() ? (
+                  <p
+                    key={index}
+                    className={`[overflow-wrap:anywhere] ${
+                      isImmersiveKiosk
+                        ? 'text-lg leading-relaxed text-zinc-200 sm:text-2xl lg:text-3xl'
+                        : isKiosk
+                          ? 'text-lg leading-relaxed text-zinc-200 sm:text-xl lg:text-2xl'
+                          : 'text-base leading-relaxed text-zinc-200'
+                    }`}
+                  >
+                    {line}
+                  </p>
+                ) : (
+                  <div key={index} className="h-3" aria-hidden="true" />
+                ),
+              )}
+            </div>
           </div>
         </div>
       ) : lyrics.instrumental ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
-          <span className={isKiosk ? 'text-5xl' : 'text-4xl'}>🎼</span>
-          <p className={isKiosk ? 'text-2xl font-bold' : 'text-lg font-bold'}>Faixa instrumental</p>
+          <span className={isImmersiveKiosk ? 'text-6xl' : isKiosk ? 'text-5xl' : 'text-4xl'}>🎼</span>
+          <p className={isImmersiveKiosk ? 'text-3xl font-bold' : isKiosk ? 'text-2xl font-bold' : 'text-lg font-bold'}>
+            Faixa instrumental
+          </p>
           <p className="max-w-sm text-sm text-zinc-400">Aproveite o som — esta música não possui letra.</p>
         </div>
       ) : (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
-          <span className={isKiosk ? 'text-5xl' : 'text-4xl'}>🎵</span>
-          <p className={isKiosk ? 'text-2xl font-bold' : 'text-lg font-bold'}>Letra não disponível</p>
+          <span className={isImmersiveKiosk ? 'text-6xl' : isKiosk ? 'text-5xl' : 'text-4xl'}>🎵</span>
+          <p className={isImmersiveKiosk ? 'text-3xl font-bold' : isKiosk ? 'text-2xl font-bold' : 'text-lg font-bold'}>
+            Letra não disponível
+          </p>
           <p className="max-w-sm text-sm text-zinc-400">
             Não encontramos letra para esta faixa.
             {isKiosk && ' Você pode adicionar um arquivo .lrc com o mesmo nome da faixa em ./data/music.'}
@@ -234,7 +295,15 @@ export function LyricsView({
       )}
 
       {hasSynced && (isKiosk || lyrics.source !== 'none') && (
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/10 bg-black/25 px-3 py-2 text-xs text-zinc-400 sm:px-4">
+        <div
+          className={
+            isImmersiveKiosk
+              ? `absolute bottom-[120px] left-1/2 z-20 flex -translate-x-1/2 flex-wrap items-center justify-center gap-3 rounded-full border border-white/15 bg-black/70 px-4 py-1.5 text-xs text-zinc-300 shadow-xl backdrop-blur-md transition-opacity duration-300 ${
+                  controlsHidden ? 'pointer-events-none opacity-0' : 'opacity-100'
+                }`
+              : 'flex flex-wrap items-center justify-between gap-2 border-t border-white/10 bg-black/25 px-3 py-2 text-xs text-zinc-400 sm:px-4'
+          }
+        >
           <span className="uppercase tracking-wider">
             {lyrics.source === 'local' ? 'Arquivo .lrc' : lyrics.source === 'lrclib' ? 'LRCLIB' : ''}
           </span>

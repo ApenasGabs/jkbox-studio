@@ -27,6 +27,7 @@ import {
   playlistTrackFromTrack,
 } from '../lib/catalog';
 import { cssImageUrl, formatTime, isLoopback, resolveRemoteQrUrl } from '../lib/format';
+import { computeStageLayoutFlags, type StageMode } from '../lib/immersiveStage';
 import { activateFocusedElement, findNextSpatialCandidate, getFocusableElements } from '../lib/spatialNav';
 import { formatSpotifyOutputBadge } from '../lib/spotifyConnect';
 import type {
@@ -42,12 +43,11 @@ import type {
   Track,
 } from '../lib/types';
 import { useInterpolatedTime } from '../lib/useInterpolatedTime';
-import { useJukebox } from '../lib/useJukebox';
+import { type DownloadInfo, useJukebox } from '../lib/useJukebox';
 import { useKioskInput } from '../lib/useKioskInput';
 import { useSpotifyVolumeControl } from '../lib/useSpotifyVolume';
 import { useTrackLyrics } from '../lib/useTrackLyrics';
 
-type StageMode = 'cover' | 'lyrics' | 'video';
 type DefaultStageView = 'cover' | 'video' | 'video-lyrics' | 'lyrics';
 
 const STAGE_MODE_KEY = 'jkbox.stageMode';
@@ -137,6 +137,12 @@ export function Kiosk() {
   const [offsetBusy, setOffsetBusy] = useState(false);
   const [cinemaMode, setCinemaMode] = useState(false);
   const [cinemaIdle, setCinemaIdle] = useState(false);
+  const [queueDrawerOpen, setQueueDrawerOpen] = useState(false);
+  const [isDesktop, setIsDesktop] = useState(() =>
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(min-width: 1024px)').matches
+      : true,
+  );
   const [reactionsEnabled, setReactionsEnabled] = useState<boolean>(readInitialReactionsEnabled);
   const [isFullscreen, setIsFullscreen] = useState(() =>
     typeof document !== 'undefined' ? Boolean(document.fullscreenElement) : false,
@@ -145,6 +151,7 @@ export function Kiosk() {
   const kioskRef = useRef<HTMLDivElement>(null);
   const mainRef = useRef<HTMLElement>(null);
   const asideRef = useRef<HTMLElement>(null);
+  const queueDrawerRef = useRef<HTMLDivElement>(null);
   const hostDialogRef = useRef<HTMLDivElement>(null);
   const catalogDialogRef = useRef<HTMLDivElement>(null);
   const unlockBtnRef = useRef<HTMLButtonElement>(null);
@@ -465,7 +472,22 @@ export function Kiosk() {
   const showUpNextBanner = Boolean(
     current && nextUp && effectiveDuration > 0 && remainingSec <= UP_NEXT_WINDOW_SEC && dismissedUpNextId !== current.id,
   );
-  const controlsHidden = cinemaMode && cinemaIdle && !settingsOpen && !catalogOpen && !editingTrack && !playlistPickerTrack && !discoveryContext && unlocked;
+  const {
+    isDesktopImmersive,
+    sidebarCollapsed,
+    autoHideActive,
+    controlsHidden,
+  } = computeStageLayoutFlags({
+    isDesktop,
+    cinemaMode,
+    stageMode: effectiveStageMode,
+    hasTrack: Boolean(current),
+    hasModalOpen: Boolean(
+      settingsOpen || catalogOpen || queueDrawerOpen || editingTrack || playlistPickerTrack || discoveryContext,
+    ),
+    unlocked,
+    idle: cinemaIdle,
+  });
   const backdrop = cssImageUrl(current?.track.thumbnail);
 
   const enqueueFromCatalog = async (result: SearchResult) => {
@@ -537,7 +559,9 @@ export function Kiosk() {
             ? 'catalog'
             : settingsOpen
               ? 'host'
-              : 'main';
+              : queueDrawerOpen
+                ? 'queue-drawer'
+                : 'main';
 
   const getActiveScopeElements = useCallback((): HTMLElement[] => {
     if (activeScope === 'unlock') {
@@ -557,6 +581,9 @@ export function Kiosk() {
     }
     if (activeScope === 'host') {
       return getFocusableElements(hostDialogRef.current);
+    }
+    if (activeScope === 'queue-drawer') {
+      return getFocusableElements(queueDrawerRef.current);
     }
     return [...getFocusableElements(mainRef.current), ...getFocusableElements(asideRef.current)];
   }, [activeScope]);
@@ -605,7 +632,7 @@ export function Kiosk() {
       }
     });
     return () => window.cancelAnimationFrame(raf);
-  }, [activeScope, catalogHistory, catalogTab, current?.id, cinemaMode, getActiveScopeElements, focusDefaultInScope]);
+  }, [activeScope, catalogHistory, catalogTab, current?.id, cinemaMode, queueDrawerOpen, effectiveStageMode, sidebarCollapsed, getActiveScopeElements, focusDefaultInScope]);
 
   useEffect(() => {
     const root = kioskRef.current;
@@ -636,17 +663,33 @@ export function Kiosk() {
   }, [focusDefaultInScope]);
 
   useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const mq = window.matchMedia('(min-width: 1024px)');
+    setIsDesktop(mq.matches);
+    const onChange = (e: MediaQueryListEvent) => setIsDesktop(e.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+
+  useEffect(() => {
+    if (!sidebarCollapsed && queueDrawerOpen) {
+      setQueueDrawerOpen(false);
+    }
+  }, [sidebarCollapsed, queueDrawerOpen]);
+
+  useEffect(() => {
     const onFullscreenChange = () => setIsFullscreen(Boolean(document.fullscreenElement));
     document.addEventListener('fullscreenchange', onFullscreenChange);
     return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
   }, []);
 
   useEffect(() => {
-    if (!cinemaMode || settingsOpen || !unlocked) {
+    if (!autoHideActive) {
       setCinemaIdle(false);
       wakeCinemaRef.current = null;
       return;
     }
+    setCinemaIdle(false);
     let timer = window.setTimeout(() => setCinemaIdle(true), CINEMA_IDLE_MS);
     const resetIdle = () => {
       setCinemaIdle(false);
@@ -657,14 +700,16 @@ export function Kiosk() {
     window.addEventListener('mousemove', resetIdle);
     window.addEventListener('mousedown', resetIdle);
     window.addEventListener('touchstart', resetIdle, { passive: true });
+    window.addEventListener('keydown', resetIdle);
     return () => {
       wakeCinemaRef.current = null;
       window.clearTimeout(timer);
       window.removeEventListener('mousemove', resetIdle);
       window.removeEventListener('mousedown', resetIdle);
       window.removeEventListener('touchstart', resetIdle);
+      window.removeEventListener('keydown', resetIdle);
     };
-  }, [cinemaMode, settingsOpen, unlocked]);
+  }, [autoHideActive, effectiveStageMode, current?.id]);
 
   const handleKioskCommand = useCallback(
     (command: KioskCommand) => {
@@ -705,6 +750,10 @@ export function Kiosk() {
           setSettingsOpen(false);
           return;
         }
+        if (queueDrawerOpen) {
+          setQueueDrawerOpen(false);
+          return;
+        }
         if (cinemaMode && !document.fullscreenElement) {
           setCinemaMode(false);
         }
@@ -716,6 +765,7 @@ export function Kiosk() {
         if (playlistPickerTrack) setPlaylistPickerTrack(null);
         if (editingTrack) setEditingTrack(null);
         if (catalogOpen) setCatalogOpen(false);
+        if (queueDrawerOpen) setQueueDrawerOpen(false);
         setSettingsOpen((v) => !v);
         return;
       }
@@ -771,6 +821,7 @@ export function Kiosk() {
       catalogOpen,
       catalogHistory.length,
       settingsOpen,
+      queueDrawerOpen,
       cinemaMode,
       current,
       getActiveScopeElements,
@@ -870,66 +921,128 @@ export function Kiosk() {
       {/* Now playing */}
       <main
         ref={mainRef}
-        className={`relative z-10 flex min-h-0 flex-1 flex-col items-center justify-center gap-4 px-5 pt-4 sm:px-8 lg:justify-between lg:gap-3 lg:px-8 lg:pb-3 lg:pt-6 ${
-          cinemaMode ? 'pb-24 sm:pb-14' : 'pb-12 sm:pb-14'
-        }`}
+        className={
+          isDesktopImmersive
+            ? 'relative z-10 flex min-h-0 w-full flex-1 flex-col items-center justify-center p-0'
+            : `relative z-10 flex min-h-0 flex-1 flex-col items-center justify-center gap-4 px-5 pt-4 sm:px-8 lg:justify-between lg:gap-3 lg:px-8 lg:pb-3 lg:pt-6 ${
+                cinemaMode ? 'pb-24 sm:pb-14' : 'pb-12 sm:pb-14'
+              }`
+        }
       >
-        {/* Always in normal flex flow so central stage controls can never collide with the header. */}
+        {/* Top bar (+ compact track pill & stage tabs in desktop immersive mode) */}
         <div
-          className={`flex w-full shrink-0 flex-wrap items-center justify-between gap-2 transition-opacity duration-300 ${
-            controlsHidden ? 'pointer-events-none opacity-0' : 'opacity-100'
-          }`}
+          className={
+            isDesktopImmersive
+              ? `pointer-events-none lg:absolute lg:inset-x-0 lg:top-0 lg:z-20 lg:flex lg:flex-col lg:gap-2 lg:bg-gradient-to-b lg:from-black/85 lg:via-black/55 lg:to-transparent lg:px-6 lg:pb-8 lg:pt-4 transition-opacity duration-300 ${
+                  controlsHidden ? 'opacity-0' : 'opacity-100'
+                }`
+              : `flex w-full shrink-0 flex-wrap items-center justify-between gap-2 transition-opacity duration-300 ${
+                  controlsHidden ? 'pointer-events-none opacity-0' : 'opacity-100'
+                }`
+          }
         >
-          <header className="flex items-center gap-3">
-            <span className="text-2xl font-black tracking-tight">
-              jkbox<span className="text-accent">studio</span>
-            </span>
-            <span className={`h-2 w-2 rounded-full ${connected ? 'bg-emerald-400' : 'bg-red-500'}`} title={connected ? 'online' : 'reconectando'} />
-          </header>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setCatalogOpen(true)}
-              className="rounded-full bg-white/10 px-3 py-1 text-xs font-medium transition hover:bg-white/20 sm:text-sm"
-              title="Explorar acervo local"
-            >
-              📚 Acervo
-            </button>
-            <button
-              type="button"
-              aria-pressed={cinemaMode}
-              onClick={() => setCinemaMode((v) => !v)}
-              className={`rounded-full px-3 py-1 text-xs font-medium transition sm:text-sm ${
-                cinemaMode ? 'bg-accent text-white shadow' : 'bg-white/10 hover:bg-white/20'
-              }`}
-              title={cinemaMode ? 'Sair do Modo Cinema (Esc)' : 'Ocultar fila e controles após inatividade'}
-            >
-              {cinemaMode ? '🎬 Cinema ON' : '🎬 Cinema'}
-            </button>
-            <button
-              type="button"
-              aria-pressed={isFullscreen}
-              onClick={() => void toggleFullscreen()}
-              className="rounded-full bg-white/10 px-3 py-1 text-xs font-medium transition hover:bg-white/20 sm:text-sm"
-              title={isFullscreen ? 'Sair da tela cheia' : 'Tela cheia'}
-            >
-              {isFullscreen ? '🗗 Sair' : '⛶ Tela cheia'}
-            </button>
-            <button
-              type="button"
-              onClick={() => setSettingsOpen((v) => !v)}
-              className="rounded-full bg-white/10 px-3 py-1 text-xs font-medium transition hover:bg-white/20 sm:text-sm"
-            >
-              ⚙︎ Host
-            </button>
+          <div
+            className={`flex w-full items-center justify-between gap-3 ${
+              isDesktopImmersive ? (controlsHidden ? 'pointer-events-none' : 'pointer-events-auto') : 'flex-wrap'
+            }`}
+          >
+            <div className="flex min-w-0 items-center gap-3">
+              <header className="flex shrink-0 items-center gap-3">
+                <span className="text-2xl font-black tracking-tight">
+                  jkbox<span className="text-accent">studio</span>
+                </span>
+                <span className={`h-2 w-2 rounded-full ${connected ? 'bg-emerald-400' : 'bg-red-500'}`} title={connected ? 'online' : 'reconectando'} />
+              </header>
+              {isDesktopImmersive && current && (
+                <div className="hidden min-w-0 items-center gap-2.5 border-l border-white/15 pl-3 lg:flex">
+                  <Cover src={current.track.thumbnail} alt={current.track.title} className="h-9 w-9 shrink-0 rounded-lg" />
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-bold leading-tight text-white">{current.track.title}</p>
+                    <p className="truncate text-xs text-zinc-300">
+                      {current.track.artist}
+                      {current.track.album ? ` · ${current.track.album}` : ''}
+                      {` · pedido por ${current.requesterName}`}
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="flex shrink-0 flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setCatalogOpen(true)}
+                className="rounded-full bg-white/10 px-3 py-1 text-xs font-medium transition hover:bg-white/20 sm:text-sm"
+                title="Explorar acervo local"
+              >
+                📚 Acervo
+              </button>
+              {sidebarCollapsed && (
+                <button
+                  type="button"
+                  aria-expanded={queueDrawerOpen}
+                  onClick={() => setQueueDrawerOpen((v) => !v)}
+                  className={`rounded-full px-3 py-1 text-xs font-medium transition sm:text-sm ${
+                    queueDrawerOpen ? 'bg-accent text-white shadow' : 'bg-white/10 hover:bg-white/20'
+                  }`}
+                  title="Abrir fila de músicas e QR Code"
+                >
+                  📋 Fila ({state.queue.length})
+                </button>
+              )}
+              <button
+                type="button"
+                aria-pressed={cinemaMode}
+                onClick={() => setCinemaMode((v) => !v)}
+                className={`rounded-full px-3 py-1 text-xs font-medium transition sm:text-sm ${
+                  cinemaMode ? 'bg-accent text-white shadow' : 'bg-white/10 hover:bg-white/20'
+                }`}
+                title={cinemaMode ? 'Sair do Modo Cinema (Esc)' : 'Ocultar fila e controles após inatividade'}
+              >
+                {cinemaMode ? '🎬 Cinema ON' : '🎬 Cinema'}
+              </button>
+              <button
+                type="button"
+                aria-pressed={isFullscreen}
+                onClick={() => void toggleFullscreen()}
+                className="rounded-full bg-white/10 px-3 py-1 text-xs font-medium transition hover:bg-white/20 sm:text-sm"
+                title={isFullscreen ? 'Sair da tela cheia' : 'Tela cheia'}
+              >
+                {isFullscreen ? '🗗 Sair' : '⛶ Tela cheia'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSettingsOpen((v) => !v)}
+                className="rounded-full bg-white/10 px-3 py-1 text-xs font-medium transition hover:bg-white/20 sm:text-sm"
+              >
+                ⚙︎ Host
+              </button>
+            </div>
           </div>
+
+          {isDesktopImmersive && current && (
+            <div className={`flex flex-wrap items-center justify-center gap-2 ${controlsHidden ? 'pointer-events-none' : 'pointer-events-auto'}`}>
+              <StageTabsControls
+                effectiveStageMode={effectiveStageMode}
+                hasVideoAvailable={hasVideoAvailable}
+                videoMode={config?.videoMode}
+                videoLyricsOverlay={videoLyricsOverlay}
+                spotifyBadge={spotifyBadge}
+                onSelectStageMode={setStageMode}
+                onToggleVideoLyrics={() => setVideoLyricsOverlay((v) => !v)}
+                onOpenSettings={() => setSettingsOpen(true)}
+                onAddPlaylist={() => setPlaylistPickerTrack(playlistTrackFromTrack(current.track))}
+              />
+            </div>
+          )}
         </div>
 
         {showUpNextBanner && nextUp && current && (
           <div
             role="status"
             aria-live="polite"
-            className="glass absolute inset-x-3 top-16 z-20 flex items-center gap-3 border-accent/40 bg-panel/90 p-3 shadow-2xl shadow-black/60 backdrop-blur-md sm:inset-x-auto sm:right-6 sm:top-20 sm:w-80"
+            className={`glass absolute inset-x-3 top-16 z-20 flex items-center gap-3 border-accent/40 bg-panel/90 p-3 shadow-2xl shadow-black/60 backdrop-blur-md sm:inset-x-auto sm:right-6 sm:w-80 ${
+              isDesktopImmersive ? 'sm:top-28' : 'sm:top-20'
+            }`}
           >
             <Cover src={nextUp.track.thumbnail} alt={nextUp.track.title} className="h-12 w-12 shrink-0 rounded-xl" />
             <div className="min-w-0 flex-1">
@@ -954,81 +1067,34 @@ export function Kiosk() {
           </div>
         )}
 
-        <div className="flex min-h-0 w-full flex-1 flex-col items-center justify-center gap-4 lg:gap-3 xl:gap-4">
+        <div
+          className={
+            isDesktopImmersive
+              ? 'relative flex min-h-0 h-full w-full flex-1 flex-col items-center justify-center'
+              : 'flex min-h-0 w-full flex-1 flex-col items-center justify-center gap-4 lg:gap-3 xl:gap-4'
+          }
+        >
           {current ? (
             <>
-              <div
-                className={`flex shrink-0 flex-wrap items-center justify-center gap-2 transition-opacity duration-300 ${
-                  controlsHidden ? 'pointer-events-none opacity-0' : 'opacity-100'
-                }`}
-              >
-              <div
-                role="tablist"
-                aria-label="Modo de visualização do palco"
-                className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 p-1 backdrop-blur"
-              >
-                {STAGE_MODES.map((mode) => {
-                  const disabled = mode.id === 'video' && !hasVideoAvailable;
-                  return (
-                    <button
-                      key={mode.id}
-                      type="button"
-                      role="tab"
-                      disabled={disabled}
-                      aria-selected={effectiveStageMode === mode.id}
-                      title={
-                        disabled
-                          ? config?.videoMode === 'off'
-                            ? 'Modo videoclipe desativado (VIDEO_MODE=off)'
-                            : 'Videoclipe indisponível para esta faixa'
-                          : undefined
-                      }
-                      onClick={() => !disabled && setStageMode(mode.id)}
-                      className={`rounded-full px-4 py-1 text-xs font-semibold transition sm:text-sm ${
-                        effectiveStageMode === mode.id
-                          ? 'bg-white text-zinc-900 shadow'
-                          : disabled
-                            ? 'cursor-not-allowed text-zinc-500'
-                            : 'text-zinc-300 hover:text-white'
-                      }`}
-                    >
-                      {mode.label}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {effectiveStageMode === 'video' && (
-                <button
-                  type="button"
-                  aria-pressed={videoLyricsOverlay}
-                  onClick={() => setVideoLyricsOverlay((v) => !v)}
-                  className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition sm:text-sm ${
-                    videoLyricsOverlay
-                      ? 'border-accent/60 bg-accent/25 text-white shadow'
-                      : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white'
+              {!isDesktopImmersive && (
+                <div
+                  className={`flex shrink-0 flex-wrap items-center justify-center gap-2 transition-opacity duration-300 ${
+                    controlsHidden ? 'pointer-events-none opacity-0' : 'opacity-100'
                   }`}
                 >
-                  🎤 Legenda {videoLyricsOverlay ? 'ON' : 'OFF'}
-                </button>
+                  <StageTabsControls
+                    effectiveStageMode={effectiveStageMode}
+                    hasVideoAvailable={hasVideoAvailable}
+                    videoMode={config?.videoMode}
+                    videoLyricsOverlay={videoLyricsOverlay}
+                    spotifyBadge={spotifyBadge}
+                    onSelectStageMode={setStageMode}
+                    onToggleVideoLyrics={() => setVideoLyricsOverlay((v) => !v)}
+                    onOpenSettings={() => setSettingsOpen(true)}
+                    onAddPlaylist={() => setPlaylistPickerTrack(playlistTrackFromTrack(current.track))}
+                  />
+                </div>
               )}
-              {spotifyBadge && (
-                <SpotifyOutputBadge
-                  label={spotifyBadge}
-                  onClick={() => setSettingsOpen(true)}
-                  className="px-3 py-1.5"
-                  title="Alterar saída de áudio ou volume no painel do Host"
-                />
-              )}
-              <button
-                type="button"
-                onClick={() => setPlaylistPickerTrack(playlistTrackFromTrack(current.track))}
-                title="Adicionar faixa tocando agora a uma playlist interna"
-                className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-zinc-200 transition hover:bg-white/15 hover:text-white sm:text-sm"
-              >
-                + Playlist
-              </button>
-            </div>
 
             {effectiveStageMode === 'cover' ? (
               <>
@@ -1061,7 +1127,45 @@ export function Kiosk() {
               </>
             ) : effectiveStageMode === 'lyrics' ? (
               <>
-                <div className="flex w-full max-w-3xl shrink-0 items-center gap-3 px-1">
+                {!isDesktopImmersive && (
+                  <div className="flex w-full max-w-3xl shrink-0 items-center gap-3 px-1">
+                    <Cover src={current.track.thumbnail} alt={current.track.title} className="h-12 w-12 shrink-0 rounded-xl sm:h-14 sm:w-14" />
+                    <div className="min-w-0 flex-1">
+                      <h1 className="truncate text-lg font-bold leading-tight sm:text-2xl">{current.track.title}</h1>
+                      <p className="truncate text-sm text-zinc-300">
+                        {current.track.artist}
+                        {current.track.album ? ` · ${current.track.album}` : ''}
+                      </p>
+                    </div>
+                    <div className="hidden shrink-0 items-center gap-2 text-xs text-zinc-400 sm:flex">
+                      <SourceBadge source={current.track.source} />
+                      <GenreBadges genre={current.track.genre} subgenre={current.track.subgenre} variant="kiosk-compact" />
+                      <span>pedido por {current.requesterName}</span>
+                    </div>
+                  </div>
+                )}
+                <LyricsView
+                  variant="kiosk"
+                  immersive={isDesktopImmersive}
+                  controlsHidden={controlsHidden}
+                  lyrics={lyrics}
+                  loading={lyricsLoading}
+                  error={lyricsError}
+                  currentTimeSec={effectiveCurrentSec}
+                  onRetry={reloadLyrics}
+                  onAdjustOffset={adjustLyricsOffset}
+                  onResetOffset={resetLyricsOffset}
+                  offsetBusy={offsetBusy}
+                  className={
+                    isDesktopImmersive
+                      ? 'h-full w-full flex-1'
+                      : 'h-[52vh] min-h-[280px] max-h-[500px] w-full max-w-3xl lg:h-auto lg:max-h-none lg:min-h-0 lg:flex-1'
+                  }
+                />
+              </>
+            ) : (
+              !isDesktopImmersive && (
+                <div className="flex w-full max-w-4xl shrink-0 items-center gap-3 px-1">
                   <Cover src={current.track.thumbnail} alt={current.track.title} className="h-12 w-12 shrink-0 rounded-xl sm:h-14 sm:w-14" />
                   <div className="min-w-0 flex-1">
                     <h1 className="truncate text-lg font-bold leading-tight sm:text-2xl">{current.track.title}</h1>
@@ -1076,44 +1180,19 @@ export function Kiosk() {
                     <span>pedido por {current.requesterName}</span>
                   </div>
                 </div>
-                <LyricsView
-                  variant="kiosk"
-                  lyrics={lyrics}
-                  loading={lyricsLoading}
-                  error={lyricsError}
-                  currentTimeSec={effectiveCurrentSec}
-                  onRetry={reloadLyrics}
-                  onAdjustOffset={adjustLyricsOffset}
-                  onResetOffset={resetLyricsOffset}
-                  offsetBusy={offsetBusy}
-                  className="h-[52vh] min-h-[280px] max-h-[500px] w-full max-w-3xl lg:h-auto lg:max-h-none lg:min-h-0 lg:flex-1"
-                />
-              </>
-            ) : (
-              <div className="flex w-full max-w-4xl shrink-0 items-center gap-3 px-1">
-                <Cover src={current.track.thumbnail} alt={current.track.title} className="h-12 w-12 shrink-0 rounded-xl sm:h-14 sm:w-14" />
-                <div className="min-w-0 flex-1">
-                  <h1 className="truncate text-lg font-bold leading-tight sm:text-2xl">{current.track.title}</h1>
-                  <p className="truncate text-sm text-zinc-300">
-                    {current.track.artist}
-                    {current.track.album ? ` · ${current.track.album}` : ''}
-                  </p>
-                </div>
-                <div className="hidden shrink-0 items-center gap-2 text-xs text-zinc-400 sm:flex">
-                  <SourceBadge source={current.track.source} />
-                  <GenreBadges genre={current.track.genre} subgenre={current.track.subgenre} variant="kiosk-compact" />
-                  <span>pedido por {current.requesterName}</span>
-                </div>
-              </div>
+              )
             )}
 
             {/* Persistent <video> stage wrapper: stays mounted across Capa/Letra/Clipe toggles so playback never resets */}
             <div
+              data-kiosk-stage={effectiveStageMode === 'video' ? 'video' : undefined}
               className={
                 effectiveStageMode === 'video'
-                  ? `relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-3xl border border-white/10 bg-black shadow-2xl shadow-black/60 lg:min-h-0 lg:flex-1 ${
-                      cinemaMode ? 'max-h-[56vh] max-w-6xl lg:max-h-[54vh]' : 'max-h-[48vh] max-w-4xl lg:max-h-[48vh]'
-                    }`
+                  ? isDesktopImmersive
+                    ? 'relative flex h-full w-full flex-1 items-center justify-center overflow-hidden bg-black'
+                    : `relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-3xl border border-white/10 bg-black shadow-2xl shadow-black/60 lg:min-h-0 lg:flex-1 ${
+                        cinemaMode ? 'max-h-[56vh] max-w-6xl lg:max-h-[54vh]' : 'max-h-[48vh] max-w-4xl lg:max-h-[48vh]'
+                      }`
                   : 'pointer-events-none fixed left-0 top-0 h-px w-px overflow-hidden opacity-0'
               }
               aria-hidden={effectiveStageMode !== 'video'}
@@ -1146,84 +1225,107 @@ export function Kiosk() {
                 />
               )}
               {effectiveStageMode === 'video' && videoLyricsOverlay && (
-                <VideoLyricsOverlay lyrics={lyrics} loading={lyricsLoading} currentTimeSec={effectiveCurrentSec} />
+                <VideoLyricsOverlay
+                  lyrics={lyrics}
+                  loading={lyricsLoading}
+                  currentTimeSec={effectiveCurrentSec}
+                  immersive={isDesktopImmersive}
+                  controlsVisible={!controlsHidden}
+                />
               )}
             </div>
 
             <div
-              className={`w-full max-w-2xl shrink-0 transition-opacity duration-300 ${
-                controlsHidden ? 'pointer-events-none opacity-0' : 'opacity-100'
-              }`}
+              className={
+                isDesktopImmersive
+                  ? `pointer-events-none lg:absolute lg:inset-x-0 lg:bottom-0 lg:z-20 lg:flex lg:w-full lg:flex-col lg:items-center lg:gap-2 lg:bg-gradient-to-t lg:from-black/90 lg:via-black/65 lg:to-transparent lg:px-6 lg:pb-3 lg:pt-10 transition-opacity duration-300 ${
+                      controlsHidden ? 'opacity-0' : 'opacity-100'
+                    }`
+                  : 'flex w-full shrink-0 flex-col items-center gap-3'
+              }
             >
-              <div className="h-2 overflow-hidden rounded-full bg-white/10">
-                <div className="h-full bg-gradient-to-r from-accent to-accent-2 transition-[width] duration-300" style={{ width: `${progressPct}%` }} />
-              </div>
-              <div className="mt-1 flex justify-between text-xs text-zinc-400">
-                <span>{formatTime(effectiveCurrentSec)}</span>
-                <span>{formatTime(effectiveDuration)}</span>
-              </div>
-            </div>
-            <div
-              className={`flex shrink-0 flex-wrap items-center justify-center gap-3 transition-opacity duration-300 sm:gap-4 ${
-                controlsHidden ? 'pointer-events-none opacity-0' : 'opacity-100'
-              }`}
-            >
-              <button
-                type="button"
-                data-kiosk-default="true"
-                onClick={togglePlay}
-                className="h-14 w-14 rounded-full bg-white text-2xl text-zinc-900 hover:scale-105"
-                aria-label={effectivePlaying ? 'Pausar' : 'Tocar'}
+              <div
+                className={`w-full max-w-2xl shrink-0 transition-opacity duration-300 ${
+                  controlsHidden ? 'pointer-events-none opacity-0' : 'opacity-100'
+                }`}
               >
-                {effectivePlaying ? '❚❚' : '▶'}
-              </button>
-              <button
-                type="button"
-                onClick={() => run(api.skip)}
-                className="h-12 w-12 rounded-full bg-white/10 text-xl hover:bg-white/20"
-                aria-label="Pular"
+                <div className="h-2 overflow-hidden rounded-full bg-white/10">
+                  <div className="h-full bg-gradient-to-r from-accent to-accent-2 transition-[width] duration-300" style={{ width: `${progressPct}%` }} />
+                </div>
+                <div className="mt-1 flex justify-between text-xs text-zinc-400">
+                  <span>{formatTime(effectiveCurrentSec)}</span>
+                  <span>{formatTime(effectiveDuration)}</span>
+                </div>
+              </div>
+              <div
+                className={`flex shrink-0 flex-wrap items-center justify-center gap-3 transition-opacity duration-300 sm:gap-4 ${
+                  controlsHidden
+                    ? 'pointer-events-none opacity-0'
+                    : isDesktopImmersive
+                      ? 'pointer-events-auto opacity-100'
+                      : 'opacity-100'
+                }`}
               >
-                ⏭
-              </button>
-              <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() =>
-                    isSpotifyOutput
-                      ? applyStageSpotifyVolume(spotifyVolume - 10, true)
-                      : setVolume((v) => Math.max(0, Math.round((v - 0.1) * 100) / 100))
-                  }
-                  aria-label="Diminuir volume"
-                  className="flex h-9 w-9 items-center justify-center rounded-full bg-white/10 text-xs font-bold hover:bg-white/20"
+                  data-kiosk-default="true"
+                  onClick={togglePlay}
+                  className="h-14 w-14 rounded-full bg-white text-2xl text-zinc-900 hover:scale-105"
+                  aria-label={effectivePlaying ? 'Pausar' : 'Tocar'}
                 >
-                  🔉-
+                  {effectivePlaying ? '❚❚' : '▶'}
                 </button>
-                <input
-                  type="range"
-                  data-kiosk-focus="skip"
-                  min={0}
-                  max={isSpotifyOutput ? 100 : 1}
-                  step={isSpotifyOutput ? 5 : 0.05}
-                  value={isSpotifyOutput ? spotifyVolume : volume}
-                  onChange={(e) =>
-                    isSpotifyOutput ? applyStageSpotifyVolume(Number(e.target.value), false) : setVolume(Number(e.target.value))
-                  }
-                  className={`w-24 sm:w-28 ${isSpotifyOutput ? 'accent-green-400' : 'accent-accent'}`}
-                  aria-label={isSpotifyOutput ? 'Volume do Spotify Connect' : 'Volume'}
-                />
                 <button
                   type="button"
-                  onClick={() =>
-                    isSpotifyOutput
-                      ? applyStageSpotifyVolume(spotifyVolume + 10, true)
-                      : setVolume((v) => Math.min(1, Math.round((v + 0.1) * 100) / 100))
-                  }
-                  aria-label="Aumentar volume"
-                  className="flex h-9 w-9 items-center justify-center rounded-full bg-white/10 text-xs font-bold hover:bg-white/20"
+                  onClick={() => run(api.skip)}
+                  className="h-12 w-12 rounded-full bg-white/10 text-xl hover:bg-white/20"
+                  aria-label="Pular"
                 >
-                  🔊+
+                  ⏭
                 </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      isSpotifyOutput
+                        ? applyStageSpotifyVolume(spotifyVolume - 10, true)
+                        : setVolume((v) => Math.max(0, Math.round((v - 0.1) * 100) / 100))
+                    }
+                    aria-label="Diminuir volume"
+                    className="flex h-9 w-9 items-center justify-center rounded-full bg-white/10 text-xs font-bold hover:bg-white/20"
+                  >
+                    🔉-
+                  </button>
+                  <input
+                    type="range"
+                    data-kiosk-focus="skip"
+                    min={0}
+                    max={isSpotifyOutput ? 100 : 1}
+                    step={isSpotifyOutput ? 5 : 0.05}
+                    value={isSpotifyOutput ? spotifyVolume : volume}
+                    onChange={(e) =>
+                      isSpotifyOutput ? applyStageSpotifyVolume(Number(e.target.value), false) : setVolume(Number(e.target.value))
+                    }
+                    className={`w-24 sm:w-28 ${isSpotifyOutput ? 'accent-green-400' : 'accent-accent'}`}
+                    aria-label={isSpotifyOutput ? 'Volume do Spotify Connect' : 'Volume'}
+                  />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      isSpotifyOutput
+                        ? applyStageSpotifyVolume(spotifyVolume + 10, true)
+                        : setVolume((v) => Math.min(1, Math.round((v + 0.1) * 100) / 100))
+                    }
+                    aria-label="Aumentar volume"
+                    className="flex h-9 w-9 items-center justify-center rounded-full bg-white/10 text-xs font-bold hover:bg-white/20"
+                  >
+                    🔊+
+                  </button>
+                </div>
               </div>
+              {isDesktopImmersive && unlocked && (
+                <KioskShortcutFooter controlsHidden={controlsHidden} />
+              )}
             </div>
           </>
         ) : (
@@ -1275,33 +1377,15 @@ export function Kiosk() {
           </div>
         )}
 
-        {unlocked && (
-          <footer
-            aria-label="Atalhos de navegação"
-            aria-hidden={controlsHidden}
-            className={`pointer-events-none mt-2 flex w-full max-w-2xl shrink-0 flex-wrap items-center justify-center gap-x-3 gap-y-1 text-center text-[11px] text-zinc-400/85 transition-opacity duration-300 lg:mx-auto lg:mt-0 ${
-              controlsHidden ? 'opacity-0' : 'opacity-100'
-            }`}
-          >
-            <span>↑↓←→ Navegar</span>
-            <span>·</span>
-            <span>Enter Escolher</span>
-            <span>·</span>
-            <span>Espaço Tocar</span>
-            <span className="hidden sm:inline">·</span>
-            <span className="hidden sm:inline">Esc / Segurar Enter Voltar</span>
-            <span className="hidden md:inline">·</span>
-            <span className="hidden md:inline">Segurar Espaço Pular</span>
-            <span className="hidden md:inline">·</span>
-            <span className="hidden md:inline">←+→ Menu</span>
-          </footer>
+        {!isDesktopImmersive && unlocked && (
+          <KioskShortcutFooter controlsHidden={controlsHidden} />
         )}
 
         {reactionsEnabled && reactions.length > 0 && (
           <div
             aria-hidden="true"
             className={`pointer-events-none absolute right-4 z-20 flex h-64 w-36 items-end justify-end overflow-visible sm:right-8 ${
-              cinemaMode ? 'bottom-24' : 'bottom-6'
+              sidebarCollapsed ? 'bottom-24' : 'bottom-6'
             }`}
           >
             {reactions.map((reaction) => {
@@ -1325,41 +1409,24 @@ export function Kiosk() {
         )}
       </main>
 
-      {/* Sidebar: QR + queue (hidden in Modo Cinema, replaced by discrete corner mini QR) */}
-      {!cinemaMode ? (
+      {/* Sidebar: QR + queue (collapsed in Modo Cinema or Desktop Immersive Clipe/Letra, replaced by discrete corner mini QR + Queue drawer) */}
+      {!sidebarCollapsed ? (
         <aside ref={asideRef} className="relative z-10 flex w-full flex-col gap-4 border-t border-white/10 bg-black/30 p-5 sm:p-6 lg:w-[420px] lg:border-l lg:border-t-0">
-          <div className="glass flex items-center gap-4 p-4">
-            <div className="rounded-xl bg-white p-2">
-              <QRCodeSVG value={url} size={112} />
-            </div>
-            <div className="min-w-0">
-              <p className="font-semibold">Peça sua música 📱</p>
-              <p className="text-sm text-accent-2 [overflow-wrap:anywhere]">{url}</p>
-              {isLoopback(url) && (
-                <p className="mt-1 text-xs text-amber-300">Defina PUBLIC_URL com o IP da rede para os celulares acessarem.</p>
-              )}
-            </div>
-          </div>
-
-          <div className="flex min-h-0 flex-1 flex-col">
-            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-zinc-400">Próximas ({state.queue.length})</h2>
-            <div className="pr-1 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
-              <QueueList
-                queue={state.queue}
-                downloads={downloads}
-                currentRemainingSec={queueRemainingSec}
-                onVote={(entry) => run(() => api.vote(entry.id))}
-                onRemove={remove}
-                onRetry={(entry) => run(() => api.retry(entry.trackId), 'Tentando baixar novamente')}
-                compact
-              />
-            </div>
-          </div>
+          <QueueSidebarContent
+            url={url}
+            qrSize={112}
+            queue={state.queue}
+            downloads={downloads}
+            currentRemainingSec={queueRemainingSec}
+            onVote={(entry) => run(() => api.vote(entry.id))}
+            onRemove={remove}
+            onRetry={(entry) => run(() => api.retry(entry.trackId), 'Tentando baixar novamente')}
+          />
         </aside>
       ) : (
         <div
           aria-label="QR Code para pedir música"
-          className="glass fixed bottom-3 right-3 z-20 flex items-center gap-2.5 border-white/15 bg-black/60 p-2 opacity-80 shadow-xl backdrop-blur-md transition-opacity hover:opacity-100 sm:bottom-5 sm:right-5 sm:p-2.5"
+          className="glass fixed bottom-3 right-3 z-20 flex items-center gap-2.5 border-white/15 bg-black/60 p-2 opacity-75 shadow-xl backdrop-blur-md transition-opacity hover:opacity-100 sm:bottom-5 sm:right-5 sm:p-2.5"
         >
           <div className="rounded-lg bg-white p-1">
             <QRCodeSVG value={url} size={56} />
@@ -1367,6 +1434,45 @@ export function Kiosk() {
           <div className="hidden max-w-[140px] pr-1 sm:block">
             <p className="text-xs font-semibold text-white">Peça sua música</p>
             <p className="truncate text-[11px] text-accent-2">{url}</p>
+          </div>
+        </div>
+      )}
+
+      {queueDrawerOpen && sidebarCollapsed && (
+        <div
+          className="fixed inset-0 z-30 flex justify-end bg-black/50 backdrop-blur-[2px]"
+          onClick={() => setQueueDrawerOpen(false)}
+        >
+          <div
+            ref={queueDrawerRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Fila de músicas"
+            onClick={(e) => e.stopPropagation()}
+            className="flex h-full w-full max-w-md flex-col gap-4 border-l border-white/10 bg-panel p-5 shadow-2xl sm:p-6"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-xl font-bold">Fila ({state.queue.length})</h2>
+              <button
+                type="button"
+                data-kiosk-default="true"
+                onClick={() => setQueueDrawerOpen(false)}
+                aria-label="Fechar fila"
+                className="rounded-lg px-2.5 py-1.5 text-zinc-300 hover:bg-white/10 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+            <QueueSidebarContent
+              url={url}
+              qrSize={84}
+              queue={state.queue}
+              downloads={downloads}
+              currentRemainingSec={queueRemainingSec}
+              onVote={(entry) => run(() => api.vote(entry.id))}
+              onRemove={remove}
+              onRetry={(entry) => run(() => api.retry(entry.trackId), 'Tentando baixar novamente')}
+            />
           </div>
         </div>
       )}
@@ -1531,6 +1637,175 @@ export function Kiosk() {
 }
 
 type RunFn = <T>(action: () => Promise<T>, ok?: string | ((result: T) => string)) => Promise<void>;
+
+function StageTabsControls({
+  effectiveStageMode,
+  hasVideoAvailable,
+  videoMode,
+  videoLyricsOverlay,
+  spotifyBadge,
+  onSelectStageMode,
+  onToggleVideoLyrics,
+  onOpenSettings,
+  onAddPlaylist,
+}: {
+  effectiveStageMode: StageMode;
+  hasVideoAvailable: boolean;
+  videoMode?: AppConfig['videoMode'];
+  videoLyricsOverlay: boolean;
+  spotifyBadge: string | null;
+  onSelectStageMode: (mode: StageMode) => void;
+  onToggleVideoLyrics: () => void;
+  onOpenSettings: () => void;
+  onAddPlaylist: () => void;
+}) {
+  return (
+    <>
+      <div
+        role="tablist"
+        aria-label="Modo de visualização do palco"
+        className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 p-1 backdrop-blur"
+      >
+        {STAGE_MODES.map((mode) => {
+          const disabled = mode.id === 'video' && !hasVideoAvailable;
+          return (
+            <button
+              key={mode.id}
+              type="button"
+              role="tab"
+              disabled={disabled}
+              aria-selected={effectiveStageMode === mode.id}
+              title={
+                disabled
+                  ? videoMode === 'off'
+                    ? 'Modo videoclipe desativado (VIDEO_MODE=off)'
+                    : 'Videoclipe indisponível para esta faixa'
+                  : undefined
+              }
+              onClick={() => !disabled && onSelectStageMode(mode.id)}
+              className={`rounded-full px-4 py-1 text-xs font-semibold transition sm:text-sm ${
+                effectiveStageMode === mode.id
+                  ? 'bg-white text-zinc-900 shadow'
+                  : disabled
+                    ? 'cursor-not-allowed text-zinc-500'
+                    : 'text-zinc-300 hover:text-white'
+              }`}
+            >
+              {mode.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {effectiveStageMode === 'video' && (
+        <button
+          type="button"
+          aria-pressed={videoLyricsOverlay}
+          onClick={onToggleVideoLyrics}
+          className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition sm:text-sm ${
+            videoLyricsOverlay
+              ? 'border-accent/60 bg-accent/25 text-white shadow'
+              : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white'
+          }`}
+        >
+          🎤 Legenda {videoLyricsOverlay ? 'ON' : 'OFF'}
+        </button>
+      )}
+      {spotifyBadge && (
+        <SpotifyOutputBadge
+          label={spotifyBadge}
+          onClick={onOpenSettings}
+          className="px-3 py-1.5"
+          title="Alterar saída de áudio ou volume no painel do Host"
+        />
+      )}
+      <button
+        type="button"
+        onClick={onAddPlaylist}
+        title="Adicionar faixa tocando agora a uma playlist interna"
+        className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-zinc-200 transition hover:bg-white/15 hover:text-white sm:text-sm"
+      >
+        + Playlist
+      </button>
+    </>
+  );
+}
+
+function KioskShortcutFooter({ controlsHidden }: { controlsHidden: boolean }) {
+  return (
+    <footer
+      aria-label="Atalhos de navegação"
+      aria-hidden={controlsHidden}
+      className={`pointer-events-none mt-2 flex w-full max-w-2xl shrink-0 flex-wrap items-center justify-center gap-x-3 gap-y-1 text-center text-[11px] text-zinc-400/85 transition-opacity duration-300 lg:mx-auto lg:mt-0 ${
+        controlsHidden ? 'opacity-0' : 'opacity-100'
+      }`}
+    >
+      <span>↑↓←→ Navegar</span>
+      <span>·</span>
+      <span>Enter Escolher</span>
+      <span>·</span>
+      <span>Espaço Tocar</span>
+      <span className="hidden sm:inline">·</span>
+      <span className="hidden sm:inline">Esc / Segurar Enter Voltar</span>
+      <span className="hidden md:inline">·</span>
+      <span className="hidden md:inline">Segurar Espaço Pular</span>
+      <span className="hidden md:inline">·</span>
+      <span className="hidden md:inline">←+→ Menu</span>
+    </footer>
+  );
+}
+
+function QueueSidebarContent({
+  url,
+  qrSize,
+  queue,
+  downloads,
+  currentRemainingSec,
+  onVote,
+  onRemove,
+  onRetry,
+}: {
+  url: string;
+  qrSize: number;
+  queue: QueueEntry[];
+  downloads: Record<string, DownloadInfo>;
+  currentRemainingSec: number | null;
+  onVote: (entry: QueueEntry) => void;
+  onRemove: (entry: QueueEntry) => void;
+  onRetry: (entry: QueueEntry) => void;
+}) {
+  return (
+    <>
+      <div className="glass flex items-center gap-4 p-4">
+        <div className="shrink-0 rounded-xl bg-white p-2">
+          <QRCodeSVG value={url} size={qrSize} />
+        </div>
+        <div className="min-w-0">
+          <p className="font-semibold">Peça sua música 📱</p>
+          <p className="text-sm text-accent-2 [overflow-wrap:anywhere]">{url}</p>
+          {isLoopback(url) && (
+            <p className="mt-1 text-xs text-amber-300">Defina PUBLIC_URL com o IP da rede para os celulares acessarem.</p>
+          )}
+        </div>
+      </div>
+
+      <div className="flex min-h-0 flex-1 flex-col">
+        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-zinc-400">Próximas ({queue.length})</h2>
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+          <QueueList
+            queue={queue}
+            downloads={downloads}
+            currentRemainingSec={currentRemainingSec}
+            onVote={onVote}
+            onRemove={onRemove}
+            onRetry={onRetry}
+            compact
+          />
+        </div>
+      </div>
+    </>
+  );
+}
 
 function SpotifyOutputBadge({
   label,
