@@ -168,11 +168,11 @@ export class YtDlp implements MediaProvider {
     return (data.entries ?? []).filter((e) => e?.id).map(entryToResult);
   }
 
-  async getPlaylistDetails(url: string, limit = 50): Promise<ExtractedPlaylist> {
-    const fetchLimit = Math.max(1, limit) + 1;
-    const out = await this.run([url, '--flat-playlist', '-J', '--playlist-end', String(fetchLimit)]);
+  async getPlaylistDetails(url: string, limit = 500): Promise<ExtractedPlaylist> {
+    const maxTracks = Math.max(1, limit);
+    const out = await this.run([url, '--flat-playlist', '-J', '--playlist-end', String(maxTracks)]);
     const data = JSON.parse(out) as YtPlaylistPayload;
-    const tracks = (data.entries ?? []).filter((e) => e?.id).map(entryToResult);
+    const tracks = (data.entries ?? []).filter((e) => e?.id).map(entryToResult).slice(0, maxTracks);
     const totalCount =
       typeof data.playlist_count === 'number' && Number.isFinite(data.playlist_count)
         ? data.playlist_count

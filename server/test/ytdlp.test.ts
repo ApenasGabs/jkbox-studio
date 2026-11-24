@@ -73,7 +73,7 @@ describe('yt-dlp helpers', () => {
       '--flat-playlist',
       '-J',
       '--playlist-end',
-      '51',
+      '50',
     ]);
     expect(details).toMatchObject({
       title: 'Sertanejo Top',

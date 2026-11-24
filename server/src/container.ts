@@ -61,6 +61,7 @@ export function createJukebox(config: Config, overrides: ContainerOverrides = {}
     classifier,
     playlists,
   );
+  jukebox.playlistImportMaxTracks = config.playlistImportMaxTracks;
   jukebox.discovery = new DiscoveryService(
     tracks,
     queue,

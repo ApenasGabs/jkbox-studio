@@ -137,9 +137,8 @@ describe('POST /api/playlists/import', () => {
     vi.spyOn(ctx.media, 'getPlaylistDetails').mockRejectedValueOnce(new Error('ERROR: [youtube:tab] PLpriv: This playlist is private.'));
     await request(app).post('/api/playlists/import').send({ url: 'https://www.youtube.com/playlist?list=PLpriv' }).expect(404);
 
-    // 422: empty & > MAX_BATCH (50)
+    // 422: empty playlists
     await request(app).post('/api/playlists/import').send({ url: 'https://open.spotify.com/playlist/emptyPl' }).expect(422);
-    await request(app).post('/api/playlists/import').send({ url: 'https://open.spotify.com/playlist/hugePl' }).expect(422);
 
     vi.spyOn(ctx.media, 'getPlaylistDetails').mockResolvedValueOnce({
       title: 'YT Vazia',
@@ -148,12 +147,37 @@ describe('POST /api/playlists/import', () => {
     });
     await request(app).post('/api/playlists/import').send({ url: 'https://www.youtube.com/playlist?list=PLempty' }).expect(422);
 
+    // Large playlists (> 50 tracks) import cleanly without 422 and cap initial live queue to 50
     vi.spyOn(ctx.media, 'getPlaylistDetails').mockResolvedValueOnce({
       title: 'YT Grande',
-      totalCount: 51,
-      tracks: Array.from({ length: 51 }, (_, i) => ytResult(`yt${String(i).padStart(9, '0')}`)),
+      totalCount: 65,
+      tracks: Array.from({ length: 65 }, (_, i) => ytResult(`yt${String(i).padStart(9, '0')}`)),
     });
-    await request(app).post('/api/playlists/import').send({ url: 'https://www.youtube.com/playlist?list=PLbig' }).expect(422);
+    const largeRes = await request(app)
+      .post('/api/playlists/import')
+      .send({ url: 'https://www.youtube.com/playlist?list=PLbig' })
+      .expect(201);
+    expect(largeRes.body.imported).toBe(65);
+    expect(largeRes.body.queued).toBe(50);
+    expect(largeRes.body.truncated).toBe(false);
+    expect(largeRes.body.totalRemote).toBe(65);
+
+    // Playlists above PLAYLIST_IMPORT_MAX_TRACKS truncate gracefully instead of returning 422
+    const cappedCtx = setup({ ...SPOTIFY_ENV, PLAYLIST_IMPORT_MAX_TRACKS: '10' }, fetchFn);
+    const cappedApp = createApp({ config: cappedCtx.config, jukebox: cappedCtx.jukebox });
+    vi.spyOn(cappedCtx.media, 'getPlaylistDetails').mockResolvedValueOnce({
+      title: 'YT Muito Grande',
+      totalCount: 25,
+      tracks: Array.from({ length: 10 }, (_, i) => ytResult(`yt${String(i).padStart(9, '0')}`)),
+    });
+    const cappedRes = await request(cappedApp)
+      .post('/api/playlists/import')
+      .send({ url: 'https://www.youtube.com/playlist?list=PLhuge', enqueue: false })
+      .expect(201);
+    expect(cappedRes.body.imported).toBe(10);
+    expect(cappedRes.body.truncated).toBe(true);
+    expect(cappedRes.body.totalRemote).toBe(25);
+    cappedCtx.jukebox.stop();
 
     // 503: Spotify not configured
     const unconfigured = setup();

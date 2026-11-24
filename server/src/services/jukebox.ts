@@ -54,6 +54,8 @@ export interface JukeboxEvents {
 }
 
 const MAX_BATCH = 50;
+const MAX_ENQUEUE_ON_IMPORT = 50;
+const DEFAULT_PLAYLIST_IMPORT_MAX_TRACKS = 500;
 const DEFAULT_SPOTIFY_POLL_MS = 2500;
 const SPOTIFY_START_GRACE_MS = 5000;
 const PLAYLIST_NOT_FOUND_RE = /private|privad|does not exist|not exist|not found|404|unavailable|inacess|incomplete/i;
@@ -105,6 +107,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
   private autocategorizeInFlightForce = false;
   private readonly classifyingTrackIds = new Set<string>();
   private readonly pendingClassifications = new Set<Promise<void>>();
+  public playlistImportMaxTracks = DEFAULT_PLAYLIST_IMPORT_MAX_TRACKS;
 
   constructor(
     readonly tracks: TrackRepository,
@@ -1028,13 +1031,13 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     }
   }
 
-  private async extractYoutubePlaylist(playlistId: string): Promise<ExtractedPlaylist> {
+  private async extractYoutubePlaylist(playlistId: string, limit: number): Promise<ExtractedPlaylist> {
     const canonicalUrl = `https://www.youtube.com/playlist?list=${playlistId}`;
     try {
       if (this.media.getPlaylistDetails) {
-        return await this.media.getPlaylistDetails(canonicalUrl, MAX_BATCH);
+        return await this.media.getPlaylistDetails(canonicalUrl, limit);
       }
-      const tracks = await this.media.getPlaylist(canonicalUrl, MAX_BATCH + 1);
+      const tracks = await this.media.getPlaylist(canonicalUrl, limit);
       return {
         title: `Playlist YouTube (${playlistId})`,
         description: null,
@@ -1051,9 +1054,9 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     }
   }
 
-  private async extractSpotifyPlaylist(playlistId: string): Promise<ExtractedPlaylist> {
+  private async extractSpotifyPlaylist(playlistId: string, limit: number): Promise<ExtractedPlaylist> {
     try {
-      return await this.spotify.getPlaylistDetails(playlistId, MAX_BATCH);
+      return await this.spotify.getPlaylistDetails(playlistId, limit);
     } catch (err) {
       if (err instanceof SpotifyError && err.code === 'SPOTIFY_EDITORIAL_BLOCKED') {
         throw new PlaylistError(err.message, 404);
@@ -1068,9 +1071,9 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     }
   }
 
-  private async extractSpotifyAlbum(albumId: string): Promise<ExtractedPlaylist> {
+  private async extractSpotifyAlbum(albumId: string, limit: number): Promise<ExtractedPlaylist> {
     try {
-      return await this.spotify.getAlbumDetails(albumId, MAX_BATCH);
+      return await this.spotify.getAlbumDetails(albumId, limit);
     } catch (err) {
       if (err instanceof SpotifyError && (err.status === 404 || err.status === 403)) {
         throw new PlaylistError('Álbum do Spotify não encontrado ou inacessível', 404);
@@ -1119,22 +1122,22 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
         : parsed.kind === 'spotify-album'
           ? `album:${parsed.id}`
           : parsed.id;
+    const maxImportTracks = Math.max(1, this.playlistImportMaxTracks);
     const extracted =
       parsed.kind === 'youtube-playlist'
-        ? await this.extractYoutubePlaylist(parsed.playlistId)
+        ? await this.extractYoutubePlaylist(parsed.playlistId, maxImportTracks)
         : parsed.kind === 'spotify-album'
-          ? await this.extractSpotifyAlbum(parsed.id)
-          : await this.extractSpotifyPlaylist(parsed.id);
+          ? await this.extractSpotifyAlbum(parsed.id, maxImportTracks)
+          : await this.extractSpotifyPlaylist(parsed.id, maxImportTracks);
 
-    const totalRemote = extracted.totalCount ?? extracted.tracks.length;
-    if (totalRemote > MAX_BATCH || extracted.tracks.length > MAX_BATCH) {
-      throw new PlaylistError(`A playlist ultrapassa o limite máximo de ${MAX_BATCH} faixas por importação`, 422);
-    }
+    const totalRemote = Math.max(extracted.totalCount ?? 0, extracted.tracks.length);
+    const truncated = totalRemote > maxImportTracks;
+    const candidateTracks = extracted.tracks.slice(0, maxImportTracks);
 
     const validResults: SearchResult[] = [];
     const seenKeys = new Set<string>();
     let skipped = 0;
-    for (const candidate of extracted.tracks) {
+    for (const candidate of candidateTracks) {
       const clean = sanitizeResult(candidate);
       if (!clean || /^\[(Private|Deleted) video\]$/i.test(clean.title)) {
         skipped += 1;
@@ -1187,7 +1190,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       if (cached) alreadyCached += 1;
       else downloading += 1;
 
-      if (shouldEnqueue) {
+      if (shouldEnqueue && queued < MAX_ENQUEUE_ON_IMPORT) {
         const outcome = this.queue.enqueue(track.id, requesterId, requesterName);
         if (outcome.duplicate) skipped += 1;
         else queued += 1;
@@ -1205,6 +1208,8 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       queued,
       downloading,
       skipped,
+      truncated,
+      totalRemote,
       tracks: detail.items.map((item) => ({
         ...this.trackToResult(item.track),
         position: item.position,

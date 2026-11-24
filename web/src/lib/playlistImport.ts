@@ -78,6 +78,9 @@ export function formatPlaylistImportSummary(result: PlaylistImportResult): Playl
   const downloadingLabel = `${result.downloading} baixando`;
 
   const parts = [`${importedLabel}, ${cachedLabel}, ${downloadingLabel}`];
+  if (result.truncated && result.totalRemote != null && result.totalRemote > result.imported) {
+    parts.push(`primeiras ${result.imported} de ${result.totalRemote} faixas`);
+  }
   if (result.queued > 0) {
     parts.push(`${result.queued} na fila`);
   }

@@ -174,6 +174,11 @@ describe('formatPlaylistImportSummary and describePlaylistImportError', () => {
     );
     expect(updated.headline).toBe('Playlist "Churrasco Hits" atualizada');
     expect(updated.counts).toBe('1 importada, 1 já em cache, 0 baixando');
+
+    const truncated = formatPlaylistImportSummary(
+      makeImportResult({ created: true, imported: 500, alreadyCached: 10, downloading: 490, queued: 50, skipped: 0, truncated: true, totalRemote: 820 }),
+    );
+    expect(truncated.counts).toContain('primeiras 500 de 820 faixas');
   });
 
   it('maps HTTP 400, 404 and 422 errors into clear user-facing alerts', () => {
