@@ -1,6 +1,5 @@
 import type { Db } from '../db.js';
 import type { Track, TrackSource } from '../types.js';
-import { sanitizeTrackMetadata } from './lyrics.js';
 import type { FetchFn, SpotifyService } from './spotify.js';
 import type { TrackRepository } from './tracks.js';
 
@@ -28,7 +27,16 @@ export function isCanonicalCategory(value: string | null | undefined): value is 
 }
 
 export const SUBGENRES_BY_CATEGORY: Record<CanonicalCategory, readonly string[]> = {
-  Funk: ['Funk Anos 2000', 'Funk Mandelão', 'Funk Bruxaria', 'Funk Melody', 'Funk Ostentação', 'Funk Pop'],
+  Funk: [
+    'Funk Anos 2000',
+    'Funk Mandelão',
+    'Funk Bruxaria',
+    'Funk MTG',
+    'Funk Automotivo',
+    'Funk Melody',
+    'Funk Ostentação',
+    'Funk Pop',
+  ],
   'Samba & Pagode': ['Pagode 90', 'Pagode Atual', 'Samba Raiz'],
   Sertanejo: ['Sertanejo Raiz', 'Sertanejo Universitário', 'Feminejo', 'Agronejo'],
   Gospel: ['Louvor & Adoração', 'Gospel Pentecostal', 'Gospel Jovem'],
@@ -47,6 +55,7 @@ export interface ClassificationContext {
   artist: string;
   album?: string | null;
   year?: number | null;
+  hints?: readonly string[];
 }
 
 export interface ClassificationOutcome {
@@ -62,12 +71,23 @@ export interface AutocategorizeSummary {
   updatedTrackIds: string[];
 }
 
+export type ClassificationSource = 'spotify' | 'deezer' | 'itunes' | 'musicbrainz' | 'heuristic' | 'cache';
+
 export interface TrackClassificationResult {
   updated: boolean;
   genre: string | null;
   subgenre: string | null;
-  source: 'spotify' | 'itunes' | 'heuristic' | 'cache' | null;
+  source: ClassificationSource | null;
   skippedManual?: boolean;
+}
+
+export interface CleanedTrackMetadata {
+  title: string;
+  artist: string;
+  searchTitle: string;
+  artistCandidates: string[];
+  signals: string[];
+  extractedArtistFromTitle: boolean;
 }
 
 interface ArtistGenreRow {
@@ -87,8 +107,67 @@ interface ItunesSearchItem {
   releaseDate?: string;
 }
 
+interface DeezerSearchItem {
+  id?: number;
+  title?: string;
+  artist?: { id?: number; name?: string };
+  album?: {
+    id?: number;
+    title?: string;
+    genre_id?: number;
+    genres?: { data?: Array<{ id?: number; name?: string }> };
+  };
+}
+
+interface DeezerAlbumResponse {
+  id?: number;
+  genre_id?: number;
+  release_date?: string;
+  genres?: { data?: Array<{ id?: number; name?: string }> };
+}
+
+interface MusicBrainzTag {
+  count?: number;
+  name?: string;
+}
+
+interface MusicBrainzArtistItem {
+  id?: string;
+  name?: string;
+  score?: number;
+  tags?: MusicBrainzTag[];
+  genres?: MusicBrainzTag[];
+}
+
 const ARTIST_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const ITUNES_TIMEOUT_MS = 5000;
+const EXTERNAL_TIMEOUT_MS = 5000;
+const MUSICBRAINZ_MIN_INTERVAL_MS = 1100;
+const MUSICBRAINZ_USER_AGENT = 'jkbox-studio/0.1.0 (https://github.com/ApenasGabs/jkbox-studio)';
+const VALID_CACHE_SOURCES = new Set(['spotify', 'deezer', 'itunes', 'musicbrainz']);
+
+const BRACKET_NOISE_BODY =
+  '(?:(?:feat\\.?|ft\\.?|featuring)\\b[^)\\]}]*|official(?:\\s+(?:music\\s+)?(?:video|audio|lyric\\s+video|lyrics?|visualizer|hd|4k|uhd))?|oficial(?:\\s+(?:clipe|áudio|audio|v[ií]deo|visualizer|lyric\\s+video))?|(?:clipe|v[ií]deo|video|áudio|audio|lyric)\\s+oficial|(?:official\\s+|oficial\\s+)?visualizer|music\\s+video|lyric\\s+video|lyrics?|audio|áudio|videoclipe(?:\\s+oficial)?|clipe\\s+oficial|hd|4k|uhd|hq|1080p|720p|explicit|clean|legendado|tradu[cç][aã]o(?:\\s+pt(?:-?br)?)?|full\\s+album|(?:\\d{4}\\s+)?remaster(?:ed)?(?:\\s+\\d{4})?|mtg)';
+const BRACKETED_CLASSIFICATION_NOISE_RE = new RegExp(
+  `\\s*(?:\\(${BRACKET_NOISE_BODY}\\)|\\[${BRACKET_NOISE_BODY}\\]|\\{${BRACKET_NOISE_BODY}\\})`,
+  'gi',
+);
+const PIPE_CLASSIFICATION_NOISE_RE =
+  /\s*\|\s*(?:official|oficial|music\s+video|lyric\s+video|lyrics?|audio|áudio|visualizer|hd|4k|full\s+album).*$/i;
+const TRAILING_DASH_CLASSIFICATION_NOISE_RE =
+  /\s+[-–—]\s+(?:official(?:\s+(?:music\s+)?(?:video|audio|lyric\s+video|lyrics?|visualizer))?|oficial(?:\s+(?:clipe|áudio|audio|v[ií]deo))?|lyric\s+video|lyrics?|audio|áudio|clipe\s+oficial|visualizer)\s*$/i;
+const TRAILING_FEAT_RE = /\s+(?:feat\.?|ft\.?|featuring)\s+(.+)$/i;
+const LEADING_NUMERIC_PREFIX_RE = /^\d{1,3}(?:_\s*|\.\s+)/;
+const UNSAFE_SPLIT_RIGHT_RE =
+  /^(?:part\.?\s*\d+|pt\.?\s*\d+|ao\s+vivo|live|remix|ac[uú]stico|acoustic|instrumental|karaoke|karaok[eê]|playback|vers[aã]o\b.*|remaster(?:ed)?(?:\s+\d{4})?|intro|outro)$/i;
+const GENERIC_ARTIST_TOKENS = new Set(['dj', 'mc', 'the', 'os', 'as', 'da', 'de', 'do']);
+
+function normalizeSpaces(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function normCompact(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9\p{L}\p{N}]/gu, '');
+}
 
 function fold(value: string): string {
   return value
@@ -96,6 +175,160 @@ function fold(value: string): string {
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .trim();
+}
+
+function normalizeArtistForMatch(value: string): string {
+  return fold(value)
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function cleanClassificationArtist(raw: string): string {
+  return normalizeSpaces(
+    raw
+      .replace(BRACKETED_CLASSIFICATION_NOISE_RE, ' ')
+      .replace(/\s*-\s*Topic$/i, '')
+      .replace(/\s*VEVO$/i, '')
+      .replace(/\s*[-–—]\s*(?:Official|Oficial)(?:\s+(?:Channel|Music|Artist))?$/i, '')
+      .replace(/\s+(?:Official|Oficial)(?:\s+(?:Channel|Music|Artist))?$/i, '')
+      .replace(/\s+Canal\s+Oficial$/i, ''),
+  );
+}
+
+function cleanClassificationTitle(raw: string): string {
+  return normalizeSpaces(
+    raw
+      .replace(BRACKETED_CLASSIFICATION_NOISE_RE, ' ')
+      .replace(PIPE_CLASSIFICATION_NOISE_RE, '')
+      .replace(TRAILING_DASH_CLASSIFICATION_NOISE_RE, ''),
+  ).replace(LEADING_NUMERIC_PREFIX_RE, '').trim();
+}
+
+function isSafeArtistTitleSplit(left: string, right: string): boolean {
+  if (left.length < 2 || right.length < 2) return false;
+  if (/^\d+$/.test(left)) return false;
+  if (UNSAFE_SPLIT_RIGHT_RE.test(fold(right))) return false;
+  return true;
+}
+
+/** Splits multi-artist strings (`,` except `, The`, `feat.`, `ft.`, `&`, `x`) while preserving duos as first choice. */
+export function extractArtistCandidates(rawArtist: string, rawTitle = ''): string[] {
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  const pushCandidate = (name: string) => {
+    const cleaned = cleanClassificationArtist(name).replace(TRAILING_FEAT_RE, '').trim();
+    if (!cleaned) return;
+    const key = normalizeArtistForMatch(cleaned);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    candidates.push(cleaned);
+  };
+
+  const artistCleaned = cleanClassificationArtist(rawArtist);
+  const featMatch = artistCleaned.match(TRAILING_FEAT_RE);
+  const primaryBase = artistCleaned.replace(TRAILING_FEAT_RE, '').trim();
+  const titleFeatMatch = rawTitle.match(TRAILING_FEAT_RE);
+
+  const splitSecondary = (segment: string) =>
+    segment
+      .split(/\s*(?:,(?!\s*the\b)\s*|;\s*|\s+(?:feat\.?|ft\.?|featuring|vs\.?|x)\s+)\s*/i)
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+  for (const unit of splitSecondary(primaryBase)) {
+    pushCandidate(unit);
+    if (/\s+&\s+/.test(unit)) {
+      for (const ampPart of unit.split(/\s+&\s+/)) {
+        pushCandidate(ampPart);
+      }
+    }
+  }
+
+  for (const extra of [featMatch?.[1], titleFeatMatch?.[1]]) {
+    if (!extra) continue;
+    for (const unit of splitSecondary(extra)) {
+      pushCandidate(unit);
+      if (/\s+&\s+/.test(unit)) {
+        for (const ampPart of unit.split(/\s+&\s+/)) {
+          pushCandidate(ampPart);
+        }
+      }
+    }
+  }
+
+  return candidates;
+}
+
+/**
+ * Strips YouTube/Spotify noise (`- Topic`, `VEVO`, `Oficial`, `(Visualizer)`, `[2023 Remaster]`,
+ * `{Full Album}`, `4_`, `(MTG)`), preserves genre tokens like `MTG`, and safely extracts
+ * `"Artist - Title"` when `artist` is empty.
+ */
+export function cleanTrackMetadataForClassification(rawTitle: string, rawArtist: string): CleanedTrackMetadata {
+  const signals: string[] = [];
+  const rawCombinedFolded = fold(`${rawTitle} ${rawArtist}`);
+  if (tokenRegex('mtg').test(rawCombinedFolded)) {
+    signals.push('mtg');
+  }
+
+  const initialArtist = cleanClassificationArtist(rawArtist);
+  const initialTitle = cleanClassificationTitle(rawTitle);
+  let artist = initialArtist;
+  let title = initialTitle;
+  let extractedArtistFromTitle = false;
+
+  const dash = initialTitle.match(/^(.+?)\s+[-–—]\s+(.+)$/);
+  if (dash) {
+    const left = cleanClassificationArtist(dash[1]);
+    const right = dash[2].trim().replace(LEADING_NUMERIC_PREFIX_RE, '').trim();
+    if (!artist) {
+      if (isSafeArtistTitleSplit(left, right)) {
+        artist = left;
+        title = right;
+        extractedArtistFromTitle = true;
+      }
+    } else {
+      const compactLeft = normCompact(left.replace(TRAILING_FEAT_RE, ''));
+      const compactArtist = normCompact(artist.replace(TRAILING_FEAT_RE, ''));
+      const sameArtist =
+        compactLeft.length >= 2 &&
+        compactArtist.length >= 2 &&
+        (compactLeft === compactArtist || compactLeft.includes(compactArtist) || compactArtist.includes(compactLeft));
+      if (sameArtist && right) {
+        artist = left;
+        title = right;
+      }
+    }
+  }
+
+  if (!title) title = rawTitle.trim();
+
+  const searchTitle = title.replace(TRAILING_FEAT_RE, '').trim() || title;
+  const artistCandidates = extractArtistCandidates(artist, title);
+
+  return {
+    title,
+    artist,
+    searchTitle,
+    artistCandidates,
+    signals,
+    extractedArtistFromTitle,
+  };
+}
+
+function artistsMatch(expectedCandidates: readonly string[], returnedArtist: string): boolean {
+  const candNorm = normalizeArtistForMatch(returnedArtist);
+  if (!candNorm || candNorm.length < 2 || GENERIC_ARTIST_TOKENS.has(candNorm)) return false;
+
+  return expectedCandidates.some((expected) => {
+    const expNorm = normalizeArtistForMatch(expected);
+    if (!expNorm || expNorm.length < 2 || GENERIC_ARTIST_TOKENS.has(expNorm)) return false;
+    if (candNorm === expNorm) return true;
+    const shorterLen = Math.min(candNorm.length, expNorm.length);
+    if (shorterLen < 4) return false;
+    return tokenRegex(expNorm).test(candNorm) || tokenRegex(candNorm).test(expNorm);
+  });
 }
 
 const TOKEN_REGEX_CACHE = new Map<string, RegExp>();
@@ -205,8 +438,14 @@ const FUNK_ARTISTS_2000 = [
 ];
 const FUNK_ARTISTS_MELODY = ['mc sapao', 'mc koringa', 'naldo benny', 'latino', 'mc jean paul', 'biel', 'mc livinho'];
 const FUNK_ARTISTS_OSTENTACAO = ['mc guime', 'mc daleste', 'mc lon', 'mc pocahontas', 'mc pikachu', 'mc gui', 'mc rodolfinho'];
+const FUNK_ARTISTS_BRUXARIA = ['dj arana', 'tropa do bruxo', 'dj ramon 011', 'dj guuga', 'dj ws da igrejinha'];
 const FUNK_ARTISTS_MANDELAO = ['mc paiva', 'mc ryan sp', 'mc ig', 'mc hariel', 'mc kevin', 'mc pedrinho', 'mc don juan', 'mc rick'];
 const FUNK_ARTISTS_POP = ['anitta', 'ludmilla', 'pedro sampaio', 'kevinho', 'dennis dj', 'pocah', 'lexa', 'mc kekel'];
+
+function hasDjAndMcCombo(textFolded: string): boolean {
+  if (!textFolded) return false;
+  return /(?:^|[^a-z0-9])dj\s+[a-z0-9]/.test(textFolded) && /(?:^|[^a-z0-9])mc\s+[a-z0-9]/.test(textFolded);
+}
 
 const PAGODE_90_ARTISTS = [
   'raca negra',
@@ -352,9 +591,49 @@ const ROCK_CLASSICO_ARTISTS = ['queen', 'the beatles', 'beatles', 'led zeppelin'
 
 const RAP_NACIONAL_ARTISTS = ['racionais', 'sabotage', 'criolo', 'emicida', 'marcelo d2', 'djonga', 'hungria', 'gabriel o pensador', 'mv bill', 'rashid', 'projota', 'bk', 'black alien'];
 const TRAP_BR_ARTISTS = ['matue', 'teto', 'wiu', 'orochi', 'filipe ret', 'l7nnon', 'veigh', 'kayblack', 'mc cabelinho', 'baco exu do blues', 'sidoka', 'recayd mob'];
-const HIPHOP_INTL_ARTISTS = ['eminem', '2pac', 'tupac', 'snoop dogg', 'kendrick lamar', 'drake', 'travis scott', 'kanye west', 'jay-z', '50 cent', 'post malone', 'lil wayne', 'nicki minaj', 'cardi b'];
+const HIPHOP_INTL_ARTISTS = [
+  'eminem',
+  '2pac',
+  'tupac',
+  'snoop dogg',
+  'kendrick lamar',
+  'drake',
+  'travis scott',
+  'kanye west',
+  'jay-z',
+  '50 cent',
+  'post malone',
+  'lil wayne',
+  'nicki minaj',
+  'cardi b',
+  'tyler, the creator',
+  'tyler the creator',
+  'j. cole',
+  'j cole',
+  'asap rocky',
+  'a$ap rocky',
+  'playboi carti',
+  '21 savage',
+  'future',
+  'metro boomin',
+];
 
-const ELETRONICA_BRAZILIAN_BASS = ['alok', 'vintage culture', 'bhaskar', 'kvsh', 'cat dealers', 'dubdogz', 'liu', 'gabriel boni'];
+const ELETRONICA_BRAZILIAN_BASS = [
+  'alok',
+  'vintage culture',
+  'bhaskar',
+  'kvsh',
+  'cat dealers',
+  'dubdogz',
+  'liu',
+  'gabriel boni',
+  'afterclapp',
+  'illusionize',
+  'mochakk',
+  'victor lou',
+  'chemical surf',
+  'bruno be',
+];
 const ELETRONICA_PSY_TECHNO = ['vini vici', 'astrix', 'charlotte de witte', 'amelie lens', 'infected mushroom', 'carl cox'];
 const ELETRONICA_EDM = ['david guetta', 'calvin harris', 'tiesto', 'avicii', 'martin garrix', 'skrillex', 'daft punk', 'marshmello', 'deadmau5', 'kygo', 'armin van buuren'];
 
@@ -377,11 +656,23 @@ function detectSubgenreForCategory(
   const combined = `${rawFolded} ${titleFolded}`;
   switch (category) {
     case 'Funk': {
-      if (containsAny(combined, ['mandelao', 'mandela', 'dz7', 'fluxo']) || matchesArtist(artistFolded, FUNK_ARTISTS_MANDELAO)) {
-        return 'Funk Mandelão';
+      if (containsAny(combined, ['mtg']) || containsAny(artistFolded, ['mtg'])) {
+        return 'Funk MTG';
       }
-      if (containsAny(combined, ['bruxaria', 'ritmada', 'mtg'])) {
+      if (containsAny(combined, ['automotivo', 'funk automotivo'])) {
+        return 'Funk Automotivo';
+      }
+      if (
+        containsAny(combined, ['bruxaria', 'bruxo', 'ritmada']) ||
+        matchesArtist(artistFolded, FUNK_ARTISTS_BRUXARIA)
+      ) {
         return 'Funk Bruxaria';
+      }
+      if (
+        containsAny(combined, ['mandelao', 'mandela', 'dz7', 'fluxo', 'bololo']) ||
+        matchesArtist(artistFolded, FUNK_ARTISTS_MANDELAO)
+      ) {
+        return 'Funk Mandelão';
       }
       if (containsAny(combined, ['melody', 'romantico']) || matchesArtist(artistFolded, FUNK_ARTISTS_MELODY)) {
         return 'Funk Melody';
@@ -500,7 +791,10 @@ function detectSubgenreForCategory(
       return null;
     }
     case 'Eletrônica': {
-      if (containsAny(combined, ['brazilian bass', 'slap house']) || matchesArtist(artistFolded, ELETRONICA_BRAZILIAN_BASS)) {
+      if (
+        containsAny(combined, ['brazilian bass', 'slap house', 'brazilian electronic']) ||
+        matchesArtist(artistFolded, ELETRONICA_BRAZILIAN_BASS)
+      ) {
         return 'Brazilian Bass';
       }
       if (containsAny(combined, ['psytrance', 'psy', 'techno', 'trance']) || matchesArtist(artistFolded, ELETRONICA_PSY_TECHNO)) {
@@ -535,7 +829,7 @@ function detectSubgenreForCategory(
 }
 
 /**
- * Normalizes raw external genres (Spotify/iTunes/ID3) plus track title/artist/album/year
+ * Normalizes raw external genres (Spotify/Deezer/iTunes/MusicBrainz/ID3) plus track title/artist/album/year
  * into one of the canonical categories and an optional subcategory.
  * Gospel is checked first with high precision to keep it strictly isolated.
  */
@@ -544,11 +838,14 @@ export function normalizeGenreAndSubgenre(
   context: ClassificationContext,
 ): ClassificationOutcome | null {
   const rawFolded = rawGenres.map(fold).filter(Boolean).join(' ');
+  const hintFolded = (context.hints ?? []).map(fold).filter(Boolean).join(' ');
+  const combinedRawFolded = [rawFolded, hintFolded].filter(Boolean).join(' ');
   const titleFolded = fold(context.title);
   const artistFolded = fold(context.artist);
   const albumFolded = fold(context.album ?? '');
   const year = context.year ?? null;
   const contextText = `${titleFolded} ${artistFolded} ${albumFolded}`.trim();
+  const signalText = `${contextText} ${hintFolded}`.trim();
 
   // 1. Strict Gospel priority (prevents Gospel from ever falling into Pop/MPB/Rock).
   if (
@@ -560,18 +857,54 @@ export function normalizeGenreAndSubgenre(
   ) {
     return {
       genre: 'Gospel',
-      subgenre: detectSubgenreForCategory('Gospel', rawFolded, titleFolded, artistFolded, year),
+      subgenre: detectSubgenreForCategory('Gospel', combinedRawFolded, titleFolded, artistFolded, year),
     };
   }
 
-  // 2. Map raw external genres (Spotify / iTunes / ID3).
+  // 2a. Strong deterministic Funk BR signals (take precedence over mislabeled external Hip-Hop/Dance tags).
+  const hasMtgSignal = containsAny(`${signalText} ${rawFolded}`, ['mtg']);
+  const hasDjMcSignal = hasDjAndMcCombo(artistFolded) || (!artistFolded && hasDjAndMcCombo(titleFolded));
+  const hasStrongFunkArtist = matchesArtist(artistFolded, [...FUNK_ARTISTS_BRUXARIA, ...FUNK_ARTISTS_MANDELAO]);
+  const hasStrongFunkKeyword = containsAny(signalText, [
+    'funk',
+    'mandelao',
+    'bruxaria',
+    'ritmada',
+    'automotivo',
+    'bololo',
+    'furacao 2000',
+    'tamborzao',
+    'dz7',
+  ]);
+  const hasBailePattern = /\bbaile\s+d[ao]\s+[a-z0-9]+/.test(`${titleFolded} ${albumFolded}`);
+  const rawContradictsBaile = containsAny(rawFolded, ['forro', 'piseiro', 'sertanejo', 'samba', 'pagode', 'rock', 'mpb']);
+
+  if (
+    hasMtgSignal ||
+    hasDjMcSignal ||
+    hasStrongFunkArtist ||
+    hasStrongFunkKeyword ||
+    (hasBailePattern && !rawContradictsBaile)
+  ) {
+    return {
+      genre: 'Funk',
+      subgenre: detectSubgenreForCategory('Funk', combinedRawFolded, titleFolded, artistFolded, year),
+    };
+  }
+
+  // 2b. Map raw external genres (Spotify / Deezer / iTunes / MusicBrainz / ID3).
   if (rawFolded) {
     const mapRaw = (): CanonicalCategory | null => {
-      if (containsAny(rawFolded, ['funk', 'baile funk', 'brega funk', 'mandelao', 'bruxaria'])) return 'Funk';
+      if (
+        !containsAny(rawFolded, ['soul & funk', 'soul/funk', 'funk/soul']) &&
+        containsAny(rawFolded, ['funk', 'baile funk', 'brega funk', 'mandelao', 'bruxaria', 'funk carioca', 'funk brasileiro'])
+      ) {
+        return 'Funk';
+      }
       if (containsAny(rawFolded, ['pagode', 'samba'])) return 'Samba & Pagode';
       if (containsAny(rawFolded, ['sertanejo', 'arrocha', 'agronejo', 'modao'])) return 'Sertanejo';
       if (containsAny(rawFolded, ['forro', 'piseiro', 'pisadinha', 'xote', 'baiao'])) return 'Forró & Piseiro';
-      if (containsAny(rawFolded, ['mpb', 'bossa nova', 'tropicalia'])) return 'MPB';
+      if (containsAny(rawFolded, ['mpb', 'bossa nova', 'tropicalia', 'musica popular brasileira'])) return 'MPB';
       if (containsAny(rawFolded, ['hip hop', 'hip-hop', 'rap', 'trap', 'boom bap', 'drill'])) return 'Rap & Trap';
       if (containsAny(rawFolded, ['rock', 'metal', 'punk', 'grunge', 'indie', 'alternative'])) {
         if (matchesArtist(artistFolded, FLASHBACK_70_80_ARTISTS) && !matchesArtist(artistFolded, ROCK_CLASSICO_ARTISTS)) {
@@ -582,7 +915,27 @@ export function normalizeGenreAndSubgenre(
       if (containsAny(rawFolded, ['disco', 'synthpop', 'new wave', 'eurodance', 'italo', 'flashback', 'oldies'])) {
         return 'Flashback';
       }
-      if (containsAny(rawFolded, ['electronic', 'eletronica', 'edm', 'house', 'techno', 'trance', 'psytrance', 'brazilian bass', 'dance'])) {
+      if (
+        containsAny(rawFolded, [
+          'electronic',
+          'eletronica',
+          'electronica',
+          'electro',
+          'edm',
+          'house',
+          'deep house',
+          'tech house',
+          'slap house',
+          'techno',
+          'trance',
+          'psytrance',
+          'brazilian bass',
+          'drum and bass',
+          'dnb',
+          'dubstep',
+          'dance',
+        ])
+      ) {
         if (year !== null && year <= 1989 && containsAny(rawFolded, ['disco', 'dance', 'synth'])) return 'Flashback';
         if (matchesArtist(artistFolded, FLASHBACK_70_80_ARTISTS) || matchesArtist(artistFolded, FLASHBACK_90_2000_ARTISTS)) {
           return 'Flashback';
@@ -607,7 +960,7 @@ export function normalizeGenreAndSubgenre(
     if (mapped) {
       return {
         genre: mapped,
-        subgenre: detectSubgenreForCategory(mapped, rawFolded, titleFolded, artistFolded, year),
+        subgenre: detectSubgenreForCategory(mapped, combinedRawFolded, titleFolded, artistFolded, year),
       };
     }
   }
@@ -615,12 +968,14 @@ export function normalizeGenreAndSubgenre(
   // 3. Heuristic BR + year + title/artist rules.
   const inferHeuristicCategory = (): CanonicalCategory | null => {
     if (
-      containsAny(`${titleFolded} ${albumFolded}`, ['funk', 'mandelao', 'bruxaria', 'baile', 'furacao 2000', 'tamborzao']) ||
+      hasBailePattern ||
+      containsAny(`${titleFolded} ${albumFolded}`, ['funk', 'mandelao', 'bruxaria', 'baile', 'furacao 2000', 'tamborzao', 'automotivo', 'bololo']) ||
       matchesArtist(artistFolded, [
         ...FUNK_ARTISTS_2000,
         ...FUNK_ARTISTS_MELODY,
         ...FUNK_ARTISTS_OSTENTACAO,
         ...FUNK_ARTISTS_MANDELAO,
+        ...FUNK_ARTISTS_BRUXARIA,
         ...FUNK_ARTISTS_POP,
       ])
     ) {
@@ -674,7 +1029,7 @@ export function normalizeGenreAndSubgenre(
       return 'Rock';
     }
     if (
-      containsAny(`${titleFolded} ${albumFolded}`, ['remix', 'psytrance', 'techno', 'house', 'edm', 'dj set']) ||
+      containsAny(`${titleFolded} ${albumFolded}`, ['remix', 'psytrance', 'techno', 'house', 'edm', 'dj set', 'brazilian bass']) ||
       matchesArtist(artistFolded, [...ELETRONICA_BRAZILIAN_BASS, ...ELETRONICA_PSY_TECHNO, ...ELETRONICA_EDM])
     ) {
       return 'Eletrônica';
@@ -698,11 +1053,11 @@ export function normalizeGenreAndSubgenre(
   if (!heuristicCat) return null;
   return {
     genre: heuristicCat,
-    subgenre: detectSubgenreForCategory(heuristicCat, rawFolded, titleFolded, artistFolded, year),
+    subgenre: detectSubgenreForCategory(heuristicCat, combinedRawFolded, titleFolded, artistFolded, year),
   };
 }
 
-function parseItunesYear(releaseDate: string | undefined): number | null {
+function parseReleaseYear(releaseDate: string | undefined): number | null {
   if (!releaseDate) return null;
   const match = releaseDate.match(/^(\d{4})\b/);
   if (!match) return null;
@@ -711,13 +1066,20 @@ function parseItunesYear(releaseDate: string | undefined): number | null {
 }
 
 /**
- * Cascading track classifier:
+ * Cascading zero-AI track classifier:
  * 1. Spotify Artist Genres (when configured)
- * 2. iTunes Search API (free, keyless fallback)
- * 3. Brazilian heuristic + release year normalization
+ * 2. Deezer Search API (free, keyless)
+ * 3. iTunes Search API (free, keyless, strict artist match validation)
+ * 4. MusicBrainz Artist API (free, keyless, custom User-Agent + rate limited)
+ * 5. Brazilian heuristic + release year normalization
  * Results are cached per artist in `artist_genres` and never overwrite `genre_manual = 1`.
  */
 export class ClassifierService {
+  private readonly deezerGenreCache = new Map<number, string>();
+  private readonly musicBrainzMinIntervalMs: number;
+  private musicBrainzQueue: Promise<void> = Promise.resolve();
+  private lastMusicBrainzRequestAt = 0;
+
   constructor(
     private readonly db: Db,
     private readonly tracks: TrackRepository,
@@ -725,7 +1087,10 @@ export class ClassifierService {
     private readonly fetchFn: FetchFn = fetch,
     private readonly log: (msg: string) => void = console.log,
     private readonly externalLookup = true,
-  ) {}
+    options: { musicBrainzMinIntervalMs?: number } = {},
+  ) {
+    this.musicBrainzMinIntervalMs = options.musicBrainzMinIntervalMs ?? MUSICBRAINZ_MIN_INTERVAL_MS;
+  }
 
   private getCachedArtist(artist: string): {
     rawGenres: string[];
@@ -740,7 +1105,7 @@ export class ClassifierService {
       | undefined;
     if (!row) return null;
     if (Date.now() - row.fetched_at > ARTIST_CACHE_TTL_MS) return null;
-    if (row.source !== 'spotify' && row.source !== 'itunes') return null;
+    if (!VALID_CACHE_SOURCES.has(row.source)) return null;
     let rawGenres: string[] = [];
     if (row.raw_genres) {
       try {
@@ -792,20 +1157,241 @@ export class ClassifierService {
     source: TrackSource | undefined,
     sourceId: string | undefined,
     title: string,
-    cleanArtist: string,
-  ): Promise<{ genres: string[]; year: number | null; artistName?: string } | null> {
+    artistCandidates: readonly string[],
+  ): Promise<{ genres: string[]; year: number | null; matchedArtist?: string } | null> {
     if (!this.spotify?.configured) return null;
+    let discoveredYear: number | null = null;
     try {
       if (source === 'spotify' && sourceId) {
         const info = await this.spotify.getTrackArtistGenres(sourceId);
-        if (info.genres.length > 0 || info.year !== null) return info;
+        if (info.year !== null) discoveredYear = info.year;
+        if (info.genres.length > 0) {
+          return { genres: info.genres, year: info.year, matchedArtist: info.artistName ?? artistCandidates[0] };
+        }
       }
-      if (cleanArtist) {
-        const genres = await this.spotify.searchArtistGenres(cleanArtist);
-        if (genres.length > 0) return { genres, year: null, artistName: cleanArtist };
+      for (const candidate of artistCandidates.slice(0, 3)) {
+        const genres = await this.spotify.searchArtistGenres(candidate);
+        if (genres.length > 0) {
+          return { genres, year: discoveredYear, matchedArtist: candidate };
+        }
+      }
+      if (discoveredYear !== null) {
+        return { genres: [], year: discoveredYear };
       }
     } catch (err) {
-      this.log(`[classifier] falha no Spotify para "${cleanArtist || title}": ${err instanceof Error ? err.message : String(err)}`);
+      this.log(`[classifier] falha no Spotify para "${artistCandidates[0] || title}": ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return null;
+  }
+
+  private async resolveDeezerGenreName(genreId: number): Promise<string | null> {
+    if (genreId <= 0) return null;
+    const cached = this.deezerGenreCache.get(genreId);
+    if (cached) return cached;
+    try {
+      const res = await this.fetchFn(`https://api.deezer.com/genre/${genreId}`, {
+        signal: AbortSignal.timeout(EXTERNAL_TIMEOUT_MS),
+      });
+      if (!res.ok) return null;
+      const body = (await res.json()) as { id?: number; name?: string };
+      const name = body.name?.trim();
+      if (!name || fold(name) === 'all' || fold(name) === 'todos') return null;
+      this.deezerGenreCache.set(genreId, name);
+      return name;
+    } catch (err) {
+      this.log(`[classifier] falha ao resolver gênero Deezer #${genreId}: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }
+
+  private async fetchFromDeezer(
+    title: string,
+    artistCandidates: readonly string[],
+  ): Promise<{ genres: string[]; year: number | null; matchedArtist?: string } | null> {
+    if (!this.externalLookup || artistCandidates.length === 0) return null;
+    for (const candidate of artistCandidates.slice(0, 3)) {
+      const queries = title ? [`${candidate} ${title}`, candidate] : [candidate];
+      for (const q of queries) {
+        try {
+          const params = new URLSearchParams({ q: q.trim(), limit: '5' });
+          const res = await this.fetchFn(`https://api.deezer.com/search?${params}`, {
+            signal: AbortSignal.timeout(EXTERNAL_TIMEOUT_MS),
+          });
+          if (!res.ok) continue;
+          const body = (await res.json()) as { data?: DeezerSearchItem[] };
+          const items = Array.isArray(body.data) ? body.data : [];
+          const match = items.find((item) => artistsMatch([candidate], item.artist?.name ?? ''));
+          if (!match) continue;
+
+          const genres: string[] = [];
+          let year: number | null = null;
+
+          for (const g of match.album?.genres?.data ?? []) {
+            const name = g.name?.trim();
+            if (name && fold(name) !== 'all' && fold(name) !== 'todos') genres.push(name);
+          }
+
+          let genreId = typeof match.album?.genre_id === 'number' && match.album.genre_id > 0 ? match.album.genre_id : null;
+          if (genres.length === 0 && !genreId && match.album?.id) {
+            try {
+              const albumRes = await this.fetchFn(`https://api.deezer.com/album/${match.album.id}`, {
+                signal: AbortSignal.timeout(EXTERNAL_TIMEOUT_MS),
+              });
+              if (albumRes.ok) {
+                const albumBody = (await albumRes.json()) as DeezerAlbumResponse;
+                year = parseReleaseYear(albumBody.release_date);
+                for (const g of albumBody.genres?.data ?? []) {
+                  const name = g.name?.trim();
+                  if (name && fold(name) !== 'all' && fold(name) !== 'todos') genres.push(name);
+                }
+                if (typeof albumBody.genre_id === 'number' && albumBody.genre_id > 0) {
+                  genreId = albumBody.genre_id;
+                }
+              }
+            } catch (err) {
+              this.log(`[classifier] falha ao consultar álbum Deezer #${match.album.id}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+
+          if (genres.length === 0 && genreId) {
+            const resolved = await this.resolveDeezerGenreName(genreId);
+            if (resolved) genres.push(resolved);
+          }
+
+          if (genres.length > 0 || year !== null) {
+            return { genres: [...new Set(genres)], year, matchedArtist: candidate };
+          }
+        } catch (err) {
+          this.log(`[classifier] falha na Deezer para "${q}": ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    }
+    return null;
+  }
+
+  private async fetchFromItunes(
+    title: string,
+    artistCandidates: readonly string[],
+  ): Promise<{ genres: string[]; year: number | null; matchedArtist?: string } | null> {
+    if (!this.externalLookup || artistCandidates.length === 0) return null;
+    for (const candidate of artistCandidates.slice(0, 3)) {
+      const term = [candidate, title].filter(Boolean).join(' ').trim();
+      if (!term) continue;
+      try {
+        const params = new URLSearchParams({
+          term,
+          media: 'music',
+          entity: 'song',
+          country: 'BR',
+          limit: '5',
+        });
+        const res = await this.fetchFn(`https://itunes.apple.com/search?${params}`, {
+          signal: AbortSignal.timeout(EXTERNAL_TIMEOUT_MS),
+        });
+        if (!res.ok) continue;
+        const body = (await res.json()) as { results?: ItunesSearchItem[] };
+        const items = Array.isArray(body.results) ? body.results : [];
+        if (items.length === 0) continue;
+
+        // Strict artist validation: never accept homonymous songs by unrelated artists.
+        const best = items.find((item) => artistsMatch([candidate], item.artistName ?? ''));
+        if (!best) continue;
+
+        const genre = best.primaryGenreName?.trim();
+        const year = parseReleaseYear(best.releaseDate);
+        if (!genre && year === null) continue;
+        return { genres: genre ? [genre] : [], year, matchedArtist: candidate };
+      } catch (err) {
+        this.log(`[classifier] falha no iTunes para "${term}": ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return null;
+  }
+
+  private async waitMusicBrainzRateLimit(): Promise<void> {
+    if (this.musicBrainzMinIntervalMs <= 0) return;
+    const prev = this.musicBrainzQueue;
+    let release!: () => void;
+    this.musicBrainzQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await prev;
+    try {
+      const elapsed = Date.now() - this.lastMusicBrainzRequestAt;
+      const waitMs = this.musicBrainzMinIntervalMs - elapsed;
+      if (waitMs > 0 && this.lastMusicBrainzRequestAt > 0) {
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+      }
+      this.lastMusicBrainzRequestAt = Date.now();
+    } finally {
+      release();
+    }
+  }
+
+  private extractMusicBrainzTags(item: MusicBrainzArtistItem): string[] {
+    const combined = [...(item.genres ?? []), ...(item.tags ?? [])]
+      .filter((t) => typeof t.name === 'string' && t.name.trim().length > 0 && (t.count === undefined || t.count > 0))
+      .sort((a, b) => (b.count ?? 1) - (a.count ?? 1));
+    const seen = new Set<string>();
+    const names: string[] = [];
+    for (const entry of combined) {
+      const name = entry.name!.trim();
+      const key = fold(name);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      names.push(name);
+    }
+    return names;
+  }
+
+  private async fetchFromMusicBrainz(
+    artistCandidates: readonly string[],
+  ): Promise<{ genres: string[]; matchedArtist?: string } | null> {
+    if (!this.externalLookup || artistCandidates.length === 0) return null;
+    const headers = {
+      'User-Agent': MUSICBRAINZ_USER_AGENT,
+      Accept: 'application/json',
+    };
+
+    for (const candidate of artistCandidates.slice(0, 3)) {
+      try {
+        await this.waitMusicBrainzRateLimit();
+        const params = new URLSearchParams({
+          query: `artist:"${candidate}"`,
+          fmt: 'json',
+          limit: '5',
+        });
+        const res = await this.fetchFn(`https://musicbrainz.org/ws/2/artist?${params}`, {
+          headers,
+          signal: AbortSignal.timeout(EXTERNAL_TIMEOUT_MS),
+        });
+        if (!res.ok) continue;
+        const body = (await res.json()) as { artists?: MusicBrainzArtistItem[] };
+        const items = Array.isArray(body.artists) ? body.artists : [];
+        const match = items.find(
+          (item) => (item.score === undefined || item.score >= 70) && artistsMatch([candidate], item.name ?? ''),
+        );
+        if (!match) continue;
+
+        let tags = this.extractMusicBrainzTags(match);
+        if (tags.length === 0 && match.id) {
+          await this.waitMusicBrainzRateLimit();
+          const detailRes = await this.fetchFn(
+            `https://musicbrainz.org/ws/2/artist/${encodeURIComponent(match.id)}?inc=tags+genres&fmt=json`,
+            { headers, signal: AbortSignal.timeout(EXTERNAL_TIMEOUT_MS) },
+          );
+          if (detailRes.ok) {
+            const detail = (await detailRes.json()) as MusicBrainzArtistItem;
+            tags = this.extractMusicBrainzTags(detail);
+          }
+        }
+
+        if (tags.length > 0) {
+          return { genres: tags, matchedArtist: candidate };
+        }
+      } catch (err) {
+        this.log(`[classifier] falha no MusicBrainz para "${candidate}": ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
     return null;
   }
@@ -815,58 +1401,91 @@ export class ClassifierService {
     sourceId?: string;
     cleanTitle: string;
     cleanArtist: string;
+    artistCandidates: readonly string[];
     initialYear: number | null;
+    force?: boolean;
   }): Promise<{
     externalGenres: string[];
     discoveredYear: number | null;
-    source: TrackClassificationResult['source'];
+    source: ClassificationSource | null;
   }> {
     const externalGenres: string[] = [];
     let discoveredYear = input.initialYear;
-    let source: TrackClassificationResult['source'] = null;
+    let source: ClassificationSource | null = null;
+    let matchedArtist: string | undefined;
 
-    const cached = input.cleanArtist ? this.getCachedArtist(input.cleanArtist) : null;
-    if (cached) {
-      externalGenres.push(...cached.rawGenres);
-      return { externalGenres, discoveredYear, source: 'cache' };
+    if (!input.force) {
+      for (const candidate of input.artistCandidates) {
+        const cached = this.getCachedArtist(candidate);
+        if (cached) {
+          externalGenres.push(...cached.rawGenres);
+          return { externalGenres, discoveredYear, source: 'cache' };
+        }
+      }
     }
 
     const spotifyInfo = await this.fetchFromSpotify(
       input.source,
       input.sourceId,
       input.cleanTitle,
-      input.cleanArtist,
+      input.artistCandidates,
     );
     if (spotifyInfo) {
       if (discoveredYear === null && spotifyInfo.year !== null) discoveredYear = spotifyInfo.year;
       if (spotifyInfo.genres.length > 0) {
         externalGenres.push(...spotifyInfo.genres);
         source = 'spotify';
+        matchedArtist = spotifyInfo.matchedArtist;
       }
     }
 
     if (externalGenres.length === 0) {
-      const itunesInfo = await this.fetchFromItunes(input.cleanTitle, input.cleanArtist);
+      const deezerInfo = await this.fetchFromDeezer(input.cleanTitle, input.artistCandidates);
+      if (deezerInfo) {
+        if (discoveredYear === null && deezerInfo.year !== null) discoveredYear = deezerInfo.year;
+        if (deezerInfo.genres.length > 0) {
+          externalGenres.push(...deezerInfo.genres);
+          source = 'deezer';
+          matchedArtist = deezerInfo.matchedArtist;
+        }
+      }
+    }
+
+    if (externalGenres.length === 0) {
+      const itunesInfo = await this.fetchFromItunes(input.cleanTitle, input.artistCandidates);
       if (itunesInfo) {
         if (discoveredYear === null && itunesInfo.year !== null) discoveredYear = itunesInfo.year;
         if (itunesInfo.genres.length > 0) {
           externalGenres.push(...itunesInfo.genres);
           source = 'itunes';
+          matchedArtist = itunesInfo.matchedArtist;
         }
       }
     }
 
-    if (input.cleanArtist && externalGenres.length > 0 && (source === 'spotify' || source === 'itunes')) {
+    if (externalGenres.length === 0) {
+      const mbInfo = await this.fetchFromMusicBrainz(input.artistCandidates);
+      if (mbInfo && mbInfo.genres.length > 0) {
+        externalGenres.push(...mbInfo.genres);
+        source = 'musicbrainz';
+        matchedArtist = mbInfo.matchedArtist;
+      }
+    }
+
+    const cacheArtist = matchedArtist || input.cleanArtist;
+    if (cacheArtist && externalGenres.length > 0 && source && VALID_CACHE_SOURCES.has(source)) {
       const baseOutcome = normalizeGenreAndSubgenre(externalGenres, {
         title: '',
-        artist: input.cleanArtist,
+        artist: cacheArtist,
       });
-      this.saveArtistCache(input.cleanArtist, {
-        rawGenres: externalGenres,
-        genre: baseOutcome?.genre ?? null,
-        subgenre: baseOutcome?.subgenre ?? null,
-        source,
-      });
+      if (source !== 'musicbrainz' || baseOutcome !== null) {
+        this.saveArtistCache(cacheArtist, {
+          rawGenres: externalGenres,
+          genre: baseOutcome?.genre ?? null,
+          subgenre: baseOutcome?.subgenre ?? null,
+          source,
+        });
+      }
     }
 
     return { externalGenres, discoveredYear, source };
@@ -882,23 +1501,22 @@ export class ClassifierService {
     sourceId?: string;
     rawGenres?: readonly string[];
   }): Promise<ClassificationOutcome | null> {
-    const sanitized = sanitizeTrackMetadata(input.title, input.artist);
-    const cleanTitle = sanitized.title || input.title;
-    const cleanArtist = sanitized.artist || input.artist;
-
+    const cleaned = cleanTrackMetadataForClassification(input.title, input.artist);
     const { externalGenres, discoveredYear } = await this.resolveExternalMetadata({
       source: input.source,
       sourceId: input.sourceId,
-      cleanTitle,
-      cleanArtist,
+      cleanTitle: cleaned.searchTitle,
+      cleanArtist: cleaned.artist,
+      artistCandidates: cleaned.artistCandidates,
       initialYear: input.year ?? null,
     });
 
     const context: ClassificationContext = {
-      title: cleanTitle,
-      artist: cleanArtist,
+      title: cleaned.title,
+      artist: cleaned.artist,
       album: input.album,
       year: discoveredYear,
+      hints: cleaned.signals,
     };
     const combinedRaw = [...externalGenres, ...(input.rawGenres ?? [])];
     return (
@@ -907,48 +1525,9 @@ export class ClassifierService {
     );
   }
 
-  private async fetchFromItunes(
-    title: string,
-    artist: string,
-  ): Promise<{ genres: string[]; year: number | null } | null> {
-    if (!this.externalLookup) return null;
-    const term = [artist, title].filter(Boolean).join(' ').trim();
-    if (!term) return null;
-    try {
-      const params = new URLSearchParams({
-        term,
-        media: 'music',
-        entity: 'song',
-        country: 'BR',
-        limit: '5',
-      });
-      const res = await this.fetchFn(`https://itunes.apple.com/search?${params}`, {
-        signal: AbortSignal.timeout(ITUNES_TIMEOUT_MS),
-      });
-      if (!res.ok) return null;
-      const body = (await res.json()) as { results?: ItunesSearchItem[] };
-      const items = Array.isArray(body.results) ? body.results : [];
-      if (items.length === 0) return null;
-      const artistFolded = fold(artist);
-      const best =
-        (artistFolded
-          ? items.find((item) => {
-              const cand = fold(item.artistName ?? '');
-              return cand && (cand.includes(artistFolded) || artistFolded.includes(cand));
-            })
-          : undefined) ?? items[0];
-      const genre = best.primaryGenreName?.trim();
-      const year = parseItunesYear(best.releaseDate);
-      if (!genre && year === null) return null;
-      return { genres: genre ? [genre] : [], year };
-    } catch (err) {
-      this.log(`[classifier] falha no iTunes para "${term}": ${err instanceof Error ? err.message : String(err)}`);
-      return null;
-    }
-  }
-
   async classifyTrack(track: Track, options: { force?: boolean } = {}): Promise<TrackClassificationResult> {
-    if (track.genreManual && !options.force) {
+    // Manual host categorizations are strictly locked even on forced re-classification.
+    if (track.genreManual) {
       return {
         updated: false,
         genre: track.genre,
@@ -958,43 +1537,59 @@ export class ClassifierService {
       };
     }
 
-    const sanitized = sanitizeTrackMetadata(track.title, track.artist);
-    const cleanTitle = sanitized.title || track.title;
-    const cleanArtist = sanitized.artist || track.artist;
-
-    const externalGenres: string[] = [];
-    const trackGenreTag = track.genre?.trim() ? [track.genre.trim()] : [];
+    const cleaned = cleanTrackMetadataForClassification(track.title, track.artist);
+    const force = options.force === true;
 
     const resolved = await this.resolveExternalMetadata({
       source: track.source,
       sourceId: track.sourceId,
-      cleanTitle,
-      cleanArtist,
+      cleanTitle: cleaned.searchTitle,
+      cleanArtist: cleaned.artist,
+      artistCandidates: cleaned.artistCandidates,
       initialYear: track.year,
+      force,
     });
-    externalGenres.push(...resolved.externalGenres);
+    const externalGenres = resolved.externalGenres;
     const discoveredYear = resolved.discoveredYear;
     const source = resolved.source;
 
+    const hasCanonicalGenre = isCanonicalCategory(track.genre);
+    // When forcing re-classification, never feed a previous canonical auto-genre back in.
+    const trackGenreTag =
+      track.genre?.trim() && (!force || !hasCanonicalGenre) ? [track.genre.trim()] : [];
+
     const context: ClassificationContext = {
-      title: cleanTitle,
-      artist: cleanArtist,
+      title: cleaned.title,
+      artist: cleaned.artist,
       album: track.album,
       year: discoveredYear,
+      hints: cleaned.signals,
     };
     const outcome =
       (externalGenres.length > 0 ? normalizeGenreAndSubgenre(externalGenres, context) : null) ??
       normalizeGenreAndSubgenre([...externalGenres, ...trackGenreTag], context);
 
-    const patch: { genre?: string; subgenre?: string | null; year?: number } = {};
-    const hasCanonicalGenre = isCanonicalCategory(track.genre);
-    const hasSubgenre = Boolean(track.subgenre?.trim());
-
-    if (!hasCanonicalGenre && outcome?.genre && track.genre?.trim() !== outcome.genre) {
-      patch.genre = outcome.genre;
+    const patch: { title?: string; artist?: string; genre?: string; subgenre?: string | null; year?: number } = {};
+    if (cleaned.extractedArtistFromTitle) {
+      patch.artist = cleaned.artist;
+      patch.title = cleaned.title;
     }
-    if (!hasSubgenre && outcome?.subgenre) {
-      patch.subgenre = outcome.subgenre;
+
+    const hasSubgenre = Boolean(track.subgenre?.trim());
+    if (force) {
+      if (outcome?.genre && track.genre?.trim() !== outcome.genre) {
+        patch.genre = outcome.genre;
+      }
+      if (outcome && (track.subgenre?.trim() ?? null) !== (outcome.subgenre ?? null)) {
+        patch.subgenre = outcome.subgenre;
+      }
+    } else {
+      if (!hasCanonicalGenre && outcome?.genre && track.genre?.trim() !== outcome.genre) {
+        patch.genre = outcome.genre;
+      }
+      if (!hasSubgenre && outcome?.subgenre) {
+        patch.subgenre = outcome.subgenre;
+      }
     }
     if (track.year === null && discoveredYear !== null) {
       patch.year = discoveredYear;
@@ -1005,7 +1600,7 @@ export class ClassifierService {
       return {
         updated: true,
         genre: patch.genre ?? track.genre,
-        subgenre: patch.subgenre ?? track.subgenre,
+        subgenre: patch.subgenre !== undefined ? patch.subgenre : track.subgenre,
         source: source ?? 'heuristic',
       };
     }
@@ -1018,15 +1613,16 @@ export class ClassifierService {
     };
   }
 
-  async autocategorizeAll(): Promise<AutocategorizeSummary> {
-    const { candidates, skippedManual } = this.tracks.listTracksForAutocategorize();
+  async autocategorizeAll(options: { force?: boolean } = {}): Promise<AutocategorizeSummary> {
+    const force = options.force === true;
+    const { candidates, skippedManual } = this.tracks.listTracksForAutocategorize({ force });
     let updated = 0;
     let failed = 0;
     const updatedTrackIds: string[] = [];
 
     for (const track of candidates) {
       try {
-        const res = await this.classifyTrack(track);
+        const res = await this.classifyTrack(track, { force });
         if (res.updated) {
           updated += 1;
           updatedTrackIds.push(track.id);

@@ -85,6 +85,8 @@ describe('catalog helpers', () => {
     });
 
     expect(getSubcategorySuggestions('Funk')).toContain('Funk Mandelão');
+    expect(getSubcategorySuggestions('Funk')).toContain('Funk MTG');
+    expect(getSubcategorySuggestions('Funk')).toContain('Funk Automotivo');
 
     expect(
       buildMetadataPatch({ title: '  ', artist: 'X', album: '', genre: '', subgenre: '', year: '', trackNumber: '' }),
