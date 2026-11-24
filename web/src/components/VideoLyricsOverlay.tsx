@@ -6,17 +6,31 @@ interface VideoLyricsOverlayProps {
   lyrics: TrackLyrics | null;
   loading: boolean;
   currentTimeSec: number;
+  immersive?: boolean;
+  controlsVisible?: boolean;
 }
 
 /** Subtitle-style translucent synced lyrics overlay anchored to the bottom of the video player. */
-export function VideoLyricsOverlay({ lyrics, loading, currentTimeSec }: VideoLyricsOverlayProps) {
+export function VideoLyricsOverlay({
+  lyrics,
+  loading,
+  currentTimeSec,
+  immersive = false,
+  controlsVisible = false,
+}: VideoLyricsOverlayProps) {
   const parsedLines = useMemo(() => parseLrc(lyrics?.syncedLrc), [lyrics?.syncedLrc]);
   const hasSynced = parsedLines.length > 0;
   const activeIndex = hasSynced ? findActiveLineIndex(parsedLines, currentTimeSec, lyrics?.offsetMs ?? 0) : -1;
+  const anchorClass = immersive
+    ? controlsVisible
+      ? 'inset-x-4 bottom-32 sm:inset-x-8 sm:bottom-32'
+      : 'inset-x-4 bottom-5 sm:inset-x-8 sm:bottom-6'
+    : 'inset-x-3 bottom-3 sm:inset-x-6 sm:bottom-5';
+  const boxWidthClass = immersive ? 'max-w-[min(86%,920px)]' : 'max-w-[92%]';
 
   if (loading) {
     return (
-      <div className="pointer-events-none absolute inset-x-3 bottom-3 z-10 flex justify-center sm:inset-x-6 sm:bottom-5">
+      <div className={`pointer-events-none absolute z-10 flex justify-center transition-all duration-300 ${anchorClass}`}>
         <div className="rounded-2xl border border-white/15 bg-black/75 px-4 py-1.5 text-center text-xs text-zinc-300 shadow-xl backdrop-blur-md">
           Buscando letra…
         </div>
@@ -31,15 +45,27 @@ export function VideoLyricsOverlay({ lyrics, loading, currentTimeSec }: VideoLyr
     const nextLine = activeIndex + 1 < parsedLines.length ? parsedLines[activeIndex + 1] : null;
 
     return (
-      <div className="pointer-events-none absolute inset-x-3 bottom-3 z-10 flex justify-center sm:inset-x-6 sm:bottom-5">
-        <div className="max-w-[92%] rounded-2xl border border-white/15 bg-black/75 px-4 py-2 text-center shadow-xl backdrop-blur-md">
+      <div className={`pointer-events-none absolute z-10 flex justify-center transition-all duration-300 ${anchorClass}`}>
+        <div
+          className={`${boxWidthClass} rounded-2xl border border-white/15 bg-black/75 px-4 py-2 text-center shadow-xl backdrop-blur-md ${
+            immersive ? 'sm:px-6 sm:py-3' : ''
+          }`}
+        >
           {activeLine ? (
             <>
-              <p className="text-sm font-bold leading-snug text-white drop-shadow [overflow-wrap:anywhere] sm:text-lg lg:text-xl">
+              <p
+                className={`font-bold leading-snug text-white drop-shadow [overflow-wrap:anywhere] ${
+                  immersive ? 'text-base sm:text-xl lg:text-2xl xl:text-3xl' : 'text-sm sm:text-lg lg:text-xl'
+                }`}
+              >
                 {activeLine.text}
               </p>
               {nextLine && (
-                <p className="mt-0.5 text-xs font-medium text-zinc-300/80 [overflow-wrap:anywhere] sm:text-sm">
+                <p
+                  className={`mt-0.5 font-medium text-zinc-300/85 [overflow-wrap:anywhere] ${
+                    immersive ? 'text-xs sm:text-base lg:text-lg' : 'text-xs sm:text-sm'
+                  }`}
+                >
                   {nextLine.text}
                 </p>
               )}
@@ -59,7 +85,7 @@ export function VideoLyricsOverlay({ lyrics, loading, currentTimeSec }: VideoLyr
       : 'Letra indisponível';
 
   return (
-    <div className="pointer-events-none absolute inset-x-3 bottom-3 z-10 flex justify-center sm:inset-x-6 sm:bottom-5">
+    <div className={`pointer-events-none absolute z-10 flex justify-center transition-all duration-300 ${anchorClass}`}>
       <div className="rounded-2xl border border-white/15 bg-black/70 px-3.5 py-1.5 text-center text-xs font-medium text-zinc-300 shadow-xl backdrop-blur-md">
         {fallbackText}
       </div>
