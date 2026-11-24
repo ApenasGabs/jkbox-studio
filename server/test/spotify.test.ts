@@ -1,7 +1,12 @@
+import fs from 'node:fs';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
+import WebSocket from 'ws';
 import { createApp } from '../src/app.js';
 import { createJukebox } from '../src/container.js';
+import { attachRealtime } from '../src/realtime.js';
 import { pickYoutubeVideoCandidate } from '../src/lib/youtubeMatch.js';
 import { spotifyTrackToResult } from '../src/services/spotify.js';
 import { FakeMedia, setup, ytResult } from './helpers.js';
@@ -825,5 +830,115 @@ describe('Spotify integration', () => {
     await jukebox.downloads.idle();
     expect(jukebox.tracks.get(fallbackTrack.id)?.youtubeId).toBe('fallback999');
     jukebox.stop();
+  });
+
+  it('resolves youtubeId and caches muted video in background during Spotify Connect playback without blocking audio or off mode', async () => {
+    // 1. VIDEO_MODE=cache: adopted Spotify Connect track downloads MP4 video only, emits WS updates, and streams /video
+    const fakeCache = fakeSpotify();
+    const cacheCtx = setup({ ...SPOTIFY_ENV, VIDEO_MODE: 'cache' }, fakeCache.fetchFn);
+    const cacheServer = http.createServer(createApp({ config: cacheCtx.config, jukebox: cacheCtx.jukebox }));
+    const wss = attachRealtime(cacheServer, cacheCtx.jukebox);
+    await new Promise<void>((r) => cacheServer.listen(0, r));
+    const wsUrl = `ws://127.0.0.1:${(cacheServer.address() as AddressInfo).port}/ws`;
+    const ws = new WebSocket(wsUrl);
+    const wsMessages: any[] = [];
+    ws.on('message', (raw) => wsMessages.push(JSON.parse(String(raw))));
+    await vi.waitFor(() => expect(wsMessages.some((m) => m.type === 'state')).toBe(true));
+
+    const authState = new URL((await request(cacheServer).get('/api/spotify/auth')).headers.location).searchParams.get('state');
+    await request(cacheServer).get('/api/spotify/callback').query({ code: 'c', state: authState });
+    await request(cacheServer).post('/api/spotify/device').send({ deviceId: 'spk-sala' }).expect(200);
+
+    fakeCache.setPlaybackState({
+      is_playing: true,
+      progress_ms: 15_000,
+      item: track('spVidCache1', 'Around the World'),
+    });
+    await cacheCtx.jukebox.pollSpotifyPlayback();
+    await cacheCtx.jukebox.downloads.idle();
+
+    const cachedCurrent = cacheCtx.jukebox.queue.state().nowPlaying!.item.track;
+    expect(cachedCurrent.status).toBe('pending');
+    expect(cachedCurrent.youtubeId).toBeTruthy();
+    expect(cachedCurrent.videoPath).toBeTruthy();
+    expect(fs.existsSync(cachedCurrent.videoPath!)).toBe(true);
+    expect(cacheCtx.media.downloads).toEqual([]);
+    expect(cacheCtx.media.videoDownloads).toEqual([cachedCurrent.youtubeId]);
+
+    // Video endpoint streams 200 MP4 even while track audio status is still pending
+    const videoRes = await request(cacheServer).get(`/api/tracks/${cachedCurrent.id}/video`).expect(200);
+    expect(videoRes.headers['content-type']).toBe('video/mp4');
+
+    // Realtime WebSocket broadcasted state with videoPath + download notification
+    await vi.waitFor(() => {
+      expect(wsMessages.some((m) => m.type === 'download' && m.trackId === cachedCurrent.id)).toBe(true);
+      expect(
+        wsMessages.some(
+          (m) =>
+            m.type === 'state' &&
+            m.state.nowPlaying?.item.track.id === cachedCurrent.id &&
+            Boolean(m.state.nowPlaying?.item.track.videoPath),
+        ),
+      ).toBe(true);
+    });
+
+    // Switching Local -> Spotify while a ready audio-only track is playing also triggers background video download
+    await request(cacheServer).post('/api/spotify/device').send({ deviceId: null }).expect(200);
+    await request(cacheServer).post('/api/player/skip').expect(200);
+    const localOnlyTrack = cacheCtx.jukebox.tracks.upsertFromResult({
+      source: 'spotify',
+      sourceId: 'spLocalReady',
+      title: 'Digital Love',
+      artist: 'Daft Punk',
+      durationSec: 200,
+      spotifyUri: 'spotify:track:spLocalReady',
+    });
+    cacheCtx.jukebox.tracks.update(localOnlyTrack.id, { status: 'ready', filePath: `${cacheCtx.config.musicDir}/local.m4a` });
+    cacheCtx.jukebox.queue.enqueue(localOnlyTrack.id, 'u1', 'Ana');
+    await request(cacheServer).post('/api/spotify/device').send({ deviceId: 'spk-sala' }).expect(200);
+    await cacheCtx.jukebox.downloads.idle();
+    expect(cacheCtx.jukebox.tracks.get(localOnlyTrack.id)?.videoPath).toBeTruthy();
+
+    ws.close();
+    wss.close();
+    await new Promise<void>((r) => cacheServer.close(() => r()));
+    cacheCtx.jukebox.stop();
+
+    // 2. VIDEO_MODE=embed: resolves youtubeId and emits state without downloading MP4
+    const fakeEmbed = fakeSpotify();
+    const embedCtx = setup({ ...SPOTIFY_ENV, VIDEO_MODE: 'embed' }, fakeEmbed.fetchFn);
+    const embedApp = createApp({ config: embedCtx.config, jukebox: embedCtx.jukebox });
+    const embedAuth = new URL((await request(embedApp).get('/api/spotify/auth')).headers.location).searchParams.get('state');
+    await request(embedApp).get('/api/spotify/callback').query({ code: 'c', state: embedAuth });
+    await request(embedApp).post('/api/spotify/device').send({ deviceId: 'spk-sala' }).expect(200);
+
+    fakeEmbed.setPlaybackState({ is_playing: true, progress_ms: 8_000, item: track('spEmbed1', 'Veridis Quo') });
+    await embedCtx.jukebox.pollSpotifyPlayback();
+    await embedCtx.jukebox.downloads.idle();
+
+    const embedTrack = embedCtx.jukebox.queue.state().nowPlaying!.item.track;
+    expect(embedTrack.youtubeId).toBeTruthy();
+    expect(embedTrack.videoPath).toBeNull();
+    expect(embedCtx.media.videoDownloads).toEqual([]);
+    embedCtx.jukebox.stop();
+
+    // 3. VIDEO_MODE=off: skips both youtubeId lookup and video download
+    const fakeOff = fakeSpotify();
+    const offCtx = setup({ ...SPOTIFY_ENV, VIDEO_MODE: 'off' }, fakeOff.fetchFn);
+    const offApp = createApp({ config: offCtx.config, jukebox: offCtx.jukebox });
+    const offAuth = new URL((await request(offApp).get('/api/spotify/auth')).headers.location).searchParams.get('state');
+    await request(offApp).get('/api/spotify/callback').query({ code: 'c', state: offAuth });
+    await request(offApp).post('/api/spotify/device').send({ deviceId: 'spk-sala' }).expect(200);
+
+    fakeOff.setPlaybackState({ is_playing: true, progress_ms: 8_000, item: track('spOff1', 'Face to Face') });
+    await offCtx.jukebox.pollSpotifyPlayback();
+    await offCtx.jukebox.downloads.idle();
+
+    const offTrack = offCtx.jukebox.queue.state().nowPlaying!.item.track;
+    expect(offTrack.youtubeId).toBeNull();
+    expect(offTrack.videoPath).toBeNull();
+    expect(offCtx.media.searches).toEqual([]);
+    expect(offCtx.media.videoDownloads).toEqual([]);
+    offCtx.jukebox.stop();
   });
 });

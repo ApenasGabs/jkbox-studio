@@ -9,6 +9,7 @@ import type { MediaProvider } from './ytdlp.js';
 export interface DownloadEvents {
   progress: [track: Track];
   ready: [track: Track];
+  video: [track: Track];
   failed: [track: Track];
 }
 
@@ -29,7 +30,8 @@ export class DownloadManager extends EventEmitter<DownloadEvents> {
   private readonly pendingHigh: string[] = [];
   private readonly pendingLow: string[] = [];
   private readonly active = new Set<string>();
-  private readonly videoActive = new Set<string>();
+  private readonly videoPromises = new Map<string, Promise<string | null>>();
+  private readonly youtubeIdResolvers = new Map<string, Promise<string | null>>();
   private readonly lastEmit = new Map<string, number>();
   private readonly videoMode: VideoMode;
   private readonly videoMaxHeight: number;
@@ -103,7 +105,50 @@ export class DownloadManager extends EventEmitter<DownloadEvents> {
 
   /** Resolves once all queued downloads (including background video backfills) have settled. */
   async idle(): Promise<void> {
-    while (this.activeCount > 0 || this.videoActive.size > 0) await new Promise((r) => setTimeout(r, 5));
+    while (this.activeCount > 0 || this.videoPromises.size > 0 || this.youtubeIdResolvers.size > 0) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+  }
+
+  /**
+   * Ensures `youtubeId` is resolved (when `VIDEO_MODE !== 'off'`) and a cached MP4 video
+   * is fetched in background (when `VIDEO_MODE === 'cache'`), without downloading audio or
+   * altering `track.status`. Used while Spotify Connect handles audio playback.
+   */
+  async ensureVideo(trackId: string): Promise<Track | null> {
+    if (this.videoMode === 'off') return null;
+    const track = this.tracks.get(trackId);
+    if (!track) return null;
+
+    let youtubeId = track.youtubeId;
+    if (!youtubeId) {
+      try {
+        youtubeId = await this.resolveAndPersistYoutubeId(trackId);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.log(`[video] falha ao resolver YouTube ID (${track.title}): ${message}`);
+        return this.tracks.get(trackId);
+      }
+      if (!youtubeId) return this.tracks.get(trackId);
+      const withYt = this.tracks.get(trackId);
+      if (withYt) this.emit('video', withYt);
+    }
+
+    const latest = this.tracks.get(trackId);
+    if (!latest || this.videoMode !== 'cache' || this.hasVideoFile(latest)) {
+      return latest;
+    }
+
+    const twin = this.tracks.findReadyByYoutubeId(youtubeId);
+    if (twin && twin.id !== latest.id && this.hasVideoFile(twin)) {
+      this.tracks.update(latest.id, { videoPath: twin.videoPath });
+      const updated = this.tracks.get(latest.id);
+      if (updated) this.emit('video', updated);
+      return updated;
+    }
+
+    await this.startVideoDownload(latest.id, youtubeId);
+    return this.tracks.get(latest.id);
   }
 
   private pump(): void {
@@ -126,26 +171,69 @@ export class DownloadManager extends EventEmitter<DownloadEvents> {
     this.emit('progress', this.tracks.get(trackId)!);
   }
 
-  private ensureVideoBackfill(track: Track): void {
-    if (this.videoMode !== 'cache' || !track.youtubeId || this.tracks.isVideoCached(track)) return;
-    const twin = this.tracks.findReadyByYoutubeId(track.youtubeId);
-    if (twin && twin.id !== track.id && this.tracks.isVideoCached(twin)) {
-      this.tracks.update(track.id, { videoPath: twin.videoPath });
-      this.emit('ready', this.tracks.get(track.id)!);
-      return;
-    }
-    if (!this.media.downloadVideo || this.videoActive.has(track.id)) return;
-    this.videoActive.add(track.id);
-    void this.downloadVideoSafe(track.id, track.youtubeId)
-      .then((videoPath) => {
-        if (!videoPath) return;
-        this.tracks.update(track.id, { videoPath });
-        const updated = this.tracks.get(track.id);
-        if (updated) this.emit('ready', updated);
+  private hasVideoFile(track: Track): boolean {
+    return Boolean(track.videoPath && fs.existsSync(track.videoPath));
+  }
+
+  private resolveAndPersistYoutubeId(trackId: string): Promise<string | null> {
+    const current = this.tracks.get(trackId);
+    if (!current) return Promise.resolve(null);
+    if (current.youtubeId) return Promise.resolve(current.youtubeId);
+    const existing = this.youtubeIdResolvers.get(trackId);
+    if (existing) return existing;
+
+    const task = this.resolveYoutubeId(current)
+      .then((youtubeId) => {
+        if (youtubeId) {
+          this.tracks.update(trackId, { youtubeId });
+        }
+        return youtubeId;
       })
       .finally(() => {
-        this.videoActive.delete(track.id);
+        this.youtubeIdResolvers.delete(trackId);
       });
+    this.youtubeIdResolvers.set(trackId, task);
+    return task;
+  }
+
+  private startVideoDownload(
+    trackId: string,
+    youtubeId: string,
+    options: { onProgress?: (fraction: number) => void; emitEvent?: boolean } = {},
+  ): Promise<string | null> {
+    if (this.videoMode !== 'cache' || !this.media.downloadVideo) return Promise.resolve(null);
+    const existing = this.videoPromises.get(trackId);
+    if (existing) return existing;
+
+    const emitEvent = options.emitEvent ?? true;
+    const promise = this.downloadVideoSafe(trackId, youtubeId, options.onProgress)
+      .then((videoPath) => {
+        if (videoPath) {
+          this.tracks.update(trackId, { videoPath });
+          if (emitEvent) {
+            const updated = this.tracks.get(trackId);
+            if (updated) this.emit('video', updated);
+          }
+        }
+        return videoPath;
+      })
+      .finally(() => {
+        this.videoPromises.delete(trackId);
+      });
+    this.videoPromises.set(trackId, promise);
+    return promise;
+  }
+
+  private ensureVideoBackfill(track: Track): void {
+    if (this.videoMode !== 'cache' || !track.youtubeId || this.hasVideoFile(track)) return;
+    const twin = this.tracks.findReadyByYoutubeId(track.youtubeId);
+    if (twin && twin.id !== track.id && this.hasVideoFile(twin)) {
+      this.tracks.update(track.id, { videoPath: twin.videoPath });
+      const updated = this.tracks.get(track.id);
+      if (updated) this.emit('video', updated);
+      return;
+    }
+    void this.startVideoDownload(track.id, track.youtubeId);
   }
 
   private async downloadVideoSafe(
@@ -182,9 +270,8 @@ export class DownloadManager extends EventEmitter<DownloadEvents> {
 
       let youtubeId = track.youtubeId;
       if (!youtubeId) {
-        youtubeId = await this.resolveYoutubeId(track);
+        youtubeId = await this.resolveAndPersistYoutubeId(trackId);
         if (!youtubeId) throw new Error('Nenhum áudio correspondente encontrado no YouTube');
-        this.tracks.update(trackId, { youtubeId });
         const twin = this.tracks.findReadyByYoutubeId(youtubeId);
         if (twin && twin.id !== trackId && this.tracks.isCached(twin)) {
           const videoPath = this.tracks.isVideoCached(twin) ? twin.videoPath : null;
@@ -202,9 +289,18 @@ export class DownloadManager extends EventEmitter<DownloadEvents> {
       });
       if (!fs.existsSync(filePath)) throw new Error(`Arquivo baixado não encontrado: ${filePath}`);
 
-      const videoPath = wantsVideo
-        ? await this.downloadVideoSafe(trackId, youtubeId, (fraction) => this.emitThrottledProgress(trackId, 0.5 + fraction * 0.5))
-        : null;
+      const fresh = this.tracks.get(trackId);
+      let videoPath: string | null = null;
+      if (wantsVideo) {
+        if (fresh && this.hasVideoFile(fresh)) {
+          videoPath = fresh.videoPath;
+        } else {
+          videoPath = await this.startVideoDownload(trackId, youtubeId, {
+            onProgress: (fraction) => this.emitThrottledProgress(trackId, 0.5 + fraction * 0.5),
+            emitEvent: false,
+          });
+        }
+      }
 
       this.tracks.update(trackId, { status: 'ready', progress: 1, filePath, videoPath, error: null });
       this.emit('ready', this.tracks.get(trackId)!);

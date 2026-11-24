@@ -145,6 +145,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
         }
         this.resetSpotifyActiveState();
         void this.playCurrentOnSpotify(entry);
+        this.ensureCurrentVideoForSpotify(entry.trackId);
       }
     });
     queue.on('ended', (entry) => {
@@ -194,11 +195,22 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     return run;
   }
 
+  private ensureCurrentVideoForSpotify(trackId: string): void {
+    if (this._playbackOutput.type !== 'spotify') return;
+    void this.downloads.ensureVideo(trackId).catch((err) => {
+      this.log(`[video] falha ao preparar vídeo no modo Spotify Connect: ${errorMessage(err)}`);
+    });
+  }
+
   private commitSpotifyOutput(device: Pick<SpotifyDevice, 'id' | 'name'>): void {
     this._playbackOutput = { type: 'spotify', deviceId: device.id, deviceName: device.name };
     this.settings?.set('playback_output', this._playbackOutput);
     this.suppressedSpotifyUri = null;
     this.consecutiveSpotifyMisses = 0;
+    const current = this.queue.state().nowPlaying;
+    if (current) {
+      this.ensureCurrentVideoForSpotify(current.item.trackId);
+    }
     this.emit('output', this._playbackOutput);
     this.queue.emit('change');
   }
@@ -413,6 +425,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       this.startSpotifyPolling();
       return;
     }
+    this.ensureCurrentVideoForSpotify(current.item.trackId);
     if (this.activeSpotifyQueueId === current.item.id) return;
     void this.playCurrentOnSpotify(current.item, Math.round(current.positionSec * 1000));
   }
@@ -524,6 +537,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     this.spotifyStartedAtMs = Date.now();
     this.spotifySeenPlaying = true;
     this.spotifyLastProgressMs = playback.progressMs;
+    this.ensureCurrentVideoForSpotify(track.id);
   }
 
   private finishActiveSpotifyTrack(queueId: number): void {
