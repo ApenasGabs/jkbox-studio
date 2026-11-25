@@ -51,7 +51,8 @@ docker compose up --build -d
 | `DATA_DIR` | `./data` (`/data` no Docker) | Músicas (`music/`) e banco SQLite (`jkbox.db`). |
 | `AUDIO_FORMAT` | `m4a` | Formato padronizado dos downloads: `m4a`, `mp3` ou `opus`. |
 | `DOWNLOAD_CONCURRENCY` | `2` | Downloads simultâneos. |
-| `HOST_PIN` | _(vazio)_ | PIN para ações do host (pular, remover músicas de outros, Spotify). Vazio = sem restrição. Também pode ser passado na URL da tela: `/?pin=1234`. |
+| `HOST_PIN` | _(vazio)_ | PIN do **Controlador Principal (Host)**. Se definido, nunca é sobrescrito. Se vazio, um PIN de 4 dígitos é gerado e salvo automaticamente (visível/editável/desativável em `⚙︎ Host` na TV), e convidados via QR padrão (`/remote`) entram sempre em Modo Convidado. O QR exclusivo `/remote?pin=<PIN>` ativa o Controlador Principal no celular. |
+| `HOST_PIN_AUTO` | `true` | `false` desativa a geração automática do PIN quando `HOST_PIN` está vazio (comportamento legado: todos são Host). |
 | `YTDLP_AUTO_UPDATE` | `true` | Atualiza o `yt-dlp` ao iniciar o container. |
 | `YTDLP_EXTRA_ARGS` | _(vazio)_ | Argumentos extras para o `yt-dlp` (ex.: `--cookies /data/cookies.txt`). |
 | `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | _(vazio)_ | Credenciais do app Spotify (opcional). |

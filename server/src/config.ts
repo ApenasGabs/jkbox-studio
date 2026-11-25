@@ -16,6 +16,8 @@ export interface Config {
   downloadConcurrency: number;
   playlistImportMaxTracks: number;
   hostPin: string;
+  /** Auto-generate a persisted 4-digit Host PIN when HOST_PIN is empty (HOST_PIN_AUTO=false opts out). */
+  hostPinAuto: boolean;
   ytdlpPath: string;
   ytdlpExtraArgs: string[];
   mdnsHostname: string;
@@ -66,7 +68,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     videoMaxHeight,
     downloadConcurrency: Math.max(1, int(env.DOWNLOAD_CONCURRENCY, 2)),
     playlistImportMaxTracks: Math.min(2000, Math.max(1, int(env.PLAYLIST_IMPORT_MAX_TRACKS, 500))),
-    hostPin: env.HOST_PIN ?? '',
+    hostPin: (env.HOST_PIN ?? '').trim(),
+    hostPinAuto: (env.HOST_PIN_AUTO ?? 'true').toLowerCase() !== 'false',
     ytdlpPath: env.YTDLP_PATH || 'yt-dlp',
     ytdlpExtraArgs: splitArgs(env.YTDLP_EXTRA_ARGS),
     mdnsHostname: (env.MDNS_HOSTNAME || 'jkbox').trim(),

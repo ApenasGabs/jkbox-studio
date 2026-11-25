@@ -5,12 +5,10 @@ import { Cover } from '../components/Cover';
 import { DiscoveryModal, type DiscoveryRequestContext } from '../components/DiscoveryModal';
 import { GenreBadges } from '../components/GenreBadges';
 import { LyricsView } from '../components/LyricsView';
-import { MdnsHostnamePanel } from '../components/MdnsHostnamePanel';
 import { PlaylistImportDetectedCard, PlaylistImportFeedback } from '../components/PlaylistImportBanner';
-import { PlaylistManagerPanel } from '../components/PlaylistManagerPanel';
+import { RemoteHostPanel } from '../components/RemoteHostPanel';
 import { QueueList } from '../components/QueueList';
 import { SourceBadge } from '../components/SourceBadge';
-import { SpotifyConnectSelector } from '../components/SpotifyConnectSelector';
 import { useToast } from '../components/Toast';
 import { TrackMetadataModal } from '../components/TrackMetadataModal';
 import { api, getClientId, getHostPin, getName, type SearchSource, setHostPin, setName } from '../lib/api';
@@ -28,6 +26,7 @@ import {
   playlistTrackFromTrack,
 } from '../lib/catalog';
 import { formatTime } from '../lib/format';
+import { activateHostPin, takePinFromUrl } from '../lib/hostPin';
 import { applyKaraokeFilter } from '../lib/karaoke';
 import {
   describePlaylistImportError,
@@ -35,7 +34,8 @@ import {
   formatPlaylistImportSummary,
   type PlaylistImportErrorInfo,
 } from '../lib/playlistImport';
-import { describeSpotifyConnectError, formatSpotifyOutputBadge } from '../lib/spotifyConnect';
+import { resolveRemoteRole } from '../lib/remoteRole';
+import { formatSpotifyOutputBadge } from '../lib/spotifyConnect';
 import {
   type AppConfig,
   type PlaylistImportResult,
@@ -115,7 +115,6 @@ export function Remote() {
   const [hostPinOpen, setHostPinOpen] = useState(false);
   const [hostPanelOpen, setHostPanelOpen] = useState(false);
   const [spotifyVolume, setSpotifyVolume] = useState(80);
-  const [playbackBusy, setPlaybackBusy] = useState(false);
   const [pinInput, setPinInput] = useState('');
   const [pinBusy, setPinBusy] = useState(false);
   const [pinError, setPinError] = useState<string | null>(null);
@@ -132,23 +131,49 @@ export function Remote() {
     current?.trackId,
     lyricsOffset,
   );
-  const canEditMetadata = Boolean(config && (!config.hostPinRequired || hostVerified));
+  const canEditMetadata = resolveRemoteRole(config, hostVerified) === 'host';
   const spotifyBadge = formatSpotifyOutputBadge(playbackOutput);
   const detectedPlaylist = detectPlaylistLink(query);
 
-  useEffect(() => {
+  const reloadConfig = useCallback(() => {
     api
       .config()
-      .then((cfg) => {
+      .then(setConfig)
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    // Main Controller QR (`/remote?pin=<PIN>`): validate, persist and clean the address bar right away.
+    const urlPin = takePinFromUrl();
+    let cancelled = false;
+    api
+      .config()
+      .then(async (cfg) => {
+        if (cancelled) return;
         setConfig(cfg);
-        if (cfg.hostPinRequired && getHostPin()) {
+        if (!cfg.hostPinRequired) return;
+        if (urlPin) {
+          const ok = await activateHostPin(urlPin, { getPin: getHostPin, setPin: setHostPin, verify: api.verifyPin });
+          if (cancelled) return;
+          if (ok) {
+            setHostVerified(true);
+            toast.show('Modo Controlador Principal ativado 🎛');
+            return;
+          }
+          toast.show('PIN do Controlador Principal inválido — entrando como convidado', true);
+        }
+        if (getHostPin()) {
           api
             .verifyPin()
-            .then(({ ok }) => setHostVerified(ok))
-            .catch(() => setHostVerified(false));
+            .then(({ ok }) => !cancelled && setHostVerified(ok))
+            .catch(() => !cancelled && setHostVerified(false));
         }
       })
       .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -380,7 +405,7 @@ export function Remote() {
       setHostVerified(true);
       setHostPinOpen(false);
       setPinInput('');
-      toast.show('Modo host ativado para organizar o catálogo');
+      toast.show('Modo Controlador Principal ativado 🎛');
     } catch (err) {
       setHostPin(previous);
       setPinError((err as Error).message);
@@ -410,14 +435,14 @@ export function Remote() {
               <button
                 type="button"
                 onClick={() => setHostPanelOpen(true)}
-                title="Escolher onde tocar (Player Local ou Spotify Connect) e controles do host"
+                title="Painel do Controlador Principal: Player & TV, Auto-DJ, Spotify, Acervo & Rede"
                 className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition ${
                   spotifyBadge
                     ? 'border-green-400/50 bg-green-500/20 text-green-200 hover:bg-green-500/30'
                     : 'border-white/10 bg-white/5 text-zinc-200 hover:bg-white/15'
                 }`}
               >
-                {spotifyBadge ? '🔊 Spotify Connect' : '🎛 Saída'}
+                {spotifyBadge ? '🔊 Spotify Connect' : '🎛 Controles'}
               </button>
             )}
             {config?.hostPinRequired && (
@@ -428,7 +453,7 @@ export function Remote() {
                     setHostPin('');
                     setHostVerified(false);
                     setHostPanelOpen(false);
-                    toast.show('Modo host bloqueado');
+                    toast.show('Modo Controlador Principal bloqueado — você está como convidado');
                   } else {
                     setPinInput('');
                     setPinError(null);
@@ -725,7 +750,7 @@ export function Remote() {
             currentRemainingSec={queueRemainingSec}
             onVote={vote}
             onRemove={remove}
-            canRemove={(e) => e.requesterId === me}
+            canRemove={(e) => canEditMetadata || e.requesterId === me}
           />
         </section>
       ) : view === 'lyrics' ? (
@@ -852,7 +877,7 @@ export function Remote() {
           >
             <div className="flex items-center justify-between">
               <h2 id="host-pin-title" className="text-base font-bold">
-                Modo host
+                Controlador Principal
               </h2>
               <button
                 type="button"
@@ -864,7 +889,7 @@ export function Remote() {
               </button>
             </div>
             <p className="text-xs text-zinc-400">
-              Informe o PIN do host para editar categorias, álbuns, metadados e escolher o dispositivo de áudio.
+              Informe o PIN do Controlador Principal (exibido no painel ⚙︎ Host da TV) para liberar Player &amp; TV, Auto-DJ, Spotify e Acervo.
             </p>
             <form onSubmit={submitHostPin} className="flex flex-col gap-3">
               <input
@@ -899,132 +924,52 @@ export function Remote() {
         </div>
       )}
       {hostPanelOpen && canEditMetadata && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
-          onClick={() => setHostPanelOpen(false)}
-        >
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="remote-host-panel-title"
-            onClick={(e) => e.stopPropagation()}
-            className="flex max-h-[85vh] w-full max-w-md flex-col gap-4 overflow-y-auto rounded-3xl border border-white/15 bg-panel p-5 shadow-2xl"
-          >
-            <div className="flex items-center justify-between">
-              <h2 id="remote-host-panel-title" className="text-base font-bold">
-                Saída de áudio e Playback
-              </h2>
-              <button
-                type="button"
-                onClick={() => setHostPanelOpen(false)}
-                aria-label="Fechar controles do host"
-                className="rounded-lg px-2 py-1 text-zinc-400 hover:bg-white/10 hover:text-white"
-              >
-                ✕
-              </button>
-            </div>
-
-            {current && (
-              <div className="glass flex flex-col gap-2 p-3">
-                <p className="truncate text-xs text-zinc-400">
-                  Tocando agora: <span className="font-semibold text-white">{current.track.title}</span>
-                </p>
-                <div className="flex items-center gap-2">
-                  {playbackOutput.type === 'spotify' && (
-                    <button
-                      type="button"
-                      disabled={playbackBusy}
-                      onClick={() => {
-                        setPlaybackBusy(true);
-                        void (position.paused ? api.spotifyResume() : api.spotifyPause())
-                          .catch((err) => toast.show(describeSpotifyConnectError(err).message, true))
-                          .finally(() => setPlaybackBusy(false));
-                      }}
-                      className="flex-1 rounded-xl bg-white px-3 py-2 text-xs font-semibold text-zinc-900 disabled:opacity-50"
-                    >
-                      {position.paused ? '▶ Tocar no Spotify' : '❚❚ Pausar Spotify'}
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    disabled={playbackBusy}
-                    onClick={() => {
-                      setPlaybackBusy(true);
-                      void api
-                        .skip()
-                        .catch((err) => toast.show(describeSpotifyConnectError(err).message, true))
-                        .finally(() => setPlaybackBusy(false));
-                    }}
-                    className="flex-1 rounded-xl bg-white/10 px-3 py-2 text-xs font-semibold text-white hover:bg-white/20 disabled:opacity-50"
-                  >
-                    ⏭ Pular faixa
-                  </button>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setHostPanelOpen(false);
-                    setPlaylistPickerTrack(playlistTrackFromTrack(current.track));
-                  }}
-                  className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-left text-xs font-medium text-zinc-200 hover:bg-white/15"
-                >
-                  + Playlist na faixa atual ({current.track.title})
-                </button>
-              </div>
-            )}
-
-            <SpotifyConnectSelector
-              config={config}
-              playbackOutput={playbackOutput}
-              volume={spotifyVolume}
-              onVolumeChange={setSpotifyVolume}
-              onToast={toast.show}
-            />
-
-            <section className="glass flex flex-col gap-2 p-3">
-              <div className="min-w-0">
-                <h3 className="text-sm font-semibold">Descoberta inteligente</h3>
-                <p className="text-xs text-zinc-400">
-                  Sugira e adicione músicas na mesma vibe das últimas faixas tocadas sem bloquear a fila.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setHostPanelOpen(false);
-                  setDiscoveryContext(buildDiscoveryContext({ mode: 'vibe' }));
-                }}
-                className="rounded-xl border border-accent/40 bg-accent/20 px-3 py-2 text-xs font-semibold text-purple-100 transition hover:bg-accent/30"
-              >
-                ✨ Completar fila na vibe atual
-              </button>
-            </section>
-
-            <PlaylistManagerPanel
-              playlists={hostPlaylists}
-              onChanged={() => {
-                loadHostPlaylists();
-                setCatalogReloadKey((k) => k + 1);
-              }}
-              onToast={toast.show}
-              onOpenPlaylistsTab={() => {
-                setHostPanelOpen(false);
-                setView('search');
-                setSource('local');
-                setCatalogTab('playlists');
-                setCatalogHistory([{ kind: 'root' }]);
-              }}
-            />
-            <MdnsHostnamePanel
-              mdns={mdns ?? config?.mdns}
-              onUpdated={(nextMdns) => {
-                setMdns(nextMdns);
-                setConfig((prev) => (prev ? { ...prev, mdns: nextMdns } : prev));
-              }}
-              onToast={toast.show}
-            />
-          </div>
-        </div>
+        <RemoteHostPanel
+          config={config}
+          playbackOutput={playbackOutput}
+          paused={position.paused}
+          currentTitle={current?.track.title ?? null}
+          spotifyVolume={spotifyVolume}
+          onSpotifyVolumeChange={setSpotifyVolume}
+          playlists={hostPlaylists}
+          reloadKey={catalogReloadKey}
+          mdns={mdns}
+          onMdnsUpdated={(nextMdns) => {
+            setMdns(nextMdns);
+            setConfig((prev) => (prev ? { ...prev, mdns: nextMdns } : prev));
+          }}
+          onToast={toast.show}
+          onConfigChanged={reloadConfig}
+          onCatalogChanged={() => setCatalogReloadKey((k) => k + 1)}
+          onPlaylistsChanged={() => {
+            loadHostPlaylists();
+            setCatalogReloadKey((k) => k + 1);
+          }}
+          onOpenCatalog={() => {
+            setHostPanelOpen(false);
+            setView('search');
+            setSource('local');
+            setCatalogTab('categories');
+            setCatalogHistory([{ kind: 'root' }]);
+          }}
+          onOpenPlaylistsTab={() => {
+            setHostPanelOpen(false);
+            setView('search');
+            setSource('local');
+            setCatalogTab('playlists');
+            setCatalogHistory([{ kind: 'root' }]);
+          }}
+          onDiscoverVibe={() => {
+            setHostPanelOpen(false);
+            setDiscoveryContext(buildDiscoveryContext({ mode: 'vibe' }));
+          }}
+          onAddCurrentToPlaylist={() => {
+            if (!current) return;
+            setHostPanelOpen(false);
+            setPlaylistPickerTrack(playlistTrackFromTrack(current.track));
+          }}
+          onClose={() => setHostPanelOpen(false)}
+        />
       )}
       <TrackMetadataModal
         track={editingTrack}

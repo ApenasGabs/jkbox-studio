@@ -1,5 +1,6 @@
 import type { IncomingMessage, Server } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
+import type { KioskControl } from './lib/kioskControl.js';
 import type { Jukebox } from './services/jukebox.js';
 import type { MdnsService, MdnsStatus } from './services/mdns.js';
 import { type PlaybackOutput, REACTION_EMOJIS, type ReactionEmoji } from './types.js';
@@ -34,7 +35,8 @@ export type ServerMessage =
   | { type: 'reaction'; emoji: ReactionEmoji; senderName?: string }
   | { type: 'notice'; message: string; error?: boolean }
   | { type: 'input'; command: KioskCommand; phase: KioskInputPhase; source?: string }
-  | { type: 'mdns'; mdns: MdnsStatus };
+  | { type: 'mdns'; mdns: MdnsStatus }
+  | { type: 'kiosk_control'; control: KioskControl };
 
 export type ClientMessage =
   | { type: 'progress'; queueId: number; positionSec: number; paused: boolean }
@@ -136,6 +138,8 @@ export function attachRealtime(server: Server, jukebox: Jukebox, options: Realti
   queue.on('change', pushState);
   jukebox.on('output', pushState);
   jukebox.on('notice', (message, error) => broadcast({ type: 'notice', message, error }));
+  const onKioskControl = (control: KioskControl) => broadcast({ type: 'kiosk_control', control });
+  jukebox.on('kiosk_control', onKioskControl);
   queue.on('progress', (positionSec, paused) => broadcast({ type: 'progress', positionSec, paused }));
   const onDownload = (track: { id: string; status: string; progress: number; error: string | null }) =>
     broadcast({ type: 'download', trackId: track.id, status: track.status, progress: track.progress, error: track.error });
@@ -216,6 +220,7 @@ export function attachRealtime(server: Server, jukebox: Jukebox, options: Realti
   wss.on('close', () => {
     clearInterval(interval);
     options.mdns?.off('change', onMdnsChange);
+    jukebox.off('kiosk_control', onKioskControl);
   });
 
   return wss;

@@ -4,6 +4,7 @@ import {
   type JukeboxState,
   type KioskCommand,
   type KioskInputEvent,
+  type KioskControl,
   type KioskInputPhase,
   type MdnsStatus,
   type PlaybackOutput,
@@ -60,6 +61,13 @@ export function useJukebox() {
   const reactionTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
   const inputSubscribersRef = useRef<Set<(event: KioskInputEvent) => void>>(new Set());
 
+  const kioskControlSubscribersRef = useRef<Set<(control: KioskControl) => void>>(new Set());
+  const subscribeKioskControl = useCallback((handler: (control: KioskControl) => void) => {
+    kioskControlSubscribersRef.current.add(handler);
+    return () => {
+      kioskControlSubscribersRef.current.delete(handler);
+    };
+  }, []);
   const subscribeInput = useCallback((handler: (event: KioskInputEvent) => void) => {
     inputSubscribersRef.current.add(handler);
     return () => {
@@ -122,6 +130,9 @@ export function useJukebox() {
             ...(typeof msg.source === 'string' ? { source: msg.source } : {}),
           };
           for (const listener of inputSubscribersRef.current) listener(inputEvent);
+        } else if (msg.type === 'kiosk_control') {
+          if (!msg.control || typeof msg.control !== 'object') return;
+          for (const listener of kioskControlSubscribersRef.current) listener(msg.control);
         }
       };
       ws.onclose = () => {
@@ -159,5 +170,6 @@ export function useJukebox() {
     connected,
     send,
     subscribeInput,
+    subscribeKioskControl,
   };
 }
