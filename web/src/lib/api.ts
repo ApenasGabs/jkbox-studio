@@ -24,6 +24,8 @@ import type {
   Track,
   TrackLyrics,
   TrackMetadataPatch,
+  HostPinStatus,
+  KioskControl,
 } from './types';
 
 const CLIENT_KEY = 'jkbox.clientId';
@@ -181,7 +183,11 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ offsetMs }),
     }),
-  verifyPin: () => post<{ ok: boolean }>('/api/host/verify'),
+  verifyPin: (pin?: string) => post<{ ok: boolean }>('/api/host/verify', pin === undefined ? undefined : { pin }),
+  hostPinStatus: () => request<HostPinStatus>('/api/host/pin'),
+  updateHostPin: (patch: { pin?: string; enabled?: boolean }) =>
+    request<HostPinStatus>('/api/host/pin', { method: 'PATCH', body: JSON.stringify(patch) }),
+  kioskControl: (control: KioskControl) => post<{ ok: boolean; control: KioskControl }>('/api/kiosk/control', control),
   updateHostSettings: (settings: { autoDjEnabled: boolean }) =>
     request<{ autoDjEnabled: boolean }>('/api/host/settings', {
       method: 'PATCH',

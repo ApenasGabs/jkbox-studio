@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import type { KioskControl } from '../lib/kioskControl.js';
 import type { Settings } from '../db.js';
 import { DEFAULT_AUTO_DJ_RECENT_WINDOW, pickAutoDjTrack } from '../lib/autoDj.js';
 import { parseInput } from '../lib/parseInput.js';
@@ -51,6 +52,7 @@ export interface EnqueueRequest {
 export interface JukeboxEvents {
   output: [output: PlaybackOutput];
   notice: [message: string, error: boolean];
+  kiosk_control: [control: KioskControl];
 }
 
 const MAX_BATCH = 50;

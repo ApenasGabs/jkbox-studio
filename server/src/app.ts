@@ -2,10 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { Config } from './config.js';
+import { parseKioskControl } from './lib/kioskControl.js';
 import { parseMetadataPatch } from './lib/metadata.js';
 import { streamFile } from './lib/stream.js';
 import { SPOTIFY_ID_RE } from './lib/validate.js';
 import { DiscoveryError } from './services/discovery.js';
+import { HostAuth, HostAuthError, memorySettings } from './services/hostAuth.js';
 import type { Jukebox, SearchSource } from './services/jukebox.js';
 import { scanLibrary } from './services/library.js';
 import { LyricsError } from './services/lyrics.js';
@@ -21,6 +23,7 @@ export interface AppDeps {
   config: Config;
   jukebox: Jukebox;
   mdns?: MdnsService;
+  hostAuth?: HostAuth;
   version?: string;
 }
 
@@ -28,16 +31,22 @@ function str(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
-export const createApp = ({ config, jukebox, mdns, version = '0.1.0' }: AppDeps): express.Express => {
+export const createApp = ({ config, jukebox, mdns, hostAuth: providedHostAuth, version = '0.1.0' }: AppDeps): express.Express => {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', true);
   app.use(express.json({ limit: '100kb' }));
 
   const { tracks, queue, downloads, spotify, lyrics, playlists } = jukebox;
-  const isHost = (req: Request) => !config.hostPin || req.get('x-host-pin') === config.hostPin;
+  const hostAuth = providedHostAuth ?? new HostAuth(config.hostPin, jukebox.settings ?? memorySettings(), config.hostPinAuto);
+  const isHost = (req: Request) => hostAuth.verify(req.get('x-host-pin'));
   const requireHost = (req: Request, res: Response, next: NextFunction) => {
     if (isHost(req)) return next();
+    res.status(403).json({ error: 'PIN do host inválido' });
+  };
+  // OS helpers on the jukebox machine (USB automount) may trigger host-safe maintenance via loopback.
+  const requireHostOrLoopback = (req: Request, res: Response, next: NextFunction) => {
+    if (isHost(req) || isLoopbackRequest(req)) return next();
     res.status(403).json({ error: 'PIN do host inválido' });
   };
   const requireSpotify = (_req: Request, res: Response, next: NextFunction) => {
@@ -54,7 +63,7 @@ export const createApp = ({ config, jukebox, mdns, version = '0.1.0' }: AppDeps)
   api.get('/config', (_req, res) => {
     res.json({
       publicUrl: config.publicUrl || null,
-      hostPinRequired: !!config.hostPin,
+      hostPinRequired: hostAuth.required,
       audioFormat: config.audioFormat,
       videoMode: config.videoMode,
       autoDjEnabled: jukebox.autoDjEnabled,
@@ -86,7 +95,31 @@ export const createApp = ({ config, jukebox, mdns, version = '0.1.0' }: AppDeps)
   });
 
   api.post('/host/verify', (req, res) => {
-    res.json({ ok: isHost(req) });
+    const bodyPin = req.body?.pin;
+    res.json({ ok: typeof bodyPin === 'string' ? hostAuth.verify(bodyPin.trim()) : isHost(req) });
+  });
+
+  // The TV (Kiosk running on the same machine) may read the PIN to show the Main Controller QR;
+  // remote guests only get it back when they already prove to be the Host.
+  api.get('/host/pin', (req, res) => {
+    if (!isHost(req) && !isLoopbackRequest(req)) return void res.status(403).json({ error: 'PIN do host inválido' });
+    res.json(hostAuth.status());
+  });
+
+  api.patch('/host/pin', requireHost, (req, res) => {
+    try {
+      res.json(hostAuth.update(req.body ?? {}));
+    } catch (err) {
+      if (err instanceof HostAuthError) return void res.status(err.status).json({ error: err.message });
+      throw err;
+    }
+  });
+
+  api.post('/kiosk/control', requireHost, (req, res) => {
+    const parsed = parseKioskControl(req.body);
+    if (!parsed.ok) return void res.status(400).json({ error: parsed.error });
+    jukebox.emit('kiosk_control', parsed.control);
+    res.json({ ok: true, control: parsed.control });
   });
 
   api.patch('/host/settings', requireHost, (req, res) => {
@@ -200,7 +233,7 @@ export const createApp = ({ config, jukebox, mdns, version = '0.1.0' }: AppDeps)
     res.json({ results: tracks.searchLibrary(str(req.query.q), 200).map((t) => jukebox.trackToResult(t)) });
   });
 
-  api.post('/library/rescan', requireHost, async (_req, res, next) => {
+  api.post('/library/rescan', requireHostOrLoopback, async (_req, res, next) => {
     try {
       const added = await scanLibrary(tracks, config.musicDir);
       if (added > 0) {
@@ -569,7 +602,7 @@ export const createApp = ({ config, jukebox, mdns, version = '0.1.0' }: AppDeps)
     res.json(spotify.status());
   });
 
-  api.get('/spotify/auth', requireHostOrQueryPin(config), (_req, res, next) => {
+  api.get('/spotify/auth', requireHostOrQueryPin(hostAuth), (_req, res, next) => {
     try {
       res.redirect(spotify.getAuthUrl());
     } catch (err) {
@@ -719,9 +752,16 @@ export const createApp = ({ config, jukebox, mdns, version = '0.1.0' }: AppDeps)
 }
 
 /** Browser redirects can't send headers, so the OAuth start accepts the PIN as a query param. */
-function requireHostOrQueryPin(config: Config) {
+function requireHostOrQueryPin(hostAuth: HostAuth) {
   return (req: Request, res: Response, next: NextFunction) => {
-    if (!config.hostPin || req.get('x-host-pin') === config.hostPin || req.query.pin === config.hostPin) return next();
+    if (hostAuth.verify(req.get('x-host-pin')) || hostAuth.verify(req.query.pin)) return next();
     res.status(403).json({ error: 'PIN do host inválido' });
   };
+}
+
+/** Direct loopback connection (no reverse proxy in between): the Kiosk on the jukebox machine itself. */
+function isLoopbackRequest(req: Request): boolean {
+  if (req.get('x-forwarded-for')) return false;
+  const address = req.socket.remoteAddress;
+  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
 }

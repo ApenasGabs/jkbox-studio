@@ -5,6 +5,7 @@ import { loadConfig } from './config.js';
 import { createJukebox } from './container.js';
 import { attachRealtime } from './realtime.js';
 import { scanLibrary } from './services/library.js';
+import { HostAuth, memorySettings } from './services/hostAuth.js';
 import { MdnsService } from './services/mdns.js';
 
 const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
@@ -37,7 +38,15 @@ async function main() {
     settings: jukebox.settings,
   });
 
-  const app = createApp({ config, jukebox, mdns, version: pkg.version });
+  const hostAuth = new HostAuth(config.hostPin, jukebox.settings ?? memorySettings(), config.hostPinAuto);
+  const hostStatus = hostAuth.status();
+  if (hostStatus.source === 'auto') {
+    console.log(`[jkbox] PIN do Controlador Principal (Host) gerado automaticamente: ${hostStatus.pin} (edite em ⚙︎ Host)`);
+  } else if (hostStatus.source === 'none') {
+    console.warn('[jkbox] AVISO: PIN do Host desativado — qualquer celular terá controle total');
+  }
+
+  const app = createApp({ config, jukebox, mdns, hostAuth, version: pkg.version });
   const server = http.createServer(app);
   attachRealtime(server, jukebox, { mdns });
 

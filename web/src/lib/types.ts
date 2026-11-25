@@ -273,4 +273,24 @@ export type ServerMessage =
   | { type: 'reaction'; emoji: ReactionEmoji; senderName?: string }
   | { type: 'notice'; message: string; error?: boolean }
   | { type: 'input'; command: KioskCommand; phase?: KioskInputPhase; source?: string }
-  | { type: 'mdns'; mdns: MdnsStatus };
+  | { type: 'mdns'; mdns: MdnsStatus }
+  | { type: 'kiosk_control'; control: KioskControl };
+
+export type HostPinSource = 'env' | 'auto' | 'none';
+
+export interface HostPinStatus {
+  pin: string;
+  source: HostPinSource;
+  enabled: boolean;
+  editable: boolean;
+}
+
+export type KioskStageView = 'cover' | 'lyrics' | 'video' | 'cinema';
+
+export type KioskControl =
+  | { action: 'play' }
+  | { action: 'pause' }
+  | { action: 'toggle' }
+  | { action: 'volume'; value: number }
+  | { action: 'stage'; value: KioskStageView }
+  | { action: 'reactions'; value: boolean };
