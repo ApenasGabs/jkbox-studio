@@ -1,5 +1,11 @@
 import { type ReactNode, useEffect, useState } from 'react';
 import { api } from '../lib/api';
+import {
+  GESTURE_RESOLUTION_PRESETS,
+  type GestureHudMode,
+  type GestureResolutionId,
+  type GestureSettings,
+} from '../lib/gestureEngine';
 import type { AppConfig, AutoDjMode, CatalogCategory, PlaylistSummary, SpotifyStatus } from '../lib/types';
 
 /** Shared Host controls used by the Kiosk (`⚙︎ Host`) and the Main Controller (`/remote`). */
@@ -500,3 +506,192 @@ export function LibraryMaintenancePanel({ onCatalogChanged, onOpenCatalog, onDis
     </section>
   );
 }
+
+
+interface GestureControlPanelProps {
+  settings: GestureSettings;
+  status?: 'off' | 'loading' | 'ready' | 'error';
+  fps?: number;
+  delegate?: 'GPU' | 'CPU' | null;
+  onChange: (next: GestureSettings) => void;
+}
+
+const HUD_MODE_OPTIONS: { id: GestureHudMode; label: string; hint: string }[] = [
+  {
+    id: 'skeleton',
+    label: 'Esqueleto 21pt (Privado)',
+    hint: 'Padrão — exibe só os pontos da mão sem mostrar vídeo da festa na TV.',
+  },
+  {
+    id: 'video',
+    label: 'Vídeo + Esqueleto',
+    hint: 'Mostra a câmera espelhada no canto (útil para calibrar posição/luz).',
+  },
+  {
+    id: 'compact',
+    label: 'Indicador Compacto',
+    hint: 'Oculta a caixa de prévia e exibe apenas a pílula de ação.',
+  },
+];
+
+/** Host configuration panel for opt-in offline webcam gesture control (MediaPipe). */
+export const GestureControlPanel = ({
+  settings,
+  status = 'off',
+  fps = 0,
+  delegate = null,
+  onChange,
+}: GestureControlPanelProps) => {
+  const minScalePercent = Math.round(settings.minHandScale * 100);
+
+  return (
+    <section className="glass flex flex-col gap-3 p-4" data-kiosk-gesture-panel="true">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="font-semibold">Controle por Gestos (Webcam)</h3>
+            {settings.enabled && (
+              <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                {status === 'ready'
+                  ? `Ativo${delegate ? ` · ${delegate}` : ''} · ${fps} fps`
+                  : status === 'loading'
+                    ? 'Carregando…'
+                    : status === 'error'
+                      ? 'Erro'
+                      : 'Parado'}
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-zinc-400">
+            Comande o Kiosk sem tocar na tela (100% offline, stand-by a 4 FPS e filtro anti-festa).
+          </p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-label="Ativar controle por gestos via webcam"
+          aria-checked={settings.enabled}
+          onClick={() => onChange({ ...settings, enabled: !settings.enabled })}
+          className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition ${
+            settings.enabled ? 'bg-accent' : 'bg-white/20'
+          }`}
+        >
+          <span
+            className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${
+              settings.enabled ? 'translate-x-6' : 'translate-x-1'
+            }`}
+          />
+        </button>
+      </div>
+
+      {settings.enabled && (
+        <div className="flex flex-col gap-3 border-t border-white/10 pt-3">
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
+              Resolução da câmera
+            </span>
+            <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+              {(Object.keys(GESTURE_RESOLUTION_PRESETS) as GestureResolutionId[]).map((resId) => {
+                const preset = GESTURE_RESOLUTION_PRESETS[resId];
+                const selected = settings.resolution === resId;
+                return (
+                  <button
+                    key={resId}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => onChange({ ...settings, resolution: resId })}
+                    className={`flex flex-col rounded-xl border px-3 py-2 text-left transition ${
+                      selected
+                        ? 'border-accent bg-accent/20 text-white'
+                        : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10'
+                    }`}
+                  >
+                    <span className="text-xs font-semibold">{preset.label}</span>
+                    <span className="text-[10px] text-zinc-400">{preset.hint}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
+              Privacidade do Mini-HUD
+            </span>
+            <div className="flex flex-col gap-1.5">
+              {HUD_MODE_OPTIONS.map((opt) => {
+                const selected = settings.hudMode === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => onChange({ ...settings, hudMode: opt.id })}
+                    className={`flex flex-col rounded-xl border px-3 py-2 text-left transition ${
+                      selected
+                        ? 'border-accent bg-accent/20 text-white'
+                        : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10'
+                    }`}
+                  >
+                    <span className="text-xs font-semibold">{opt.label}</span>
+                    <span className="text-[10px] text-zinc-400">{opt.hint}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label className="flex flex-col gap-1 text-xs">
+              <span className="flex justify-between text-zinc-300">
+                <span>Sustentação (Dwell)</span>
+                <span className="font-mono">{settings.dwellMs} ms</span>
+              </span>
+              <input
+                type="range"
+                data-kiosk-focus="skip"
+                min={180}
+                max={700}
+                step={20}
+                value={settings.dwellMs}
+                aria-label="Tempo de sustentação do gesto em milissegundos"
+                onChange={(e) => onChange({ ...settings, dwellMs: Number(e.target.value) })}
+                className="accent-accent"
+              />
+            </label>
+
+            <label className="flex flex-col gap-1 text-xs">
+              <span className="flex justify-between text-zinc-300">
+                <span>Proximidade mín.</span>
+                <span className="font-mono">{minScalePercent}%</span>
+              </span>
+              <input
+                type="range"
+                data-kiosk-focus="skip"
+                min={10}
+                max={35}
+                step={2}
+                value={minScalePercent}
+                aria-label="Tamanho mínimo da mão para filtro anti-festa"
+                onChange={(e) =>
+                  onChange({ ...settings, minHandScale: Number(e.target.value) / 100 })
+                }
+                className="accent-accent"
+              />
+            </label>
+          </div>
+
+          <div className="rounded-xl border border-white/10 bg-black/25 p-2.5 text-[11px] text-zinc-300">
+            <p className="font-semibold text-zinc-200">Mapa rápido (acorde segurando ✋ ou 🤟):</p>
+            <p className="mt-1 text-zinc-400">
+              <strong>Palco:</strong> 👍/👎 Volume · ✊ Play/Pause · ✌️ (1,2s) Pular · ✋ Catálogo · ☝️ Capa/Letra/Clipe
+            </p>
+            <p className="mt-0.5 text-zinc-400">
+              <strong>Catálogo/Modais:</strong> 👍/👎 Subir/Descer · ✌️ Selecionar · ✋ Voltar · ☝️ Trocar aba
+            </p>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+};
