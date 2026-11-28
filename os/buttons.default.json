@@ -1,5 +1,5 @@
 {
-  "wsUrl": "ws://127.0.0.1:3000/ws",
+  "wsUrl": "ws://127.0.0.1/ws",
   "activeProfile": "auto",
   "deviceMatch": [],
   "debounceMs": 40,

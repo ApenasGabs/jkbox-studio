@@ -25,7 +25,7 @@ Variáveis de ambiente suportadas:
   JKBOX_RELEASES_DIR      Diretório das releases extraídas (padrão: $JKBOX_BASE_DIR/releases)
   JKBOX_CURRENT_LINK      Symlink ativo da aplicação (padrão: $JKBOX_BASE_DIR/current)
   JKBOX_API_URL           URL da API de release (override para testes/mirrors)
-  JKBOX_HEALTH_URL        URL do healthcheck (padrão: http://127.0.0.1:${PORT:-3000}/api/health)
+  JKBOX_HEALTH_URL        URL do healthcheck (padrão: http://127.0.0.1/api/health quando PORT=80)
   JKBOX_HEALTH_TIMEOUT    Timeout em segundos do healthcheck (padrão: 20)
   JKBOX_HEALTH_INTERVAL   Intervalo em segundos entre checagens (padrão: 1)
   JKBOX_ENV_FILE          Arquivo de ambiente lido se vars não estiverem definidas (padrão: /etc/jkbox/jkbox.env)
@@ -191,8 +191,13 @@ if [ -z "${JKBOX_API_URL:-}" ]; then
     JKBOX_API_URL="https://api.github.com/repos/${JKBOX_REPO}/releases/latest"
   fi
 fi
-JKBOX_HEALTH_PORT="${PORT:-3000}"
-JKBOX_HEALTH_URL="${JKBOX_HEALTH_URL:-http://127.0.0.1:${JKBOX_HEALTH_PORT}/api/health}"
+JKBOX_HEALTH_PORT="${PORT:-80}"
+if [ "$JKBOX_HEALTH_PORT" = "80" ]; then
+  DEFAULT_HEALTH_URL="http://127.0.0.1/api/health"
+else
+  DEFAULT_HEALTH_URL="http://127.0.0.1:${JKBOX_HEALTH_PORT}/api/health"
+fi
+JKBOX_HEALTH_URL="${JKBOX_HEALTH_URL:-${DEFAULT_HEALTH_URL}}"
 JKBOX_HEALTH_TIMEOUT="${JKBOX_HEALTH_TIMEOUT:-20}"
 JKBOX_HEALTH_INTERVAL="${JKBOX_HEALTH_INTERVAL:-1}"
 JKBOX_SERVICE_NAME="${JKBOX_SERVICE_NAME:-jkbox.service}"
@@ -426,7 +431,7 @@ fi
 if [ ! -f "${STAGING_DIR}/VERSION" ]; then
   printf '%s\n' "$LATEST_TAG" > "${STAGING_DIR}/VERSION"
 fi
-for os_bin in jkbox-update.sh install-kiosk.sh jkbox-usb-mount.sh jkbox-wifi-fallback.sh jkbox-kiosk-browser.sh jkbox-buttons; do
+for os_bin in jkbox-update.sh install-kiosk.sh jkbox-usb-mount.sh jkbox-wifi-fallback.sh jkbox-kiosk-browser.sh jkbox-hostname.sh jkbox-buttons; do
   if [ -f "${STAGING_DIR}/os/${os_bin}" ]; then
     chmod +x "${STAGING_DIR}/os/${os_bin}"
   fi

@@ -5,6 +5,8 @@ export type VideoMode = 'off' | 'cache' | 'embed';
 
 export interface Config {
   port: number;
+  legacyRedirectPort: number | null;
+  kioskPreferPort80: boolean;
   publicUrl: string;
   dataDir: string;
   musicDir: string;
@@ -44,9 +46,27 @@ function splitArgs(value: string | undefined): string[] {
   return matches.map((m) => m.replace(/^['"]|['"]$/g, ''));
 }
 
+const parseOptionalPort = (value: string | undefined): number | null => {
+  if (!value) return null;
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed || trimmed === '0' || trimmed === 'false' || trimmed === 'off' || trimmed === 'none') {
+    return null;
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535 ? parsed : null;
+};
+
+const parseBooleanFlag = (value: string | undefined): boolean => {
+  const normalized = (value ?? '').trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+};
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const port = int(env.PORT, 3000);
-  const publicUrl = (env.PUBLIC_URL ?? '').replace(/\/+$/, '');
+  const legacyRedirectPort = parseOptionalPort(env.LEGACY_REDIRECT_PORT);
+  const kioskPreferPort80 = parseBooleanFlag(env.KIOSK_PREFER_PORT_80);
+  const rawPublicUrl = (env.PUBLIC_URL ?? '').replace(/\/+$/, '');
+  const publicUrl = port === 80 ? rawPublicUrl.replace(/:80(?=\/|$)/, '') : rawPublicUrl;
   const dataDir = path.resolve(env.DATA_DIR || './data');
   const format = (env.AUDIO_FORMAT || 'm4a').toLowerCase();
   const audioFormat: AudioFormat = format === 'mp3' || format === 'opus' ? format : 'm4a';
@@ -54,10 +74,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const videoMode: VideoMode = rawVideoMode === 'off' || rawVideoMode === 'embed' ? rawVideoMode : 'cache';
   const rawMaxHeight = int(env.VIDEO_MAX_HEIGHT, 720);
   const videoMaxHeight = rawMaxHeight > 0 ? rawMaxHeight : 720;
-  const callbackBase = publicUrl || `http://127.0.0.1:${port}`;
+  const callbackBase = publicUrl || (port === 80 ? 'http://127.0.0.1' : `http://127.0.0.1:${port}`);
 
   return {
     port,
+    legacyRedirectPort,
+    kioskPreferPort80,
     publicUrl,
     dataDir,
     musicDir: path.resolve(env.MUSIC_DIR || path.join(dataDir, 'music')),

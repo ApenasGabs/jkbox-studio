@@ -313,6 +313,14 @@ export function loadDefaultButtonsConfig() {
   return JSON.parse(fs.readFileSync(defaultPath, 'utf8'));
 }
 
+const DEFAULT_LOOPBACK_WS_URLS = new Set([
+  'ws://127.0.0.1/ws',
+  'ws://127.0.0.1:80/ws',
+  'ws://127.0.0.1:3000/ws',
+]);
+
+const buildLocalWsUrl = (port) => (port === 80 ? 'ws://127.0.0.1/ws' : `ws://127.0.0.1:${port}/ws`);
+
 /** Merges user config with defaults and flattens the active key/axis -> command map. */
 export function resolveButtonsConfig(userConfig = {}, env = loadJkboxEnv()) {
   const base = loadDefaultButtonsConfig();
@@ -323,10 +331,12 @@ export function resolveButtonsConfig(userConfig = {}, env = loadJkboxEnv()) {
     profiles: { ...base.profiles, ...(userConfig.profiles || {}) },
   };
 
-  if (!userConfig.wsUrl && env.PORT) {
-    const port = Number.parseInt(env.PORT, 10);
+  const hasCustomWsUrl = Boolean(userConfig.wsUrl && !DEFAULT_LOOPBACK_WS_URLS.has(userConfig.wsUrl));
+  const rawPort = env.PORT || process.env.PORT || '';
+  if (!hasCustomWsUrl && rawPort) {
+    const port = Number.parseInt(rawPort, 10);
     if (Number.isFinite(port) && port > 0 && port <= 65535) {
-      merged.wsUrl = `ws://127.0.0.1:${port}/ws`;
+      merged.wsUrl = buildLocalWsUrl(port);
     }
   }
 

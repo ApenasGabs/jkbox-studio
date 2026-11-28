@@ -34,7 +34,7 @@ sudo ./os/install-kiosk.sh
 ### O que `os/install-kiosk.sh` configura automaticamente
 - **Hardware & Memória:** habilita `non-free-firmware`, instala firmwares comuns de Wi-Fi/áudio (`firmware-linux`, `iwlwifi`, `realtek`, `atheros`, `brcm80211`) e configura `zram-tools` (`zstd`, 50% da RAM).
 - **Kiosk sem Desktop Pesado:** instala `Xorg` + `Openbox` + `Chromium` (`--kiosk --autoplay-policy=no-user-gesture-required`), configura autologin no `tty1`, oculta o cursor ocioso (`unclutter`) e desativa proteção de tela, suspensão e fechamento de tampa (`HandleLidSwitch=ignore`).
-- **Rede, mDNS & Hotspot Fallback:** configura `NetworkManager`, anuncia `http://jkbox.local:3000` via `avahi-daemon` e ativa o serviço `jkbox-wifi-fallback.service`, que sobe o hotspot **`jkbox-setup`** (senha padrão `jkboxsetup`) caso nenhum Wi-Fi salvo ou cabo Ethernet conecte em ~20s.
+- **Rede, mDNS & Hotspot Fallback:** configura `NetworkManager`, anuncia `http://jkbox.local` (porta `80` por padrão sem precisar informar `:3000`, mantendo escuta de compatibilidade opcional em `:3000` via `LEGACY_REDIRECT_PORT=3000`) via `avahi-daemon` e ativa o serviço `jkbox-wifi-fallback.service`, que sobe o hotspot **`jkbox-setup`** (senha padrão `jkboxsetup`) caso nenhum Wi-Fi salvo ou cabo Ethernet conecte em ~20s.
 - **Áudio Plug & Play:** configura `PipeWire` + `WirePlumber` para alternar automaticamente entre P2, HDMI, DAC USB e Bluetooth A2DP.
 - **Pendrive USB Plug & Play:** instala regra `udev` (`os/udev/99-jkbox-usb-music.rules`) + `jkbox-usb-mount@.service`, montando pendrives em `/data/music/usb-*` (somente leitura) e disparando `POST /api/library/rescan` no servidor local.
 - **Execução Nativa & Auto-Updater:** instala o app em `/opt/jkbox/current`, cria `/etc/jkbox/jkbox.env` e habilita `jkbox.service`, `jkbox-update.timer` e `jkbox-buttons.service`.
@@ -111,7 +111,7 @@ sudo /opt/jkbox/current/os/jkbox-update.sh
 ```
 
 Units `systemd` incluídos em `os/systemd/`:
-- `jkbox.service` — servidor Node.js principal (`User=jkbox`).
+- `jkbox.service` — servidor Node.js principal sem privilégio de root (`User=jkbox` com `AmbientCapabilities=CAP_NET_BIND_SERVICE` para bind seguro na porta `80` e compatibilidade na porta `3000`).
 - `jkbox-buttons.service` — micro-daemon `evdev` (`SupplementaryGroups=input audio`).
 - `jkbox-update.service` & `jkbox-update.timer` — atualização automática periódica.
 - `jkbox-usb-mount@.service` — automount de pendrives USB + rescan via API local.
@@ -122,6 +122,6 @@ Units `systemd` incluídos em `os/systemd/`:
 ## 5. Controle Touchless por Gestos via Webcam (`MediaPipe` Offline)
 
 Notebooks antigos em modo Kiosk podem usar a webcam integrada (0.3 MP / 1.3 MP) como **4ª fonte de input** sem exigir internet nem HTTPS externo:
-- `os/jkbox-kiosk-browser.sh` inicia o Chromium em `http://127.0.0.1:3000/` (Contexto Seguro nativo) com `--use-fake-ui-for-media-stream` (auto-permissão sem popup).
+- `os/jkbox-kiosk-browser.sh` inicia o Chromium em `http://127.0.0.1/` (Contexto Seguro nativo na porta `80` padrão) com `--use-fake-ui-for-media-stream` (auto-permissão sem popup).
 - Os binários `.wasm` e o modelo `gesture_recognizer.task` são empacotados localmente em `web/dist/mediapipe/` durante o build.
 - Ative o recurso em **`⚙︎ Host → Controle por Gestos (Webcam)`** (desativado por padrão, com stand-by a 4 FPS, filtro de proximidade anti-festa e modo privacidade exibindo apenas os 21 pontos da mão).

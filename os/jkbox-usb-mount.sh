@@ -53,7 +53,7 @@ load_env_file() {
       val="${BASH_REMATCH[1]}"
     fi
     case "$key" in
-      PORT|HOST_PIN|DATA_DIR|MUSIC_DIR|JKBOX_USER|JKBOX_RESCAN_URL)
+      PORT|LEGACY_REDIRECT_PORT|HOST_PIN|DATA_DIR|MUSIC_DIR|JKBOX_USER|JKBOX_RESCAN_URL)
         if [ -z "${!key:-}" ]; then
           printf -v "$key" '%s' "$val"
         fi
@@ -81,9 +81,23 @@ if [ -z "${MUSIC_DIR:-}" ]; then
   fi
 fi
 
+format_local_rescan_url() {
+  local port="$1"
+  if [ "$port" = "80" ]; then
+    printf 'http://127.0.0.1/api/library/rescan'
+  else
+    printf 'http://127.0.0.1:%s/api/library/rescan' "$port"
+  fi
+}
+
+PORT="${PORT:-80}"
 DEV_PATH="${JKBOX_DEV_DIR%/}/${DEV_NAME}"
 MOUNT_POINT="${MUSIC_DIR%/}/usb-${DEV_NAME}"
-RESCAN_URL="${JKBOX_RESCAN_URL:-http://127.0.0.1:${PORT:-3000}/api/library/rescan}"
+RESCAN_URL="${JKBOX_RESCAN_URL:-$(format_local_rescan_url "$PORT")}"
+FALLBACK_RESCAN_URL=""
+if [ -z "${JKBOX_RESCAN_URL:-}" ] && [ -n "${LEGACY_REDIRECT_PORT:-}" ] && [ "${LEGACY_REDIRECT_PORT}" != "0" ] && [ "${LEGACY_REDIRECT_PORT}" != "$PORT" ]; then
+  FALLBACK_RESCAN_URL="$(format_local_rescan_url "$LEGACY_REDIRECT_PORT")"
+fi
 
 validate_local_url() {
   local url="$1"
@@ -105,6 +119,8 @@ trigger_rescan() {
   fi
   if "$JKBOX_CURL_CMD" "${curl_args[@]}" "$RESCAN_URL" >/dev/null 2>&1; then
     log "Rescan automático disparado em ${RESCAN_URL}"
+  elif [ -n "$FALLBACK_RESCAN_URL" ] && validate_local_url "$FALLBACK_RESCAN_URL" && "$JKBOX_CURL_CMD" "${curl_args[@]}" "$FALLBACK_RESCAN_URL" >/dev/null 2>&1; then
+    log "Rescan automático disparado em ${FALLBACK_RESCAN_URL}"
   else
     log "Aviso: servidor local indisponível em ${RESCAN_URL}; o acervo será indexado no próximo boot/rescan."
   fi

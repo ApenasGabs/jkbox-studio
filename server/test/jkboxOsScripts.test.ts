@@ -33,8 +33,16 @@ describe('Phase 2 Etapa 3 OS scripts & manifests', () => {
     }
   });
 
-  it('runs os/install-kiosk.sh --dry-run and rejects invalid arguments', async () => {
-    const { stdout } = await execFileAsync('bash', [path.join(REPO_ROOT, 'os', 'install-kiosk.sh'), '--dry-run']);
+  it('runs os/install-kiosk.sh --dry-run with PORT=80 default and rejects invalid arguments', async () => {
+    const cleanEnv: NodeJS.ProcessEnv = { ...process.env };
+    delete cleanEnv.PORT;
+    const { stdout } = await execFileAsync('bash', [path.join(REPO_ROOT, 'os', 'install-kiosk.sh'), '--dry-run'], {
+      env: cleanEnv,
+    });
+    expect(stdout).toContain('porta=80');
+    expect(stdout).toContain('http://jkbox.local ');
+    expect(stdout).not.toContain('http://jkbox.local:80');
+    expect(stdout).not.toContain('http://jkbox.local:3000');
     expect(stdout).toContain('non-free-firmware');
     expect(stdout).toContain('zram');
     expect(stdout).toContain('NetworkManager');
@@ -210,6 +218,7 @@ exit 0
   });
 
   it('provides systemd units, udev rules, default buttons config, and README documentation', () => {
+    const mainUnit = fs.readFileSync(path.join(REPO_ROOT, 'os', 'systemd', 'jkbox.service'), 'utf8');
     const buttonsUnit = fs.readFileSync(path.join(REPO_ROOT, 'os', 'systemd', 'jkbox-buttons.service'), 'utf8');
     const usbUnit = fs.readFileSync(path.join(REPO_ROOT, 'os', 'systemd', 'jkbox-usb-mount@.service'), 'utf8');
     const wifiUnit = fs.readFileSync(path.join(REPO_ROOT, 'os', 'systemd', 'jkbox-wifi-fallback.service'), 'utf8');
@@ -218,16 +227,118 @@ exit 0
     const kioskBrowserScript = fs.readFileSync(path.join(REPO_ROOT, 'os', 'jkbox-kiosk-browser.sh'), 'utf8');
     const readme = fs.readFileSync(path.join(REPO_ROOT, 'os', 'README.md'), 'utf8');
 
+    expect(mainUnit).toContain('User=jkbox');
+    expect(mainUnit).toContain('Environment=PORT=80');
+    expect(mainUnit).toContain('Environment=LEGACY_REDIRECT_PORT=3000');
+    expect(mainUnit).toContain('Environment=KIOSK_PREFER_PORT_80=true');
+    expect(mainUnit).toContain('AmbientCapabilities=CAP_NET_BIND_SERVICE');
+    expect(mainUnit).toContain('CapabilityBoundingSet=CAP_NET_BIND_SERVICE');
+    expect(mainUnit).toContain('NoNewPrivileges=true');
+    expect(mainUnit).not.toContain('PrivateUsers=true');
     expect(buttonsUnit).toContain('/opt/jkbox/current/os/jkbox-buttons');
     expect(buttonsUnit).toContain('SupplementaryGroups=input audio');
     expect(usbUnit).toContain('/opt/jkbox/current/os/jkbox-usb-mount.sh add %i');
     expect(wifiUnit).toContain('/opt/jkbox/current/os/jkbox-wifi-fallback.sh');
     expect(udevRule).toContain('jkbox-usb-mount@%k.service');
     expect(kioskBrowserScript).toContain('--use-fake-ui-for-media-stream');
+    expect(buttonsCfg.wsUrl).toBe('ws://127.0.0.1/ws');
     expect(buttonsCfg.profiles['usb-keyboard']).toBeTruthy();
     expect(buttonsCfg.profiles['zero-delay-arcade']).toBeTruthy();
     expect(readme).toContain('--calibrate');
     expect(readme).toContain('/data/music/usb-');
+    expect(readme).toContain('http://jkbox.local');
+  });
+
+  it('supports PORT=80 across jkbox-kiosk-browser.sh, jkbox-update.sh, jkbox-wifi-fallback.sh, jkbox-hostname.sh, and buttons config (server/test/jkboxOsScripts.test.ts)', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'jkbox-os-port80-'));
+    cleanups.push(() => fs.rmSync(tmp, { recursive: true, force: true }));
+
+    const env80 = path.join(tmp, 'jkbox80.env');
+    fs.writeFileSync(env80, 'PORT=80\nLEGACY_REDIRECT_PORT=3000\nKIOSK_PREFER_PORT_80=true\n');
+
+    const env3000 = path.join(tmp, 'jkbox3000.env');
+    fs.writeFileSync(env3000, 'PORT=3000\n');
+
+    const envCopiedWithPrefer80 = path.join(tmp, 'jkbox-copied.env');
+    fs.writeFileSync(envCopiedWithPrefer80, 'PORT=3000\nKIOSK_PREFER_PORT_80=true\n');
+
+    const cleanEnv: NodeJS.ProcessEnv = { ...process.env };
+    delete cleanEnv.PORT;
+    delete cleanEnv.JKBOX_KIOSK_URL;
+    delete cleanEnv.KIOSK_PREFER_PORT_80;
+    delete cleanEnv.LEGACY_REDIRECT_PORT;
+
+    const browserScript = path.join(REPO_ROOT, 'os', 'jkbox-kiosk-browser.sh');
+    const { stdout: out80 } = await execFileAsync('bash', [browserScript, '--dry-run'], {
+      env: { ...cleanEnv, JKBOX_ENV_FILE: env80 },
+    });
+    expect(out80).toContain('KIOSK_URL=http://127.0.0.1/');
+    expect(out80).toContain('HEALTH_URL=http://127.0.0.1/api/health');
+
+    const { stdout: outCopied } = await execFileAsync('bash', [browserScript, '--dry-run'], {
+      env: { ...cleanEnv, JKBOX_ENV_FILE: envCopiedWithPrefer80 },
+    });
+    expect(outCopied).toContain('KIOSK_URL=http://127.0.0.1/');
+
+    const { stdout: out3000 } = await execFileAsync('bash', [browserScript, '--dry-run'], {
+      env: { ...cleanEnv, JKBOX_ENV_FILE: env3000 },
+    });
+    expect(out3000).toContain('KIOSK_URL=http://127.0.0.1:3000/');
+    expect(out3000).toContain('HEALTH_URL=http://127.0.0.1:3000/api/health');
+
+    // Verify jkbox-hostname.sh updates /etc/avahi/services/jkbox.service with PORT=80
+    const etcHostname = path.join(tmp, 'hostname');
+    const etcHosts = path.join(tmp, 'hosts');
+    const avahiService = path.join(tmp, 'avahi', 'jkbox.service');
+    fs.mkdirSync(path.dirname(avahiService), { recursive: true });
+    fs.writeFileSync(etcHosts, '127.0.0.1 localhost\n127.0.1.1 old.local old\n');
+    const noopBin = path.join(tmp, 'noop');
+    fs.writeFileSync(noopBin, '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+
+    const hostnameScript = path.join(REPO_ROOT, 'os', 'jkbox-hostname.sh');
+    const { stdout: hostOut } = await execFileAsync('bash', [hostnameScript, 'Festa.local'], {
+      env: {
+        ...cleanEnv,
+        JKBOX_ENV_FILE: env80,
+        JKBOX_ETC_HOSTNAME: etcHostname,
+        JKBOX_ETC_HOSTS: etcHosts,
+        JKBOX_AVAHI_SERVICE_FILE: avahiService,
+        JKBOX_HOSTNAMECTL: noopBin,
+        JKBOX_SYSTEMCTL: noopBin,
+      },
+    });
+    expect(hostOut.trim()).toBe('festa.local');
+    expect(fs.readFileSync(etcHostname, 'utf8').trim()).toBe('festa');
+    expect(fs.readFileSync(etcHosts, 'utf8')).toContain('127.0.1.1 festa.local festa');
+    expect(fs.readFileSync(avahiService, 'utf8')).toContain('<port>80</port>');
+
+    // Verify jkbox-wifi-fallback.sh omits :80 and :3000 when PORT=80
+    const stateFile = path.join(tmp, 'dev-state');
+    const mockNmcli = path.join(tmp, 'mock-nmcli');
+    fs.writeFileSync(stateFile, 'wifi:disconnected\nethernet:unavailable\n');
+    fs.writeFileSync(
+      mockNmcli,
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [ "$*" = "-t -f NAME con show --active" ]; then exit 0; fi
+if [ "$*" = "-t -f TYPE,STATE dev" ]; then cat "${stateFile}"; exit 0; fi
+if [ "$*" = "-t -f DEVICE,TYPE dev" ]; then printf 'wlan0:wifi\\n'; exit 0; fi
+exit 0
+`,
+      { mode: 0o755 },
+    );
+    const { stdout: wifiOut } = await execFileAsync('bash', [path.join(REPO_ROOT, 'os', 'jkbox-wifi-fallback.sh')], {
+      env: {
+        ...cleanEnv,
+        JKBOX_ENV_FILE: env80,
+        JKBOX_NMCLI: mockNmcli,
+        JKBOX_SLEEP_CMD: noopBin,
+        JKBOX_WIFI_WAIT_SEC: '1',
+      },
+    });
+    expect(wifiOut).toContain('http://10.42.0.1.');
+    expect(wifiOut).not.toContain(':3000');
+    expect(wifiOut).not.toContain(':80');
   });
 
   it('rejects invalid or command-injection hostnames in os/jkbox-hostname.sh', async () => {
