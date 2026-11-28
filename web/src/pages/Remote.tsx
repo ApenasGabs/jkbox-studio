@@ -34,7 +34,13 @@ import {
   formatPlaylistImportSummary,
   type PlaylistImportErrorInfo,
 } from '../lib/playlistImport';
-import { resolveRemoteRole } from '../lib/remoteRole';
+import {
+  EMBEDDED_GUEST_RETURN_LABEL,
+  resolveEffectiveRemoteRole,
+  shouldShowReturnToKiosk,
+  STANDALONE_KIOSK_RETURN_HREF,
+  STANDALONE_KIOSK_RETURN_LABEL,
+} from '../lib/kioskGuestMode';
 import { formatSpotifyOutputBadge } from '../lib/spotifyConnect';
 import {
   type AppConfig,
@@ -83,11 +89,24 @@ function formatPlayedAt(finishedAt: number | null | undefined): string | null {
   return new Date(finishedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-export function Remote() {
+export interface RemoteProps {
+  embedded?: boolean;
+  onClose?: () => void;
+  locationHref?: string;
+}
+
+const hasBrowserStorage = (): boolean =>
+  typeof window !== 'undefined' && typeof window.localStorage?.getItem === 'function';
+
+const readInitialGuestName = (): string => (hasBrowserStorage() ? getName() : '');
+
+const readSafeClientId = (): string => (hasBrowserStorage() ? getClientId() : 'kiosk-guest-preview');
+
+export const Remote = ({ embedded = false, onClose, locationHref }: RemoteProps = {}) => {
   const { state, playbackOutput, position, downloads, lyricsOffset, mdns, setMdns, notice, connected, send } = useJukebox();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [view, setView] = useState<'search' | 'queue' | 'lyrics' | 'history'>('search');
-  const [name, setNameState] = useState(getName());
+  const [name, setNameState] = useState(readInitialGuestName);
   const [query, setQuery] = useState('');
   const [source, setSource] = useState<SearchSource>('all');
   const [karaoke, setKaraoke] = useState(false);
@@ -122,7 +141,10 @@ export function Remote() {
   const reactionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const importingPlaylistRef = useRef(false);
   const toast = useToast();
-  const me = getClientId();
+  const me = readSafeClientId();
+  const runtimeHref = locationHref ?? (typeof window !== 'undefined' ? window.location.href : '');
+  const [latchedReturnToKiosk] = useState(() => !embedded && shouldShowReturnToKiosk(runtimeHref));
+  const showReturnToKiosk = !embedded && (latchedReturnToKiosk || shouldShowReturnToKiosk(runtimeHref));
   const current = state.nowPlaying?.item;
   const duration = current?.track.durationSec ?? 0;
   const livePositionSec = useInterpolatedTime(position, Boolean(current), connected, current?.track.durationSec);
@@ -131,7 +153,7 @@ export function Remote() {
     current?.trackId,
     lyricsOffset,
   );
-  const canEditMetadata = resolveRemoteRole(config, hostVerified) === 'host';
+  const canEditMetadata = resolveEffectiveRemoteRole(config, hostVerified, embedded) === 'host';
   const spotifyBadge = formatSpotifyOutputBadge(playbackOutput);
   const detectedPlaylist = detectPlaylistLink(query);
 
@@ -144,14 +166,14 @@ export function Remote() {
 
   useEffect(() => {
     // Main Controller QR (`/remote?pin=<PIN>`): validate, persist and clean the address bar right away.
-    const urlPin = takePinFromUrl();
+    const urlPin = embedded ? null : takePinFromUrl();
     let cancelled = false;
     api
       .config()
       .then(async (cfg) => {
         if (cancelled) return;
         setConfig(cfg);
-        if (!cfg.hostPinRequired) return;
+        if (embedded || !cfg.hostPinRequired) return;
         if (urlPin) {
           const ok = await activateHostPin(urlPin, { getPin: getHostPin, setPin: setHostPin, verify: api.verifyPin });
           if (cancelled) return;
@@ -174,7 +196,7 @@ export function Remote() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [embedded]);
 
   useEffect(() => {
     const timer = setTimeout(() => setCatalogFilter(detectPlaylistLink(query) ? '' : query), 250);
@@ -182,8 +204,8 @@ export function Remote() {
   }, [query]);
 
   useEffect(() => {
-    if (notice) toast.show(notice.message, notice.error);
-  }, [notice, toast.show]);
+    if (!embedded && notice) toast.show(notice.message, notice.error);
+  }, [embedded, notice, toast.show]);
 
   useEffect(() => {
     return () => {
@@ -426,6 +448,34 @@ export function Remote() {
   return (
     <div className="mx-auto flex min-h-full max-w-3xl flex-col pb-24 lg:max-w-4xl">
       <header className="sticky top-0 z-20 flex flex-col gap-3 bg-ink/90 p-4 backdrop-blur">
+        {embedded && (
+          <div className="flex items-center justify-between gap-3 rounded-2xl border border-accent/40 bg-accent/15 p-2 sm:px-3.5 sm:py-2.5">
+            <button
+              type="button"
+              data-kiosk-default="true"
+              onClick={onClose}
+              className="w-full rounded-xl bg-accent px-4 py-2.5 text-center text-xs font-bold text-white shadow-md shadow-accent/30 transition hover:brightness-110 sm:w-auto sm:text-sm"
+            >
+              {EMBEDDED_GUEST_RETURN_LABEL}
+            </button>
+            <span className="hidden text-xs text-purple-100/90 sm:inline">
+              Música continua tocando · Esc para voltar
+            </span>
+          </div>
+        )}
+        {showReturnToKiosk && (
+          <div className="flex items-center justify-between gap-3 rounded-2xl border border-accent-2/40 bg-accent-2/10 p-2 sm:px-3.5 sm:py-2">
+            <a
+              href={STANDALONE_KIOSK_RETURN_HREF}
+              className="w-full rounded-xl bg-white/15 px-3.5 py-2 text-center text-xs font-bold text-white transition hover:bg-white/25 sm:w-auto sm:text-sm"
+            >
+              {STANDALONE_KIOSK_RETURN_LABEL}
+            </a>
+            <span className="hidden text-xs text-cyan-100/85 sm:inline">
+              Retornar para a tela principal da TV nesta aba
+            </span>
+          </div>
+        )}
         <div className="flex items-center justify-between gap-2">
           <span className="text-xl font-black tracking-tight">
             jkbox<span className="text-accent">studio</span>
@@ -445,7 +495,7 @@ export function Remote() {
                 {spotifyBadge ? '🔊 Spotify Connect' : '🎛 Controles'}
               </button>
             )}
-            {config?.hostPinRequired && (
+            {!embedded && config?.hostPinRequired && (
               <button
                 type="button"
                 onClick={() => {
