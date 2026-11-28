@@ -48,6 +48,7 @@ describe('Phase 2 Etapa 3 OS scripts & manifests', () => {
     expect(stdout).toContain('NetworkManager');
     expect(stdout).toContain('PipeWire');
     expect(stdout).toContain('udev');
+    expect(stdout).toContain('/etc/polkit-1/rules.d/50-jkbox-update.rules');
 
     await expect(
       execFileAsync('bash', [path.join(REPO_ROOT, 'os', 'install-kiosk.sh'), '--dry-run', '--port', '99999']),
@@ -347,5 +348,17 @@ exit 0
       await expect(execFileAsync('bash', [script, bad])).rejects.toThrow();
     }
     await expect(execFileAsync('bash', [script])).rejects.toThrow();
+  });
+
+  it('configures Polkit rule for jkbox-update.service in os/install-kiosk.sh and os/polkit/50-jkbox-update.rules', () => {
+    const installer = fs.readFileSync(path.join(REPO_ROOT, 'os', 'install-kiosk.sh'), 'utf8');
+    const polkitRule = fs.readFileSync(path.join(REPO_ROOT, 'os', 'polkit', '50-jkbox-update.rules'), 'utf8');
+
+    expect(installer).toContain('/etc/polkit-1/rules.d/50-jkbox-update.rules');
+    expect(installer).toContain('subject.user === "${JKBOX_USER}"');
+    expect(installer).toContain('jkbox-update.service');
+    expect(polkitRule).toContain('org.freedesktop.systemd1.manage-units');
+    expect(polkitRule).toContain('jkbox-update.service');
+    expect(polkitRule).toContain('polkit.Result.YES');
   });
 });

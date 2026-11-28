@@ -593,20 +593,34 @@ EOF
 }
 
 configure_udev_and_systemd() {
-  log "Instalando regras udev e units systemd..."
+  log "Instalando regras udev, regra Polkit e units systemd..."
   local os_src="${JKBOX_BASE_DIR}/current/os"
   if [ ! -d "$os_src" ]; then
     os_src="$SCRIPT_DIR"
   fi
 
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "[dry-run] Instalaria /etc/udev/rules.d/99-jkbox-usb-music.rules e units systemd de ${os_src}"
+    log "[dry-run] Instalaria /etc/udev/rules.d/99-jkbox-usb-music.rules, /etc/polkit-1/rules.d/50-jkbox-update.rules (usuário ${JKBOX_USER}) e units systemd de ${os_src}"
     return 0
   fi
 
   cp "${os_src}/udev/99-jkbox-usb-music.rules" /etc/udev/rules.d/99-jkbox-usb-music.rules
   chmod 0644 /etc/udev/rules.d/99-jkbox-usb-music.rules
   udevadm control --reload-rules >/dev/null 2>&1 || true
+
+  write_file /etc/polkit-1/rules.d/50-jkbox-update.rules <<EOF
+// Allow the ${JKBOX_USER} service user to trigger jkbox-update.service via systemd/D-Bus
+// (compatible with NoNewPrivileges=true in jkbox.service).
+polkit.addRule(function(action, subject) {
+    if (action.id === "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") === "jkbox-update.service" &&
+        action.lookup("verb") === "start" &&
+        subject.user === "${JKBOX_USER}") {
+        return polkit.Result.YES;
+    }
+});
+EOF
+  chmod 0644 /etc/polkit-1/rules.d/50-jkbox-update.rules
 
   local unit
   for unit in jkbox.service jkbox-update.service jkbox-update.timer jkbox-buttons.service jkbox-usb-mount@.service jkbox-wifi-fallback.service; do
@@ -618,6 +632,7 @@ configure_udev_and_systemd() {
 
   systemctl daemon-reload
   systemctl enable jkbox.service jkbox-update.timer jkbox-buttons.service jkbox-wifi-fallback.service
+  systemctl restart polkit.service >/dev/null 2>&1 || true
 
   if [ -e "${JKBOX_BASE_DIR}/current/server/dist/index.js" ]; then
     systemctl restart jkbox.service

@@ -7,6 +7,7 @@ import { attachRealtime } from './realtime.js';
 import { scanLibrary } from './services/library.js';
 import { HostAuth, memorySettings } from './services/hostAuth.js';
 import { MdnsService } from './services/mdns.js';
+import { resolveInstalledVersion, SystemUpdateService } from './services/systemUpdate.js';
 
 const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
 
@@ -62,7 +63,18 @@ async function main() {
     console.warn('[jkbox] AVISO: PIN do Host desativado — qualquer celular terá controle total');
   }
 
-  const app = createApp({ config, jukebox, mdns, hostAuth, version: pkg.version });
+  const installedVersion = resolveInstalledVersion({
+    envVersion: process.env.JKBOX_VERSION,
+    versionFile: config.versionFile,
+    fallbackVersion: pkg.version,
+  });
+  const systemUpdate = new SystemUpdateService({
+    repo: config.updateRepo,
+    fallbackVersion: pkg.version,
+    versionFile: config.versionFile,
+  });
+
+  const app = createApp({ config, jukebox, mdns, hostAuth, systemUpdate, version: installedVersion });
   listeners.attachApp(app);
   attachRealtime(listeners.primaryServer, jukebox, { mdns });
   mdns.start();
