@@ -200,8 +200,18 @@ export interface MdnsStatus {
   lastError: string | null;
 }
 
+export interface NetworkInfo {
+  publicUrl: string | null;
+  lanIps: string[];
+  lanUrl: string | null;
+  publicUrlWarning: string | null;
+}
+
 export interface AppConfig {
   publicUrl: string | null;
+  lanIps?: string[];
+  lanUrl?: string | null;
+  publicUrlWarning?: string | null;
   hostPinRequired: boolean;
   audioFormat: string;
   videoMode: VideoMode;
@@ -274,6 +284,7 @@ export type ServerMessage =
   | { type: 'notice'; message: string; error?: boolean }
   | { type: 'input'; command: KioskCommand; phase?: KioskInputPhase; source?: string }
   | { type: 'mdns'; mdns: MdnsStatus }
+  | { type: 'network'; network: NetworkInfo }
   | { type: 'kiosk_control'; control: KioskControl };
 
 export type HostPinSource = 'env' | 'auto' | 'none';

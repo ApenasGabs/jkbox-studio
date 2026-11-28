@@ -8,6 +8,7 @@ import { GenreBadges } from '../components/GenreBadges';
 import { LyricsView } from '../components/LyricsView';
 import { MdnsHostnamePanel } from '../components/MdnsHostnamePanel';
 import { PlaylistManagerPanel } from '../components/PlaylistManagerPanel';
+import { QrAccessCard } from '../components/QrAccessCard';
 import { QueueList } from '../components/QueueList';
 import { SourceBadge } from '../components/SourceBadge';
 import { SpotifyConnectSelector } from '../components/SpotifyConnectSelector';
@@ -36,7 +37,13 @@ import {
   type PlaylistPickerTrack,
   playlistTrackFromTrack,
 } from '../lib/catalog';
-import { cssImageUrl, formatTime, isLoopback, resolveRemoteQrUrl } from '../lib/format';
+import {
+  cssImageUrl,
+  formatTime,
+  type QrAddressMode,
+  type RemoteAccessTargets,
+  resolveRemoteAccessUrls,
+} from '../lib/format';
 import { computeStageLayoutFlags, type StageMode } from '../lib/immersiveStage';
 import { interpolatePlaybackSec } from '../lib/lrc';
 import { activateFocusedElement, findNextSpatialCandidate, getFocusableElements } from '../lib/spatialNav';
@@ -136,6 +143,7 @@ export function Kiosk() {
     lyricsOffset,
     mdns,
     setMdns,
+    network,
     reactions,
     notice,
     connected,
@@ -144,6 +152,7 @@ export function Kiosk() {
     subscribeKioskControl,
   } = useJukebox();
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [qrModeOverride, setQrModeOverride] = useState<QrAddressMode | null>(null);
   const [unlocked, setUnlocked] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [time, setTime] = useState({ current: 0, duration: 0 });
@@ -250,6 +259,7 @@ export function Kiosk() {
   const handleMdnsUpdated = useCallback(
     (nextMdns: MdnsStatus) => {
       setMdns(nextMdns);
+      setQrModeOverride(null);
       setConfig((prev) => (prev ? { ...prev, mdns: nextMdns } : prev));
     },
     [setMdns],
@@ -718,8 +728,37 @@ export function Kiosk() {
   };
 
   const liveMdns = mdns ?? config?.mdns ?? null;
-  const effectiveConfig = config ? { ...config, mdns: liveMdns } : null;
-  const url = resolveRemoteQrUrl(config, liveMdns);
+  const effectiveConfig: AppConfig | null = config
+    ? {
+        ...config,
+        mdns: liveMdns,
+        ...(network
+          ? {
+              publicUrl: network.publicUrl,
+              lanIps: network.lanIps,
+              lanUrl: network.lanUrl,
+              publicUrlWarning: network.publicUrlWarning,
+            }
+          : {}),
+      }
+    : null;
+  const accessTargets = resolveRemoteAccessUrls(
+    effectiveConfig ?? network,
+    liveMdns,
+    window.location.origin,
+    qrModeOverride,
+  );
+  const url = accessTargets.qrUrl;
+  const publicUrlWarning = network?.publicUrlWarning ?? config?.publicUrlWarning ?? null;
+  const handleSelectQrMode = useCallback((mode: QrAddressMode) => {
+    setQrModeOverride(mode);
+  }, []);
+  const handleToggleQrMode = useCallback(() => {
+    setQrModeOverride((prev) => {
+      const currentMode = prev ?? (accessTargets.activeMode === 'mdns' ? 'mdns' : 'ip');
+      return currentMode === 'mdns' ? 'ip' : 'mdns';
+    });
+  }, [accessTargets.activeMode]);
   const effectiveDuration = isSpotifyOutput ? current?.track.durationSec || 0 : time.duration || current?.track.durationSec || 0;
   const progressPct = effectiveDuration > 0 ? Math.min(100, (effectiveCurrentSec / effectiveDuration) * 100) : 0;
   const remainingSec = effectiveDuration > 0 ? Math.max(0, effectiveDuration - effectiveCurrentSec) : Number.POSITIVE_INFINITY;
@@ -1770,7 +1809,10 @@ export function Kiosk() {
       {!sidebarCollapsed ? (
         <aside ref={asideRef} className="relative z-10 flex w-full flex-col gap-4 border-t border-white/10 bg-black/30 p-5 sm:p-6 lg:w-[420px] lg:border-l lg:border-t-0">
           <QueueSidebarContent
-            url={url}
+            accessTargets={accessTargets}
+            publicUrlWarning={publicUrlWarning}
+            onSelectQrMode={handleSelectQrMode}
+            onToggleQrMode={handleToggleQrMode}
             qrSize={112}
             queue={state.queue}
             downloads={downloads}
@@ -1783,14 +1825,30 @@ export function Kiosk() {
       ) : (
         <div
           aria-label="QR Code para pedir música"
-          className="glass fixed bottom-3 right-3 z-20 flex items-center gap-2.5 border-white/15 bg-black/60 p-2 opacity-75 shadow-xl backdrop-blur-md transition-opacity hover:opacity-100 sm:bottom-5 sm:right-5 sm:p-2.5"
+          className="glass fixed bottom-3 right-3 z-20 flex items-center gap-2.5 border-white/15 bg-black/60 p-2 opacity-75 shadow-xl transition-opacity hover:opacity-100 sm:bottom-5 sm:right-5 sm:p-2.5"
         >
-          <div className="rounded-lg bg-white p-1">
-            <QRCodeSVG value={url} size={56} />
-          </div>
-          <div className="hidden max-w-[140px] pr-1 xl:block">
+          {accessTargets.canToggleMode ? (
+            <button
+              type="button"
+              data-testid="qr-toggle-mini"
+              onClick={handleToggleQrMode}
+              aria-label="Alternar endereço do QR Code entre .local e IP direto"
+              title="Clique para alternar entre .local e IP direto"
+              className="rounded-lg bg-white p-1"
+            >
+              <QRCodeSVG value={url} size={56} />
+            </button>
+          ) : (
+            <div className="rounded-lg bg-white p-1">
+              <QRCodeSVG value={url} size={56} />
+            </div>
+          )}
+          <div className="hidden max-w-[160px] pr-1 xl:block">
             <p className="text-xs font-semibold text-white">Peça sua música</p>
             <p className="truncate text-[11px] text-accent-2">{url}</p>
+            {accessTargets.alternateUrl && (
+              <p className="truncate text-[10px] text-zinc-400">{accessTargets.alternateUrl}</p>
+            )}
           </div>
         </div>
       )}
@@ -1821,7 +1879,10 @@ export function Kiosk() {
               </button>
             </div>
             <QueueSidebarContent
-              url={url}
+              accessTargets={accessTargets}
+              publicUrlWarning={publicUrlWarning}
+              onSelectQrMode={handleSelectQrMode}
+              onToggleQrMode={handleToggleQrMode}
               qrSize={84}
               queue={state.queue}
               downloads={downloads}
@@ -1854,6 +1915,10 @@ export function Kiosk() {
         <HostPanel
           panelRef={hostDialogRef}
           remoteUrl={url}
+          accessTargets={accessTargets}
+          publicUrlWarning={publicUrlWarning}
+          onSelectQrMode={handleSelectQrMode}
+          onToggleQrMode={handleToggleQrMode}
           config={effectiveConfig}
           playbackOutput={playbackOutput}
           spotifyVolume={spotifyVolume}
@@ -2162,7 +2227,10 @@ function KioskShortcutFooter({ controlsHidden }: { controlsHidden: boolean }) {
 }
 
 function QueueSidebarContent({
-  url,
+  accessTargets,
+  publicUrlWarning,
+  onSelectQrMode,
+  onToggleQrMode,
   qrSize,
   queue,
   downloads,
@@ -2171,7 +2239,10 @@ function QueueSidebarContent({
   onRemove,
   onRetry,
 }: {
-  url: string;
+  accessTargets: RemoteAccessTargets;
+  publicUrlWarning: string | null;
+  onSelectQrMode: (mode: QrAddressMode) => void;
+  onToggleQrMode: () => void;
   qrSize: number;
   queue: QueueEntry[];
   downloads: Record<string, DownloadInfo>;
@@ -2182,18 +2253,15 @@ function QueueSidebarContent({
 }) {
   return (
     <>
-      <div className="glass flex items-center gap-4 p-4">
-        <div className="shrink-0 rounded-xl bg-white p-2">
-          <QRCodeSVG value={url} size={qrSize} />
-        </div>
-        <div className="min-w-0">
-          <p className="font-semibold">Peça sua música 📱</p>
-          <p className="text-sm text-accent-2 [overflow-wrap:anywhere]">{url}</p>
-          {isLoopback(url) && (
-            <p className="mt-1 text-xs text-amber-300">Defina PUBLIC_URL com o IP da rede para os celulares acessarem.</p>
-          )}
-        </div>
-      </div>
+      <QrAccessCard
+        heading="Peça sua música"
+        targets={accessTargets}
+        qrSize={qrSize}
+        variant="sidebar"
+        publicUrlWarning={publicUrlWarning}
+        onSelectMode={onSelectQrMode}
+        onToggleMode={onToggleQrMode}
+      />
 
       <div className="flex min-h-0 flex-1 flex-col">
         <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-zinc-400">Próximas ({queue.length})</h2>
@@ -2239,6 +2307,10 @@ function SpotifyOutputBadge({
 interface HostPanelProps {
   panelRef: RefObject<HTMLDivElement | null>;
   remoteUrl: string;
+  accessTargets: RemoteAccessTargets;
+  publicUrlWarning: string | null;
+  onSelectQrMode: (mode: QrAddressMode) => void;
+  onToggleQrMode: () => void;
   config: AppConfig | null;
   playbackOutput: PlaybackOutput;
   spotifyVolume: number;
@@ -2270,6 +2342,10 @@ interface HostPanelProps {
 function HostPanel({
   panelRef,
   remoteUrl: qrUrl,
+  accessTargets,
+  publicUrlWarning,
+  onSelectQrMode,
+  onToggleQrMode,
   config,
   playbackOutput,
   spotifyVolume,
@@ -2337,15 +2413,15 @@ function HostPanel({
           </button>
         </div>
 
-        <section className="glass flex items-center gap-3 p-3.5">
-          <div className="shrink-0 rounded-xl bg-white p-1.5">
-            <QRCodeSVG value={qrUrl} size={68} />
-          </div>
-          <div className="min-w-0">
-            <h3 className="text-sm font-semibold">QR Code do Controle Remoto</h3>
-            <p className="text-xs text-accent-2 [overflow-wrap:anywhere]">{qrUrl}</p>
-          </div>
-        </section>
+        <QrAccessCard
+          heading="QR Code do Controle Remoto"
+          targets={accessTargets}
+          qrSize={68}
+          variant="host"
+          publicUrlWarning={publicUrlWarning}
+          onSelectMode={onSelectQrMode}
+          onToggleMode={onToggleQrMode}
+        />
 
         <MdnsHostnamePanel mdns={config?.mdns} onUpdated={onMdnsUpdated} onToast={onToast} />
 
