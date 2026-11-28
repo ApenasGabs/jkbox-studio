@@ -215,6 +215,7 @@ exit 0
     const wifiUnit = fs.readFileSync(path.join(REPO_ROOT, 'os', 'systemd', 'jkbox-wifi-fallback.service'), 'utf8');
     const udevRule = fs.readFileSync(path.join(REPO_ROOT, 'os', 'udev', '99-jkbox-usb-music.rules'), 'utf8');
     const buttonsCfg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'os', 'buttons.default.json'), 'utf8'));
+    const kioskBrowserScript = fs.readFileSync(path.join(REPO_ROOT, 'os', 'jkbox-kiosk-browser.sh'), 'utf8');
     const readme = fs.readFileSync(path.join(REPO_ROOT, 'os', 'README.md'), 'utf8');
 
     expect(buttonsUnit).toContain('/opt/jkbox/current/os/jkbox-buttons');
@@ -222,6 +223,7 @@ exit 0
     expect(usbUnit).toContain('/opt/jkbox/current/os/jkbox-usb-mount.sh add %i');
     expect(wifiUnit).toContain('/opt/jkbox/current/os/jkbox-wifi-fallback.sh');
     expect(udevRule).toContain('jkbox-usb-mount@%k.service');
+    expect(kioskBrowserScript).toContain('--use-fake-ui-for-media-stream');
     expect(buttonsCfg.profiles['usb-keyboard']).toBeTruthy();
     expect(buttonsCfg.profiles['zero-delay-arcade']).toBeTruthy();
     expect(readme).toContain('--calibrate');

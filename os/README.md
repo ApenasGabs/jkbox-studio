@@ -116,3 +116,12 @@ Units `systemd` incluídos em `os/systemd/`:
 - `jkbox-update.service` & `jkbox-update.timer` — atualização automática periódica.
 - `jkbox-usb-mount@.service` — automount de pendrives USB + rescan via API local.
 - `jkbox-wifi-fallback.service` — ativa hotspot `jkbox-setup` quando sem rede após boot.
+
+---
+
+## 5. Controle Touchless por Gestos via Webcam (`MediaPipe` Offline)
+
+Notebooks antigos em modo Kiosk podem usar a webcam integrada (0.3 MP / 1.3 MP) como **4ª fonte de input** sem exigir internet nem HTTPS externo:
+- `os/jkbox-kiosk-browser.sh` inicia o Chromium em `http://127.0.0.1:3000/` (Contexto Seguro nativo) com `--use-fake-ui-for-media-stream` (auto-permissão sem popup).
+- Os binários `.wasm` e o modelo `gesture_recognizer.task` são empacotados localmente em `web/dist/mediapipe/` durante o build.
+- Ative o recurso em **`⚙︎ Host → Controle por Gestos (Webcam)`** (desativado por padrão, com stand-by a 4 FPS, filtro de proximidade anti-festa e modo privacidade exibindo apenas os 21 pontos da mão).

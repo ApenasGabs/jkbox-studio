@@ -5,3 +5,6 @@ data/
 *.log
 coverage/
 .DS_Store
+web/public/mediapipe/
+REVIEW_*.md
+review-fixes.patch

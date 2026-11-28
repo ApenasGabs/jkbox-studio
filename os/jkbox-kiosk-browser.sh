@@ -82,6 +82,7 @@ while true; do
     --no-first-run \
     --check-for-update-interval=31536000 \
     --autoplay-policy=no-user-gesture-required \
+    --use-fake-ui-for-media-stream \
     "$KIOSK_URL" || true
   sleep 2
 done

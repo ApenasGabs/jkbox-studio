@@ -17,7 +17,14 @@ import { VideoLyricsOverlay } from '../components/VideoLyricsOverlay';
 import { api, getHostPin, setHostPin } from '../lib/api';
 import { takePinFromUrl } from '../lib/hostPin';
 import { HostPinPanel } from '../components/HostPinPanel';
-import { AutoDjPanel, LibraryMaintenancePanel, type RunFn, SpotifyAccountPanel } from '../components/HostControls';
+import { GestureHudOverlay } from '../components/GestureHudOverlay';
+import {
+  AutoDjPanel,
+  GestureControlPanel,
+  LibraryMaintenancePanel,
+  type RunFn,
+  SpotifyAccountPanel,
+} from '../components/HostControls';
 import {
   buildDiscoveryContext,
   type CatalogRoute,
@@ -49,6 +56,14 @@ import type {
 import { useInterpolatedTime } from '../lib/useInterpolatedTime';
 import { type DownloadInfo, useJukebox } from '../lib/useJukebox';
 import { useKioskInput } from '../lib/useKioskInput';
+import {
+  type GestureAction,
+  type GestureContextMode,
+  type GestureSettings,
+  loadGestureSettings,
+  saveGestureSettings,
+} from '../lib/gestureEngine';
+import { useWebcamKioskInput } from '../lib/useWebcamKioskInput';
 import { useSpotifyVolumeControl } from '../lib/useSpotifyVolume';
 import { useTrackLyrics } from '../lib/useTrackLyrics';
 
@@ -1079,6 +1094,92 @@ export function Kiosk() {
     subscribeInput,
   });
 
+  const [gestureSettings, setGestureSettings] = useState<GestureSettings>(loadGestureSettings);
+
+  const handleGestureSettingsChange = useCallback((next: GestureSettings) => {
+    setGestureSettings(saveGestureSettings(next));
+  }, []);
+
+  const gestureContext: GestureContextMode =
+    activeScope === 'main' || activeScope === 'unlock' ? 'stage' : 'modal';
+
+  const handleGestureAction = useCallback(
+    (action: GestureAction) => {
+      wakeCinemaRef.current?.();
+
+      if (!unlocked) {
+        dpadActiveRef.current = true;
+        unlock();
+        return;
+      }
+
+      if (action === 'VOL_UP') {
+        if (isSpotifyOutput) {
+          applyStageSpotifyVolume(spotifyVolume + 10, true);
+        } else {
+          setVolume((v) => Math.min(1, Math.round((v + 0.1) * 100) / 100));
+        }
+        return;
+      }
+
+      if (action === 'VOL_DOWN') {
+        if (isSpotifyOutput) {
+          applyStageSpotifyVolume(spotifyVolume - 10, true);
+        } else {
+          setVolume((v) => Math.max(0, Math.round((v - 0.1) * 100) / 100));
+        }
+        return;
+      }
+
+      if (action === 'OPEN_CATALOG') {
+        dpadActiveRef.current = true;
+        setCatalogOpen(true);
+        return;
+      }
+
+      if (action === 'CYCLE_STAGE') {
+        const availableModes: StageMode[] =
+          effectiveConfig?.videoMode === 'off' ? ['cover', 'lyrics'] : ['cover', 'lyrics', 'video'];
+        setStageMode((prev) => {
+          const idx = availableModes.indexOf(prev);
+          return availableModes[(idx + 1) % availableModes.length] ?? 'cover';
+        });
+        return;
+      }
+
+      if (action === 'CYCLE_TAB') {
+        if (catalogOpen) {
+          const tabs: CatalogTab[] = ['categories', 'playlists', 'albums', 'artists', 'all'];
+          setCatalogTab((prev) => {
+            const idx = tabs.indexOf(prev);
+            return tabs[(idx + 1) % tabs.length] ?? 'categories';
+          });
+          setCatalogHistory([{ kind: 'root' }]);
+          return;
+        }
+        handleKioskCommand('RIGHT');
+        return;
+      }
+
+      handleKioskCommand(action);
+    },
+    [
+      unlocked,
+      isSpotifyOutput,
+      applyStageSpotifyVolume,
+      spotifyVolume,
+      effectiveConfig?.videoMode,
+      catalogOpen,
+      handleKioskCommand,
+    ],
+  );
+
+  const gestureWebcam = useWebcamKioskInput({
+    settings: gestureSettings,
+    context: gestureContext,
+    onAction: handleGestureAction,
+  });
+
   const toggleFullscreen = useCallback(async () => {
     try {
       if (document.fullscreenElement) {
@@ -1733,6 +1834,22 @@ export function Kiosk() {
         </div>
       )}
 
+      <GestureHudOverlay
+        enabled={gestureSettings.enabled}
+        hudMode={gestureSettings.hudMode}
+        context={gestureContext}
+        status={gestureWebcam.status}
+        error={gestureWebcam.error}
+        powerMode={gestureWebcam.powerMode}
+        wakeProgress={gestureWebcam.wakeProgress}
+        dwellProgress={gestureWebcam.dwellProgress}
+        pendingAction={gestureWebcam.pendingAction}
+        tooFar={gestureWebcam.tooFar}
+        fps={gestureWebcam.fps}
+        videoRef={gestureWebcam.videoRef}
+        canvasRef={gestureWebcam.canvasRef}
+      />
+
       {settingsOpen && (
         <HostPanel
           panelRef={hostDialogRef}
@@ -1741,6 +1858,11 @@ export function Kiosk() {
           playbackOutput={playbackOutput}
           spotifyVolume={spotifyVolume}
           onSpotifyVolumeChange={setSpotifyVolume}
+          gestureSettings={gestureSettings}
+          gestureStatus={gestureWebcam.status}
+          gestureFps={gestureWebcam.fps}
+          gestureDelegate={gestureWebcam.delegate}
+          onGestureSettingsChange={handleGestureSettingsChange}
           onToast={toast.show}
           currentTrack={current?.track ?? null}
           defaultView={defaultView}
@@ -2121,6 +2243,11 @@ interface HostPanelProps {
   playbackOutput: PlaybackOutput;
   spotifyVolume: number;
   onSpotifyVolumeChange: (volume: number) => void;
+  gestureSettings: GestureSettings;
+  gestureStatus: 'off' | 'loading' | 'ready' | 'error';
+  gestureFps: number;
+  gestureDelegate: 'GPU' | 'CPU' | null;
+  onGestureSettingsChange: (next: GestureSettings) => void;
   onToast: (message: string, error?: boolean) => void;
   currentTrack: Track | null;
   defaultView: DefaultStageView;
@@ -2147,6 +2274,11 @@ function HostPanel({
   playbackOutput,
   spotifyVolume,
   onSpotifyVolumeChange,
+  gestureSettings,
+  gestureStatus,
+  gestureFps,
+  gestureDelegate,
+  onGestureSettingsChange,
   onToast,
   currentTrack,
   defaultView,
@@ -2218,6 +2350,14 @@ function HostPanel({
         <MdnsHostnamePanel mdns={config?.mdns} onUpdated={onMdnsUpdated} onToast={onToast} />
 
         <HostPinPanel remoteUrl={qrUrl} onToast={onToast} onChanged={onChanged} />
+
+        <GestureControlPanel
+          settings={gestureSettings}
+          status={gestureStatus}
+          fps={gestureFps}
+          delegate={gestureDelegate}
+          onChange={onGestureSettingsChange}
+        />
 
         <section className="glass flex flex-col gap-3 p-4">
           <h3 className="font-semibold">Visualização padrão do palco</h3>
