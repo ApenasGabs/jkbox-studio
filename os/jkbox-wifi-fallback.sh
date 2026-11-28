@@ -96,8 +96,15 @@ if [ "${#JKBOX_HOTSPOT_PASSWORD}" -lt 8 ]; then
   exit 1
 fi
 
+PORT="${PORT:-80}"
+if [ "$PORT" = "80" ]; then
+  HOTSPOT_URL="http://10.42.0.1"
+else
+  HOTSPOT_URL="http://10.42.0.1:${PORT}"
+fi
+
 log "Sem rede ativa após ${JKBOX_WIFI_WAIT_SEC}s. Iniciando hotspot ${JKBOX_HOTSPOT_SSID} na interface ${WIFI_IF}..."
 "$JKBOX_NMCLI" con delete "$JKBOX_HOTSPOT_CON" >/dev/null 2>&1 || true
 "$JKBOX_NMCLI" dev wifi hotspot ifname "$WIFI_IF" con-name "$JKBOX_HOTSPOT_CON" ssid "$JKBOX_HOTSPOT_SSID" password "$JKBOX_HOTSPOT_PASSWORD"
 "$JKBOX_NMCLI" con modify "$JKBOX_HOTSPOT_CON" connection.autoconnect no >/dev/null 2>&1 || true
-log "Hotspot ${JKBOX_HOTSPOT_SSID} ativo! Conecte-se para configurar o Wi-Fi ou acessar http://10.42.0.1:${PORT:-3000}."
+log "Hotspot ${JKBOX_HOTSPOT_SSID} ativo! Conecte-se para configurar o Wi-Fi ou acessar ${HOTSPOT_URL}."

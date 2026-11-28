@@ -1,14 +1,18 @@
 import fs from 'node:fs';
-import http from 'node:http';
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
 import { createJukebox } from './container.js';
+import { normalizePublicUrlForPort, startPort80CompatServers } from './lib/port80Compat.js';
 import { attachRealtime } from './realtime.js';
 import { scanLibrary } from './services/library.js';
 import { HostAuth, memorySettings } from './services/hostAuth.js';
 import { MdnsService } from './services/mdns.js';
 
 const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
+
+const writeStdout = (message: string): void => {
+  process.stdout.write(`${message}\n`);
+};
 
 async function main() {
   const config = loadConfig();
@@ -30,8 +34,20 @@ async function main() {
   jukebox.syncStartupPlayback();
   jukebox.startSpotifyImport(config.spotify.importIntervalSec);
 
+  const configuredPort = config.port;
+  const listeners = await startPort80CompatServers({
+    port: configuredPort,
+    legacyRedirectPort: config.legacyRedirectPort,
+    kioskPreferPort80: config.kioskPreferPort80,
+    log: writeStdout,
+    warn: console.warn,
+  });
+
+  config.port = listeners.effectivePort;
+  config.publicUrl = normalizePublicUrlForPort(config.publicUrl, configuredPort, listeners.effectivePort);
+
   const mdns = new MdnsService({
-    port: config.port,
+    port: listeners.effectivePort,
     defaultHostname: config.mdnsHostname,
     enabled: config.mdnsEnabled,
     hostnameHelper: config.hostnameHelper,
@@ -41,29 +57,26 @@ async function main() {
   const hostAuth = new HostAuth(config.hostPin, jukebox.settings ?? memorySettings(), config.hostPinAuto);
   const hostStatus = hostAuth.status();
   if (hostStatus.source === 'auto') {
-    console.log(`[jkbox] PIN do Controlador Principal (Host) gerado automaticamente: ${hostStatus.pin} (edite em ⚙︎ Host)`);
+    writeStdout(`[jkbox] PIN do Controlador Principal (Host) gerado automaticamente: ${hostStatus.pin} (edite em ⚙︎ Host)`);
   } else if (hostStatus.source === 'none') {
     console.warn('[jkbox] AVISO: PIN do Host desativado — qualquer celular terá controle total');
   }
 
   const app = createApp({ config, jukebox, mdns, hostAuth, version: pkg.version });
-  const server = http.createServer(app);
-  attachRealtime(server, jukebox, { mdns });
-
-  server.listen(config.port, () => {
-    mdns.start();
-    console.log(`[jkbox] ouvindo em http://0.0.0.0:${config.port}`);
-    console.log(`[jkbox] dados em ${config.dataDir}`);
-    console.log(
-      `[jkbox] Spotify: ${jukebox.spotify.configured ? (jukebox.spotify.connected ? 'conectado' : 'configurado (aguardando login)') : 'desativado'}`,
-    );
-  });
+  listeners.attachApp(app);
+  attachRealtime(listeners.primaryServer, jukebox, { mdns });
+  mdns.start();
+  writeStdout(`[jkbox] ouvindo em http://0.0.0.0:${listeners.primaryPort}`);
+  writeStdout(`[jkbox] dados em ${config.dataDir}`);
+  writeStdout(
+    `[jkbox] Spotify: ${jukebox.spotify.configured ? (jukebox.spotify.connected ? 'conectado' : 'configurado (aguardando login)') : 'desativado'}`,
+  );
 
   const shutdown = () => {
-    console.log('[jkbox] encerrando...');
+    writeStdout('[jkbox] encerrando...');
     mdns.stop();
     jukebox.stop();
-    server.close(() => process.exit(0));
+    void listeners.closeAll().finally(() => process.exit(0));
     setTimeout(() => process.exit(0), 3000).unref();
   };
   process.on('SIGTERM', shutdown);

@@ -61,7 +61,7 @@ Micro-daemon evdev para controle físico do jkbox-studio via WebSocket + wpctl.
 
 Opções:
   --config <arquivo>   Caminho do buttons.json (padrão: /etc/jkbox/buttons.json)
-  --ws-url <url>       URL do WebSocket local (padrão: ws://127.0.0.1:\${PORT:-3000}/ws)
+  --ws-url <url>       URL do WebSocket local (padrão: ws://127.0.0.1/ws quando PORT=80)
   --calibrate          Assistente interativo para mapear botões físicos/encoder
   --list-devices       Lista dispositivos /dev/input/event* detectados e sai
   --dry-run            Lê eventos e loga comandos sem conectar ao WebSocket nem chamar wpctl

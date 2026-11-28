@@ -9,9 +9,10 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DRY_RUN=0
 SKIP_APT=0
 SKIP_RELEASE=0
+PORT_EXPLICIT=0
 JKBOX_USER="${JKBOX_USER:-jkbox}"
 JKBOX_HOSTNAME="${JKBOX_HOSTNAME:-jkbox}"
-JKBOX_PORT="${PORT:-3000}"
+JKBOX_PORT="${PORT:-80}"
 JKBOX_MUSIC_DIR="${MUSIC_DIR:-/data/music}"
 JKBOX_BASE_DIR="${JKBOX_BASE_DIR:-/opt/jkbox}"
 JKBOX_DATA_DIR="${DATA_DIR:-/var/lib/jkbox}"
@@ -32,7 +33,7 @@ Opções:
   --dry-run                    Exibe as etapas sem modificar arquivos, pacotes ou serviços
   --user <nome>                Usuário de sistema/kiosk (padrão: jkbox)
   --hostname <nome>            Hostname mDNS (.local) (padrão: jkbox)
-  --port <porta>               Porta HTTP do backend (padrão: 3000)
+  --port <porta>               Porta HTTP do backend (padrão: 80)
   --music-dir <dir>            Diretório do acervo local/USB (padrão: /data/music)
   --hotspot-ssid <ssid>        SSID do hotspot fallback (padrão: jkbox-setup)
   --hotspot-password <senha>   Senha WPA2 do hotspot fallback (mín. 8 chars, padrão: jkboxsetup)
@@ -80,6 +81,7 @@ while [ "$#" -gt 0 ]; do
     --port)
       [ "$#" -ge 2 ] && [ -n "$2" ] || { err "--port requer valor"; exit 2; }
       JKBOX_PORT="$2"
+      PORT_EXPLICIT=1
       shift 2
       ;;
     --music-dir)
@@ -156,6 +158,16 @@ run() {
     return 0
   fi
   "$@"
+}
+
+format_http_url() {
+  local host="$1"
+  local port="$2"
+  if [ "$port" = "80" ]; then
+    printf 'http://%s' "$host"
+  else
+    printf 'http://%s:%s' "$host" "$port"
+  fi
 }
 
 write_file() {
@@ -335,9 +347,20 @@ configure_user_and_dirs() {
     log "[dry-run] Criaria usuário ${JKBOX_USER} (grupos audio,video,input,plugdev,netdev,bluetooth) e diretórios ${JKBOX_BASE_DIR}, ${JKBOX_DATA_DIR}, ${JKBOX_MUSIC_DIR}, /etc/jkbox"
   fi
 
+  local default_legacy_port="3000"
+  local default_prefer_80="true"
+  if [ "$PORT_EXPLICIT" -eq 1 ] && [ "$JKBOX_PORT" != "80" ]; then
+    default_legacy_port="0"
+    default_prefer_80="false"
+  fi
+  local legacy_port="${LEGACY_REDIRECT_PORT:-${default_legacy_port}}"
+  local prefer_port_80="${KIOSK_PREFER_PORT_80:-${default_prefer_80}}"
+
   if [ ! -f /etc/jkbox/jkbox.env ]; then
     write_file /etc/jkbox/jkbox.env <<EOF
 PORT=${JKBOX_PORT}
+LEGACY_REDIRECT_PORT=${legacy_port}
+KIOSK_PREFER_PORT_80=${prefer_port_80}
 DATA_DIR=${JKBOX_DATA_DIR}
 MUSIC_DIR=${JKBOX_MUSIC_DIR}
 WEB_DIR=${JKBOX_BASE_DIR}/current/web/dist
@@ -604,6 +627,8 @@ configure_udev_and_systemd() {
 }
 
 main() {
+  local access_url
+  access_url="$(format_http_url "${JKBOX_HOSTNAME}.local" "$JKBOX_PORT")"
   log "Iniciando instalação idempotente do jkbox-studio Kiosk (usuário=${JKBOX_USER}, porta=${JKBOX_PORT})..."
   install_packages
   configure_zram
@@ -613,7 +638,7 @@ main() {
   configure_pipewire_audio
   configure_kiosk_session
   configure_udev_and_systemd
-  log "Instalação concluída! Acesse http://${JKBOX_HOSTNAME}.local:${JKBOX_PORT} (ou reinicie para iniciar o Kiosk no tty1)."
+  log "Instalação concluída! Acesse ${access_url} (ou reinicie para iniciar o Kiosk no tty1)."
 }
 
 main
