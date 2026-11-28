@@ -1,6 +1,7 @@
 import type { IncomingMessage, Server } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { KioskControl } from './lib/kioskControl.js';
+import { type EffectivePublicUrlResult, resolveEffectivePublicUrl } from './lib/networkUrl.js';
 import type { Jukebox } from './services/jukebox.js';
 import type { MdnsService, MdnsStatus } from './services/mdns.js';
 import { type PlaybackOutput, REACTION_EMOJIS, type ReactionEmoji } from './types.js';
@@ -25,6 +26,10 @@ export interface ReactionRateLimitOptions {
 export interface RealtimeOptions {
   reactionRateLimit?: ReactionRateLimitOptions;
   mdns?: MdnsService;
+  port?: number;
+  publicUrl?: string;
+  getLanIps?: () => string[];
+  networkPollIntervalMs?: number;
 }
 
 export type ServerMessage =
@@ -36,6 +41,7 @@ export type ServerMessage =
   | { type: 'notice'; message: string; error?: boolean }
   | { type: 'input'; command: KioskCommand; phase: KioskInputPhase; source?: string }
   | { type: 'mdns'; mdns: MdnsStatus }
+  | { type: 'network'; network: EffectivePublicUrlResult }
   | { type: 'kiosk_control'; control: KioskControl };
 
 export type ClientMessage =
@@ -153,7 +159,41 @@ export function attachRealtime(server: Server, jukebox: Jukebox, options: Realti
   downloads.on('failed', onTrackUpdated);
   lyrics.on('offset', (trackId, offsetMs) => broadcast({ type: 'lyrics_offset', trackId, offsetMs }));
   const onMdnsChange = (mdns: MdnsStatus) => broadcast({ type: 'mdns', mdns });
+  const onNetworkChange = (network: EffectivePublicUrlResult) => broadcast({ type: 'network', network });
   options.mdns?.on('change', onMdnsChange);
+  options.mdns?.on('network', onNetworkChange);
+
+  const hasCustomNetworkProbe =
+    !options.mdns && (options.getLanIps !== undefined || options.port !== undefined || options.publicUrl !== undefined);
+  const readCurrentNetwork = (): EffectivePublicUrlResult | null => {
+    if (options.mdns) return options.mdns.networkStatus();
+    if (!hasCustomNetworkProbe) return null;
+    return resolveEffectivePublicUrl({
+      publicUrl: options.publicUrl ?? '',
+      port: options.port ?? 3000,
+      lanIps: options.getLanIps ? options.getLanIps() : undefined,
+    });
+  };
+
+  let lastCustomNetworkKey: string | null = null;
+  let customNetworkTimer: ReturnType<typeof setInterval> | null = null;
+  if (hasCustomNetworkProbe) {
+    const initialNet = readCurrentNetwork();
+    lastCustomNetworkKey = initialNet ? JSON.stringify(initialNet) : null;
+    const pollMs = options.networkPollIntervalMs ?? 0;
+    if (pollMs > 0) {
+      customNetworkTimer = setInterval(() => {
+        const nextNet = readCurrentNetwork();
+        if (!nextNet) return;
+        const nextKey = JSON.stringify(nextNet);
+        if (nextKey !== lastCustomNetworkKey) {
+          lastCustomNetworkKey = nextKey;
+          broadcast({ type: 'network', network: nextNet });
+        }
+      }, pollMs);
+      customNetworkTimer.unref();
+    }
+  }
 
   wss.on('connection', (socket, req) => {
     const localInputAllowed = isLocalInputConnection(req);
@@ -162,6 +202,10 @@ export function attachRealtime(server: Server, jukebox: Jukebox, options: Realti
     );
     if (options.mdns) {
       socket.send(JSON.stringify({ type: 'mdns', mdns: options.mdns.status() } satisfies ServerMessage));
+    }
+    const currentNet = readCurrentNetwork();
+    if (currentNet) {
+      socket.send(JSON.stringify({ type: 'network', network: currentNet } satisfies ServerMessage));
     }
     socket.on('message', (raw) => {
       let msg: ClientMessage;
@@ -219,7 +263,9 @@ export function attachRealtime(server: Server, jukebox: Jukebox, options: Realti
   interval.unref();
   wss.on('close', () => {
     clearInterval(interval);
+    if (customNetworkTimer) clearInterval(customNetworkTimer);
     options.mdns?.off('change', onMdnsChange);
+    options.mdns?.off('network', onNetworkChange);
     jukebox.off('kiosk_control', onKioskControl);
   });
 

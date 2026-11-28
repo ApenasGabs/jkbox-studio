@@ -7,6 +7,7 @@ import {
   type KioskControl,
   type KioskInputPhase,
   type MdnsStatus,
+  type NetworkInfo,
   type PlaybackOutput,
   type ReactionEmoji,
   type ServerMessage,
@@ -51,6 +52,7 @@ export function useJukebox() {
   const [downloads, setDownloads] = useState<Record<string, DownloadInfo>>({});
   const [lyricsOffset, setLyricsOffset] = useState<LyricsOffsetEvent | null>(null);
   const [mdns, setMdns] = useState<MdnsStatus | null>(null);
+  const [network, setNetwork] = useState<NetworkInfo | null>(null);
   const [reactions, setReactions] = useState<LiveReaction[]>([]);
   const [notice, setNotice] = useState<JukeboxNotice | null>(null);
   const [connected, setConnected] = useState(false);
@@ -108,6 +110,8 @@ export function useJukebox() {
           setLyricsOffset({ trackId: msg.trackId, offsetMs: msg.offsetMs, seq: offsetSeqRef.current });
         } else if (msg.type === 'mdns') {
           setMdns(msg.mdns);
+        } else if (msg.type === 'network') {
+          setNetwork(msg.network);
         } else if (msg.type === 'notice') {
           noticeSeqRef.current += 1;
           setNotice({ seq: noticeSeqRef.current, message: msg.message, error: Boolean(msg.error) });
@@ -165,6 +169,7 @@ export function useJukebox() {
     lyricsOffset,
     mdns,
     setMdns,
+    network,
     reactions,
     notice,
     connected,

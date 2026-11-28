@@ -2,7 +2,6 @@ import { execFile } from 'node:child_process';
 import dgram, { type Socket } from 'node:dgram';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
-import os from 'node:os';
 import { promisify } from 'node:util';
 import type { Settings } from '../db.js';
 import {
@@ -16,11 +15,19 @@ import {
   normalizeMdnsHostname,
   parseMdnsQuestions,
 } from '../lib/mdns.js';
+import {
+  type EffectivePublicUrlResult,
+  listLanIpv4Addresses,
+  resolveEffectivePublicUrl,
+} from '../lib/networkUrl.js';
+
+export { listLanIpv4Addresses };
 
 const execFileAsync = promisify(execFile);
 
 const MDNS_ADDR = '224.0.0.251';
 const MDNS_PORT = 5353;
+const DEFAULT_IP_POLL_INTERVAL_MS = 3_000;
 
 export type MdnsMode = 'os-helper' | 'embedded' | 'disabled';
 
@@ -41,8 +48,11 @@ export interface MdnsOptions {
   defaultHostname?: string;
   enabled?: boolean;
   hostnameHelper?: string;
+  configuredPublicUrl?: string;
+  ipPollIntervalMs?: number;
   settings?: Settings;
   log?: (msg: string) => void;
+  warn?: (msg: string) => void;
   /** Overridable for tests. */
   getIpv4Addresses?: () => string[];
   /** Overridable for tests. */
@@ -52,19 +62,6 @@ export interface MdnsOptions {
   /** Overridable for tests. */
   createSocket?: () => Socket;
 }
-
-export const listLanIpv4Addresses = (): string[] => {
-  const nets = os.networkInterfaces();
-  const ips: string[] = [];
-  for (const entries of Object.values(nets)) {
-    for (const entry of entries ?? []) {
-      if (entry.family === 'IPv4' && !entry.internal && entry.address) {
-        ips.push(entry.address);
-      }
-    }
-  }
-  return [...new Set(ips)];
-};
 
 export const detectDockerBridgeNetwork = (ips: string[] = listLanIpv4Addresses()): boolean => {
   if (!fs.existsSync('/.dockerenv')) return false;
@@ -85,7 +82,12 @@ const defaultRunHelper = async (helperPath: string, hostname: string): Promise<v
 
 export interface MdnsEvents {
   change: [status: MdnsStatus];
+  network: [network: EffectivePublicUrlResult];
 }
+
+const silentInTestWarn = (msg: string): void => {
+  if (process.env.NODE_ENV !== 'test') console.warn(msg);
+};
 
 /**
  * Announces `<hostname>.local` and `_http._tcp.local` on the LAN via embedded
@@ -94,14 +96,21 @@ export interface MdnsEvents {
 export class MdnsService extends EventEmitter<MdnsEvents> {
   private hostname: string;
   private useForQr: boolean;
+  private configuredPublicUrl: string;
   private socket: Socket | null = null;
+  private ipPollTimer: ReturnType<typeof setInterval> | null = null;
+  private lastLanIpsKey: string | null = null;
+  private lastNetworkKey: string | null = null;
+  private lastPublicUrlWarning: string | null = null;
   private active = false;
   private lastError: string | null = null;
   private readonly enabled: boolean;
   private readonly port: number;
   private readonly hostnameHelper: string;
+  private readonly ipPollIntervalMs: number;
   private readonly settings?: Settings;
   private readonly log: (msg: string) => void;
+  private readonly warn: (msg: string) => void;
   private readonly getIpv4Addresses: () => string[];
   private readonly runHelper: (helperPath: string, hostname: string) => Promise<void>;
   private readonly detectDockerBridge: () => boolean;
@@ -112,9 +121,12 @@ export class MdnsService extends EventEmitter<MdnsEvents> {
     this.port = options.port;
     this.enabled = options.enabled ?? true;
     this.hostnameHelper = (options.hostnameHelper ?? '').trim();
+    this.configuredPublicUrl = (options.configuredPublicUrl ?? '').trim();
+    this.ipPollIntervalMs = options.ipPollIntervalMs ?? DEFAULT_IP_POLL_INTERVAL_MS;
     this.settings = options.settings;
     this.log = options.log ?? console.log;
-    this.getIpv4Addresses = options.getIpv4Addresses ?? listLanIpv4Addresses;
+    this.warn = options.warn ?? silentInTestWarn;
+    this.getIpv4Addresses = options.getIpv4Addresses ?? (() => listLanIpv4Addresses());
     this.runHelper = options.runHelper ?? defaultRunHelper;
     this.detectDockerBridge = options.detectDockerBridge ?? (() => detectDockerBridgeNetwork(this.getIpv4Addresses()));
     this.createSocket = options.createSocket ?? (() => dgram.createSocket({ type: 'udp4', reuseAddr: true }));
@@ -131,6 +143,71 @@ export class MdnsService extends EventEmitter<MdnsEvents> {
     if (!this.enabled) return 'disabled';
     if (this.hostnameHelper) return 'os-helper';
     return 'embedded';
+  }
+
+  setConfiguredPublicUrl(publicUrl: string): void {
+    this.configuredPublicUrl = publicUrl.trim();
+    this.networkStatus();
+  }
+
+  networkStatus(): EffectivePublicUrlResult {
+    const resolved = resolveEffectivePublicUrl({
+      publicUrl: this.configuredPublicUrl,
+      port: this.port,
+      lanIps: this.getIpv4Addresses(),
+    });
+    if (resolved.publicUrlWarning && resolved.publicUrlWarning !== this.lastPublicUrlWarning) {
+      this.lastPublicUrlWarning = resolved.publicUrlWarning;
+      this.warn(`[jkbox] AVISO: ${resolved.publicUrlWarning}`);
+    } else if (!resolved.publicUrlWarning) {
+      this.lastPublicUrlWarning = null;
+    }
+    return resolved;
+  }
+
+  /** Polls host IPv4 addresses, re-announces mDNS on Wi-Fi/DHCP changes, and emits `network`. */
+  checkNetworkChange(): boolean {
+    const net = this.networkStatus();
+    const ipsKey = net.lanIps.join(',');
+    const netKey = JSON.stringify([net.lanIps, net.lanUrl, net.publicUrl, net.publicUrlWarning]);
+    const ipsChanged = this.lastLanIpsKey !== null && ipsKey !== this.lastLanIpsKey;
+    const netChanged = this.lastNetworkKey !== null && netKey !== this.lastNetworkKey;
+
+    this.lastLanIpsKey = ipsKey;
+    this.lastNetworkKey = netKey;
+
+    if (ipsChanged) {
+      if (this.enabled && !this.hostnameHelper) {
+        if (!this.socket && net.lanIps.length > 0) {
+          this.bindEmbeddedSocket();
+        } else if (this.active && this.socket && net.lanIps.length > 0) {
+          this.announceService();
+        }
+      }
+      this.emit('change', this.status());
+    }
+
+    if (netChanged) {
+      this.emit('network', net);
+    }
+
+    return netChanged;
+  }
+
+  private startIpWatcher(): void {
+    const initial = this.networkStatus();
+    this.lastLanIpsKey = initial.lanIps.join(',');
+    this.lastNetworkKey = JSON.stringify([
+      initial.lanIps,
+      initial.lanUrl,
+      initial.publicUrl,
+      initial.publicUrlWarning,
+    ]);
+    if (this.ipPollTimer || this.ipPollIntervalMs <= 0) return;
+    this.ipPollTimer = setInterval(() => {
+      this.checkNetworkChange();
+    }, this.ipPollIntervalMs);
+    this.ipPollTimer.unref();
   }
 
   status(): MdnsStatus {
@@ -157,18 +234,8 @@ export class MdnsService extends EventEmitter<MdnsEvents> {
     }
   }
 
-  start(): void {
-    if (!this.enabled) {
-      this.active = false;
-      return;
-    }
-    if (this.hostnameHelper) {
-      this.active = true;
-      this.lastError = null;
-      return;
-    }
+  private bindEmbeddedSocket(): void {
     if (this.socket) return;
-
     let sock: Socket | null = null;
     try {
       sock = this.createSocket();
@@ -211,6 +278,20 @@ export class MdnsService extends EventEmitter<MdnsEvents> {
       this.active = false;
       this.log(`[jkbox] mDNS indisponível: ${this.lastError}`);
     }
+  }
+
+  start(): void {
+    this.startIpWatcher();
+    if (!this.enabled) {
+      this.active = false;
+      return;
+    }
+    if (this.hostnameHelper) {
+      this.active = true;
+      this.lastError = null;
+      return;
+    }
+    this.bindEmbeddedSocket();
   }
 
   private sendMulticast(packet: Buffer): void {
@@ -284,7 +365,14 @@ export class MdnsService extends EventEmitter<MdnsEvents> {
   }
 
   stop(): void {
-    if (!this.socket) return;
+    if (this.ipPollTimer) {
+      clearInterval(this.ipPollTimer);
+      this.ipPollTimer = null;
+    }
+    if (!this.socket) {
+      this.active = false;
+      return;
+    }
     try {
       this.socket.close();
     } catch {

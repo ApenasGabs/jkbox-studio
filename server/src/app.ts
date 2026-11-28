@@ -4,6 +4,7 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import type { Config } from './config.js';
 import { parseKioskControl } from './lib/kioskControl.js';
 import { parseMetadataPatch } from './lib/metadata.js';
+import { resolveEffectivePublicUrl } from './lib/networkUrl.js';
 import { streamFile } from './lib/stream.js';
 import { SPOTIFY_ID_RE } from './lib/validate.js';
 import { DiscoveryError } from './services/discovery.js';
@@ -25,17 +26,53 @@ export interface AppDeps {
   mdns?: MdnsService;
   hostAuth?: HostAuth;
   version?: string;
+  /** Overridable for tests when `mdns` is omitted. */
+  getLanIps?: () => string[];
+  /** Overridable warning logger for tests. */
+  warn?: (msg: string) => void;
 }
 
 function str(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
-export const createApp = ({ config, jukebox, mdns, hostAuth: providedHostAuth, version = '0.1.0' }: AppDeps): express.Express => {
+export const createApp = ({
+  config,
+  jukebox,
+  mdns,
+  hostAuth: providedHostAuth,
+  version = '0.1.0',
+  getLanIps,
+  warn,
+}: AppDeps): express.Express => {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', true);
   app.use(express.json({ limit: '100kb' }));
+
+  const warnLog = warn ?? (process.env.NODE_ENV === 'test' ? undefined : console.warn);
+  let lastAppPublicUrlWarning: string | null = null;
+  if (mdns) {
+    mdns.setConfiguredPublicUrl(config.publicUrl);
+  }
+  const resolveAppNetwork = () => {
+    if (mdns && !getLanIps && !warn) {
+      return mdns.networkStatus();
+    }
+    const resolved = resolveEffectivePublicUrl({
+      publicUrl: config.publicUrl,
+      port: config.port,
+      lanIps: getLanIps ? getLanIps() : undefined,
+    });
+    if (resolved.publicUrlWarning && resolved.publicUrlWarning !== lastAppPublicUrlWarning) {
+      lastAppPublicUrlWarning = resolved.publicUrlWarning;
+      warnLog?.(`[jkbox] AVISO: ${resolved.publicUrlWarning}`);
+    } else if (!resolved.publicUrlWarning) {
+      lastAppPublicUrlWarning = null;
+    }
+    return resolved;
+  };
+  resolveAppNetwork();
 
   const { tracks, queue, downloads, spotify, lyrics, playlists } = jukebox;
   const hostAuth = providedHostAuth ?? new HostAuth(config.hostPin, jukebox.settings ?? memorySettings(), config.hostPinAuto);
@@ -61,8 +98,12 @@ export const createApp = ({ config, jukebox, mdns, hostAuth: providedHostAuth, v
   });
 
   api.get('/config', (_req, res) => {
+    const net = resolveAppNetwork();
     res.json({
-      publicUrl: config.publicUrl || null,
+      publicUrl: net.publicUrl,
+      lanIps: net.lanIps,
+      lanUrl: net.lanUrl,
+      publicUrlWarning: net.publicUrlWarning,
       hostPinRequired: hostAuth.required,
       audioFormat: config.audioFormat,
       videoMode: config.videoMode,
