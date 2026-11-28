@@ -159,7 +159,7 @@ load_env_file() {
     fi
 
     case "$key" in
-      PORT|JKBOX_TARGET_TAG|JKBOX_REPO|JKBOX_BASE_DIR|JKBOX_RELEASES_DIR|JKBOX_CURRENT_LINK|JKBOX_API_URL|JKBOX_HEALTH_URL|JKBOX_HEALTH_TIMEOUT|JKBOX_HEALTH_INTERVAL|JKBOX_SERVICE_NAME|JKBOX_SYSTEMCTL|JKBOX_NODE|JKBOX_KEEP_RELEASES|JKBOX_LOCK_FILE|JKBOX_GITHUB_TOKEN)
+      PORT|JKBOX_TARGET_TAG|JKBOX_REPO|JKBOX_BASE_DIR|JKBOX_RELEASES_DIR|JKBOX_CURRENT_LINK|JKBOX_API_URL|JKBOX_HEALTH_URL|JKBOX_HEALTH_TIMEOUT|JKBOX_HEALTH_INTERVAL|JKBOX_SERVICE_NAME|JKBOX_SYSTEMCTL|JKBOX_NODE|JKBOX_KEEP_RELEASES|JKBOX_LOCK_FILE|JKBOX_GITHUB_TOKEN|JKBOX_USER|JKBOX_SYSTEMD_DIR|JKBOX_UDEV_DIR|JKBOX_POLKIT_DIR|JKBOX_HOSTNAME_BIN|JKBOX_SUDOERS_DIR|JKBOX_SYNC_OS)
         if [ -z "${!key:-}" ]; then
           printf -v "$key" '%s' "$val"
         fi
@@ -205,6 +205,13 @@ JKBOX_SYSTEMCTL="${JKBOX_SYSTEMCTL:-systemctl}"
 JKBOX_NODE="${JKBOX_NODE:-node}"
 JKBOX_KEEP_RELEASES="${JKBOX_KEEP_RELEASES:-3}"
 JKBOX_LOCK_FILE="${JKBOX_LOCK_FILE:-${JKBOX_BASE_DIR}/.update.lock}"
+JKBOX_USER="${JKBOX_USER:-jkbox}"
+JKBOX_SYSTEMD_DIR="${JKBOX_SYSTEMD_DIR:-/etc/systemd/system}"
+JKBOX_UDEV_DIR="${JKBOX_UDEV_DIR:-/etc/udev/rules.d}"
+JKBOX_POLKIT_DIR="${JKBOX_POLKIT_DIR:-/etc/polkit-1/rules.d}"
+JKBOX_HOSTNAME_BIN="${JKBOX_HOSTNAME_BIN:-/usr/local/bin/jkbox-hostname}"
+JKBOX_SUDOERS_DIR="${JKBOX_SUDOERS_DIR:-/etc/sudoers.d}"
+JKBOX_SYNC_OS="${JKBOX_SYNC_OS:-auto}"
 
 normalize_ver() {
   printf '%s' "${1#v}"
@@ -473,6 +480,95 @@ wait_for_health() {
   done
 }
 
+should_sync_os() {
+  case "${JKBOX_SYNC_OS}" in
+    0|false|no|off) return 1 ;;
+    1|true|yes|on) return 0 ;;
+    *)
+      if [ "$NO_RESTART" -eq 1 ]; then
+        return 1
+      fi
+      if [ "$(id -u)" -eq 0 ]; then
+        return 0
+      fi
+      if [ "$JKBOX_SYSTEMD_DIR" != "/etc/systemd/system" ] || [ "$JKBOX_POLKIT_DIR" != "/etc/polkit-1/rules.d" ] || [ "$JKBOX_UDEV_DIR" != "/etc/udev/rules.d" ]; then
+        return 0
+      fi
+      return 1
+      ;;
+  esac
+}
+
+sync_file_if_changed() {
+  local src="$1"
+  local dst="$2"
+  local mode="$3"
+  if [ ! -f "$src" ]; then
+    return 1
+  fi
+  if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
+    return 1
+  fi
+  mkdir -p "$(dirname "$dst")"
+  cp "$src" "$dst"
+  chmod "$mode" "$dst"
+  return 0
+}
+
+sync_os_artifacts() {
+  local os_src="$1"
+  if [ ! -d "$os_src" ] || ! should_sync_os; then
+    return 0
+  fi
+
+  if ! printf '%s' "$JKBOX_USER" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$'; then
+    err "JKBOX_USER inválido para sincronização OS: ${JKBOX_USER}"
+    return 1
+  fi
+
+  local systemd_changed=0
+  local unit
+  for unit in jkbox.service jkbox-update.service jkbox-update.timer jkbox-buttons.service jkbox-usb-mount@.service jkbox-wifi-fallback.service; do
+    if sync_file_if_changed "${os_src}/systemd/${unit}" "${JKBOX_SYSTEMD_DIR}/${unit}" 0644; then
+      log "Unit systemd sincronizada: ${unit}"
+      systemd_changed=1
+    fi
+  done
+
+  if sync_file_if_changed "${os_src}/udev/99-jkbox-usb-music.rules" "${JKBOX_UDEV_DIR}/99-jkbox-usb-music.rules" 0644; then
+    log "Regra udev sincronizada: 99-jkbox-usb-music.rules"
+    if [ "$(id -u)" -eq 0 ] && command -v udevadm >/dev/null 2>&1; then
+      udevadm control --reload-rules >/dev/null 2>&1 || true
+    fi
+  fi
+
+  local polkit_src="${os_src}/polkit/50-jkbox-update.rules"
+  if [ -f "$polkit_src" ]; then
+    local polkit_tmp
+    polkit_tmp="$(mktemp)"
+    sed "s/subject\\.user === \"jkbox\"/subject.user === \"${JKBOX_USER}\"/" "$polkit_src" > "$polkit_tmp"
+    if sync_file_if_changed "$polkit_tmp" "${JKBOX_POLKIT_DIR}/50-jkbox-update.rules" 0644; then
+      log "Regra Polkit sincronizada: 50-jkbox-update.rules (usuário=${JKBOX_USER})"
+    fi
+    rm -f "$polkit_tmp"
+  fi
+
+  if sync_file_if_changed "${os_src}/jkbox-hostname.sh" "$JKBOX_HOSTNAME_BIN" 0755; then
+    log "Helper de hostname sincronizado: ${JKBOX_HOSTNAME_BIN}"
+  fi
+  if [ -d "$JKBOX_SUDOERS_DIR" ] && [ -w "$JKBOX_SUDOERS_DIR" ] && [ -f "$JKBOX_HOSTNAME_BIN" ]; then
+    local sudoers_tmp
+    sudoers_tmp="$(mktemp)"
+    printf '%s ALL=(root) NOPASSWD: %s *\n' "$JKBOX_USER" "$JKBOX_HOSTNAME_BIN" > "$sudoers_tmp"
+    sync_file_if_changed "$sudoers_tmp" "${JKBOX_SUDOERS_DIR}/jkbox-hostname" 0440 || true
+    rm -f "$sudoers_tmp"
+  fi
+
+  if [ "$systemd_changed" -eq 1 ]; then
+    "$JKBOX_SYSTEMCTL" daemon-reload || true
+  fi
+}
+
 rollback() {
   if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
     log "Executando rollback para ${TARGET_DIR}..."
@@ -482,6 +578,7 @@ rollback() {
     swap_symlink "$TARGET_DIR"
     rm -rf "$BACKUP_DIR"
     BACKUP_DIR=""
+    sync_os_artifacts "${TARGET_DIR}/os" || true
     if ! "$JKBOX_SYSTEMCTL" restart "$JKBOX_SERVICE_NAME"; then
       err "Falha ao reiniciar ${JKBOX_SERVICE_NAME} durante rollback"
     fi
@@ -491,6 +588,7 @@ rollback() {
   if [ -n "$PREV_TARGET" ] && [ -d "$PREV_TARGET" ]; then
     log "Executando rollback para ${PREV_TARGET}..."
     swap_symlink "$PREV_TARGET"
+    sync_os_artifacts "${PREV_TARGET}/os" || true
     if ! "$JKBOX_SYSTEMCTL" restart "$JKBOX_SERVICE_NAME"; then
       err "Falha ao reiniciar ${JKBOX_SERVICE_NAME} durante rollback"
     fi
@@ -506,6 +604,7 @@ rollback() {
 
 log "Alternando symlink ${JKBOX_CURRENT_LINK} -> ${TARGET_DIR}..."
 swap_symlink "$TARGET_DIR"
+sync_os_artifacts "${TARGET_DIR}/os"
 
 if [ "$NO_RESTART" -eq 0 ]; then
   log "Reiniciando ${JKBOX_SERVICE_NAME}..."

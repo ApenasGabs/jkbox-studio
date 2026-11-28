@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
@@ -51,10 +53,13 @@ jobs:
         env:
           INPUT_TAG: ${{ inputs.tag }}
         run: |
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
           if [ "${{ github.ref_type }}" = "tag" ]; then
             TAG="${GITHUB_REF_NAME}"
           elif [ -n "$INPUT_TAG" ]; then
             TAG="$INPUT_TAG"
+          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            TAG="v$(date -u +%Y.%m.%d).${GITHUB_RUN_NUMBER}"
           else
             TAG="v$(node -p "require('./package.json').version")"
           fi
@@ -65,11 +70,14 @@ jobs:
           fi
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
           echo "tarball=jkbox-studio-${TAG}.tar.gz" >> "$GITHUB_OUTPUT"
 
       - name: Package production tarball and SHA256SUMS
         env:
           RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
+          FULL_SHA: ${{ github.sha }}
           TARBALL_NAME: ${{ steps.meta.outputs.tarball }}
         run: |
           STAGE_DIR="$(mktemp -d)"
@@ -92,17 +100,26 @@ jobs:
             "$STAGE_DIR/os/jkbox-usb-mount.sh" \
             "$STAGE_DIR/os/jkbox-wifi-fallback.sh" \
             "$STAGE_DIR/os/jkbox-kiosk-browser.sh" \
+            "$STAGE_DIR/os/jkbox-hostname.sh" \
             "$STAGE_DIR/os/jkbox-buttons"
           cp .env.example "$STAGE_DIR/.env.example"
           printf '%s\n' "$RELEASE_TAG" > "$STAGE_DIR/VERSION"
 
           node -e '
             const fs = require("node:fs");
+            const stage = process.argv[1];
             const rawTag = process.env.RELEASE_TAG || "";
+            const meta = {
+              tag: rawTag,
+              commit: process.env.SHORT_SHA || "",
+              sha: process.env.FULL_SHA || "",
+              builtAt: new Date().toISOString(),
+            };
+            fs.writeFileSync(stage + "/RELEASE_META.json", JSON.stringify(meta, null, 2) + "\n");
             const semver = rawTag.replace(/^v/, "");
             if (/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(semver)) {
               for (const p of ["package.json", "server/package.json"]) {
-                const full = process.argv[1] + "/" + p;
+                const full = stage + "/" + p;
                 const pkg = JSON.parse(fs.readFileSync(full, "utf8"));
                 pkg.version = semver;
                 fs.writeFileSync(full, JSON.stringify(pkg, null, 2) + "\n");
@@ -149,10 +166,11 @@ jobs:
             dist-release/SHA256SUMS
 
       - name: Publish GitHub Release
-        if: github.ref_type == 'tag' || inputs.publish == true
+        if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref_type == 'tag')) || inputs.publish == true
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
           TARBALL_NAME: ${{ steps.meta.outputs.tarball }}
           REF_TYPE: ${{ github.ref_type }}
         run: |
@@ -163,16 +181,19 @@ jobs:
               --clobber
           else
             EXTRA_ARGS=()
-            case "$RELEASE_TAG" in
-              *-*) EXTRA_ARGS+=(--prerelease) ;;
-            esac
-            if [ "$REF_TYPE" != "tag" ]; then
-              EXTRA_ARGS+=(--target "$GITHUB_SHA")
+            if [ "$REF_TYPE" = "tag" ]; then
+              case "$RELEASE_TAG" in
+                *-*) EXTRA_ARGS+=(--prerelease) ;;
+                *) EXTRA_ARGS+=(--latest) ;;
+              esac
+            else
+              EXTRA_ARGS+=(--latest --target "$GITHUB_SHA")
             fi
             gh release create "$RELEASE_TAG" \
               "dist-release/${TARBALL_NAME}" \
               dist-release/SHA256SUMS \
               --title "$RELEASE_TAG" \
+              --notes "Commit: \`${SHORT_SHA}\`" \
               --generate-notes \
               "${EXTRA_ARGS[@]}"
           fi

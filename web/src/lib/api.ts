@@ -26,6 +26,8 @@ import type {
   TrackMetadataPatch,
   HostPinStatus,
   KioskControl,
+  SystemUpdateApplyResult,
+  SystemUpdateStatus,
 } from './types';
 
 const CLIENT_KEY = 'jkbox.clientId';
@@ -78,6 +80,7 @@ const post = <T>(path: string, body?: unknown) =>
 export type SearchSource = 'all' | 'youtube' | 'spotify' | 'local';
 
 export const api = {
+  health: () => request<{ ok: boolean; version: string; downloadsActive: number }>('/api/health'),
   config: () => request<AppConfig>('/api/config'),
   state: () => request<JukeboxState>('/api/state'),
   search: (q: string, source: SearchSource, signal?: AbortSignal) =>
@@ -200,6 +203,9 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(patch),
     }),
+  systemUpdate: (refresh = false) =>
+    request<SystemUpdateStatus>(`/api/system/update${refresh ? '?refresh=1' : ''}`),
+  applySystemUpdate: () => post<SystemUpdateApplyResult>('/api/system/update/apply'),
   updateAutoDjConfig: (settings: {
     enabled?: boolean;
     mode?: AutoDjMode;

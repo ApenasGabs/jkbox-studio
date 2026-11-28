@@ -127,5 +127,7 @@ describe('Host vs Convidado no /remote', () => {
     expect(library).toContain('Auto-categorizar acervo');
     expect(library).toContain('Forçar recategorização');
     expect(library).toContain('Popular semelhantes');
+    expect(library).toContain('Atualização do Sistema');
+    expect(library).toContain('Procurar atualizações');
   });
 });

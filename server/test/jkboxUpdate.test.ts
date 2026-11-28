@@ -38,13 +38,29 @@ async function makeTarball(destDir: string, tag: string, extraFileContent = 'con
   const srcDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jkbox-tar-src-'));
   fs.mkdirSync(path.join(srcDir, 'server', 'dist'), { recursive: true });
   fs.mkdirSync(path.join(srcDir, 'web', 'dist'), { recursive: true });
-  fs.mkdirSync(path.join(srcDir, 'os'), { recursive: true });
+  fs.mkdirSync(path.join(srcDir, 'os', 'systemd'), { recursive: true });
+  fs.mkdirSync(path.join(srcDir, 'os', 'udev'), { recursive: true });
+  fs.mkdirSync(path.join(srcDir, 'os', 'polkit'), { recursive: true });
 
   fs.writeFileSync(path.join(srcDir, 'VERSION'), `${tag}\n`);
   fs.writeFileSync(path.join(srcDir, 'server', 'package.json'), JSON.stringify({ name: '@jkbox/server', version: tag.replace(/^v/, '') }));
   fs.writeFileSync(path.join(srcDir, 'server', 'dist', 'index.js'), extraFileContent);
   fs.writeFileSync(path.join(srcDir, 'web', 'dist', 'index.html'), '<html><body>jkbox</body></html>\n');
   fs.writeFileSync(path.join(srcDir, 'os', 'jkbox-update.sh'), '#!/usr/bin/env bash\nexit 0\n');
+  fs.writeFileSync(path.join(srcDir, 'os', 'jkbox-hostname.sh'), '#!/usr/bin/env bash\nexit 0\n');
+  fs.writeFileSync(
+    path.join(srcDir, 'os', 'systemd', 'jkbox.service'),
+    `[Unit]\nDescription=jkbox ${tag}\n[Service]\nUser=jkbox\n`,
+  );
+  fs.writeFileSync(
+    path.join(srcDir, 'os', 'systemd', 'jkbox-update.service'),
+    `[Service]\nType=oneshot\nUser=root\nExecStart=/opt/jkbox/current/os/jkbox-update.sh\n`,
+  );
+  fs.writeFileSync(path.join(srcDir, 'os', 'udev', '99-jkbox-usb-music.rules'), `ACTION=="add", TAG+="${tag}"\n`);
+  fs.writeFileSync(
+    path.join(srcDir, 'os', 'polkit', '50-jkbox-update.rules'),
+    `polkit.addRule(function(action, subject) {\n  if (action.lookup("unit") === "jkbox-update.service" && subject.user === "jkbox") return polkit.Result.YES;\n});\n`,
+  );
 
   const tarName = `jkbox-studio-${tag}.tar.gz`;
   const tarPath = path.join(destDir, tarName);
@@ -420,11 +436,46 @@ describe('os/jkbox-update.sh', () => {
     expect(fs.realpathSync(fx.currentLink)).toBe(fs.realpathSync(path.join(fx.releasesDir, 'v0.2.0')));
     expect(fs.existsSync(fx.systemctlLog)).toBe(false);
   });
+
+  it('syncs updated systemd units, udev rules, Polkit rule, and hostname helper during OTA update', async () => {
+    const fx = await createFixture({ initialInstalledTag: 'v0.1.0', latestTag: 'v0.2.0' });
+    const systemdDir = path.join(fx.root, 'etc', 'systemd', 'system');
+    const udevDir = path.join(fx.root, 'etc', 'udev', 'rules.d');
+    const polkitDir = path.join(fx.root, 'etc', 'polkit-1', 'rules.d');
+    const hostnameBin = path.join(fx.root, 'usr', 'local', 'bin', 'jkbox-hostname');
+    const sudoersDir = path.join(fx.root, 'etc', 'sudoers.d');
+    fs.mkdirSync(sudoersDir, { recursive: true });
+
+    const res = await runUpdater(fx, [], {
+      JKBOX_USER: 'jukebox',
+      JKBOX_SYSTEMD_DIR: systemdDir,
+      JKBOX_UDEV_DIR: udevDir,
+      JKBOX_POLKIT_DIR: polkitDir,
+      JKBOX_HOSTNAME_BIN: hostnameBin,
+      JKBOX_SUDOERS_DIR: sudoersDir,
+      JKBOX_SYNC_OS: '1',
+    });
+
+    expect(res.code).toBe(0);
+    expect(fs.readFileSync(path.join(systemdDir, 'jkbox.service'), 'utf8')).toContain('Description=jkbox v0.2.0');
+    expect(fs.readFileSync(path.join(udevDir, '99-jkbox-usb-music.rules'), 'utf8')).toContain('v0.2.0');
+    const polkitRule = fs.readFileSync(path.join(polkitDir, '50-jkbox-update.rules'), 'utf8');
+    expect(polkitRule).toContain('jkbox-update.service');
+    expect(polkitRule).toContain('subject.user === "jukebox"');
+    expect(fs.existsSync(hostnameBin)).toBe(true);
+    expect(fs.readFileSync(path.join(sudoersDir, 'jkbox-hostname'), 'utf8')).toContain(`jukebox ALL=(root) NOPASSWD: ${hostnameBin} *`);
+
+    const logLines = fs.readFileSync(fx.systemctlLog, 'utf8').trim().split('\n');
+    expect(logLines.some((line) => line.includes('daemon-reload'))).toBe(true);
+    expect(logLines.some((line) => line.includes('restart jkbox.service'))).toBe(true);
+  });
 });
 
 describe('release pipeline & systemd manifests', () => {
-  it('defines release workflow with tag trigger, workflow_dispatch, SHA256SUMS, and GitHub Release upload', () => {
+  it('defines release workflow with main branch + tag triggers, workflow_dispatch, SHA256SUMS, and Latest Release upload', () => {
     const workflow = fs.readFileSync(path.join(REPO_ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+    expect(workflow).toContain('branches:');
+    expect(workflow).toContain('- main');
     expect(workflow).toContain("tags:");
     expect(workflow).toContain("'v*'");
     expect(workflow).toContain('workflow_dispatch:');
@@ -433,19 +484,30 @@ describe('release pipeline & systemd manifests', () => {
     expect(workflow).toContain('npm run build');
     expect(workflow).toContain('SHA256SUMS');
     expect(workflow).toContain('jkbox-studio-${TAG}.tar.gz');
+    expect(workflow).toContain('RELEASE_META.json');
+    expect(workflow).toContain('--latest');
+    expect(workflow).toContain('--generate-notes');
     expect(workflow).toContain('gh release');
   });
 
-  it('provides systemd service and timer units pointing to /opt/jkbox/current', () => {
+  it('provides systemd service, timer units, and Polkit rule for jkbox-update.service', () => {
     const appService = fs.readFileSync(path.join(REPO_ROOT, 'os', 'systemd', 'jkbox.service'), 'utf8');
     const updService = fs.readFileSync(path.join(REPO_ROOT, 'os', 'systemd', 'jkbox-update.service'), 'utf8');
     const updTimer = fs.readFileSync(path.join(REPO_ROOT, 'os', 'systemd', 'jkbox-update.timer'), 'utf8');
+    const polkitRule = fs.readFileSync(path.join(REPO_ROOT, 'os', 'polkit', '50-jkbox-update.rules'), 'utf8');
 
     expect(appService).toContain('WorkingDirectory=/opt/jkbox/current');
     expect(appService).toContain('/opt/jkbox/current/server/dist/index.js');
+    expect(appService).toContain('NoNewPrivileges=true');
     expect(updService).toContain('Type=oneshot');
+    expect(updService).toContain('User=root');
     expect(updService).toContain('/opt/jkbox/current/os/jkbox-update.sh');
     expect(updTimer).toContain('[Timer]');
     expect(updTimer).toContain('WantedBy=timers.target');
+    expect(polkitRule).toContain('org.freedesktop.systemd1.manage-units');
+    expect(polkitRule).toContain('jkbox-update.service');
+    expect(polkitRule).toContain('action.lookup("verb") === "start"');
+    expect(polkitRule).toContain('subject.user === "jkbox"');
+    expect(polkitRule).toContain('polkit.Result.YES');
   });
 });

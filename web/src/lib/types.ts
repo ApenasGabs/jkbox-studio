@@ -313,3 +313,31 @@ export type KioskControl =
   | { action: 'volume'; value: number }
   | { action: 'stage'; value: KioskStageView }
   | { action: 'reactions'; value: boolean };
+
+export type SystemUpdateMode = 'kiosk-os' | 'docker' | 'dev';
+
+export interface SystemUpdateStatus {
+  supported: boolean;
+  mode: SystemUpdateMode;
+  repo: string;
+  currentVersion: string;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  publishedAt: string | null;
+  releaseNotes: string | null;
+  releaseUrl: string | null;
+  updating: boolean;
+  checkedAt: number | null;
+  checkError: string | null;
+  dockerCommand: string | null;
+}
+
+export interface SystemUpdateApplyResult {
+  started: boolean;
+  alreadyRunning?: boolean;
+  supported: boolean;
+  mode: SystemUpdateMode;
+  updating: boolean;
+  message: string;
+  command?: string;
+}

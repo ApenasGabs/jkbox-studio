@@ -25,6 +25,8 @@ export interface Config {
   mdnsHostname: string;
   mdnsEnabled: boolean;
   hostnameHelper: string;
+  updateRepo: string;
+  versionFile: string;
   spotify: {
     clientId: string;
     clientSecret: string;
@@ -97,6 +99,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     mdnsHostname: (env.MDNS_HOSTNAME || 'jkbox').trim(),
     mdnsEnabled: (env.MDNS_ENABLED ?? 'true').toLowerCase() !== 'false',
     hostnameHelper: (env.JKBOX_HOSTNAME_HELPER ?? '').trim(),
+    updateRepo: (env.JKBOX_REPO || 'ApenasGabs/jkbox-studio').trim(),
+    versionFile: env.JKBOX_VERSION_FILE || path.join(env.JKBOX_BASE_DIR || '/opt/jkbox', 'current', 'VERSION'),
     spotify: {
       clientId: env.SPOTIFY_CLIENT_ID ?? '',
       clientSecret: env.SPOTIFY_CLIENT_SECRET ?? '',

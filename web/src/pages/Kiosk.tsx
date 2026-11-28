@@ -7,6 +7,7 @@ import { DiscoveryModal, type DiscoveryRequestContext } from '../components/Disc
 import { GenreBadges } from '../components/GenreBadges';
 import { LyricsView } from '../components/LyricsView';
 import { MdnsHostnamePanel } from '../components/MdnsHostnamePanel';
+import { SystemUpdatePanel } from '../components/SystemUpdatePanel';
 import { PlaylistManagerPanel } from '../components/PlaylistManagerPanel';
 import { QrAccessCard } from '../components/QrAccessCard';
 import { QueueList } from '../components/QueueList';
@@ -2440,6 +2441,7 @@ function HostPanel({
   run,
 }: HostPanelProps) {
   const [playlists, setPlaylists] = useState<PlaylistSummary[]>([]);
+  const [pinUnlockTick, setPinUnlockTick] = useState(0);
 
   const loadPlaylists = useCallback((signal?: AbortSignal) => {
     api
@@ -2491,7 +2493,16 @@ function HostPanel({
 
         <MdnsHostnamePanel mdns={config?.mdns} onUpdated={onMdnsUpdated} onToast={onToast} />
 
-        <HostPinPanel remoteUrl={qrUrl} onToast={onToast} onChanged={onChanged} />
+        <SystemUpdatePanel onToast={onToast} reloadKey={reloadKey + pinUnlockTick} />
+
+        <HostPinPanel
+          remoteUrl={qrUrl}
+          onToast={onToast}
+          onChanged={() => {
+            setPinUnlockTick((t) => t + 1);
+            onChanged();
+          }}
+        />
 
         <GestureControlPanel
           settings={gestureSettings}

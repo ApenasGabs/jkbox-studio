@@ -16,6 +16,7 @@ import { MdnsError, type MdnsService } from './services/mdns.js';
 import { PlaylistError } from './services/playlists.js';
 import { QueueError } from './services/queue.js';
 import { SpotifyError } from './services/spotify.js';
+import { SystemUpdateError, SystemUpdateService } from './services/systemUpdate.js';
 import type { Track } from './types.js';
 
 const SEARCH_SOURCES = new Set<SearchSource>(['all', 'youtube', 'spotify', 'local']);
@@ -25,6 +26,7 @@ export interface AppDeps {
   jukebox: Jukebox;
   mdns?: MdnsService;
   hostAuth?: HostAuth;
+  systemUpdate?: SystemUpdateService;
   version?: string;
   /** Overridable for tests when `mdns` is omitted. */
   getLanIps?: () => string[];
@@ -41,6 +43,7 @@ export const createApp = ({
   jukebox,
   mdns,
   hostAuth: providedHostAuth,
+  systemUpdate: providedSystemUpdate,
   version = '0.1.0',
   getLanIps,
   warn,
@@ -76,6 +79,13 @@ export const createApp = ({
 
   const { tracks, queue, downloads, spotify, lyrics, playlists } = jukebox;
   const hostAuth = providedHostAuth ?? new HostAuth(config.hostPin, jukebox.settings ?? memorySettings(), config.hostPinAuto);
+  const systemUpdate =
+    providedSystemUpdate ??
+    new SystemUpdateService({
+      repo: config.updateRepo,
+      fallbackVersion: version,
+      versionFile: config.versionFile,
+    });
   const isHost = (req: Request) => hostAuth.verify(req.get('x-host-pin'));
   const requireHost = (req: Request, res: Response, next: NextFunction) => {
     if (isHost(req)) return next();
@@ -131,6 +141,25 @@ export const createApp = ({
       if (err instanceof MdnsError) {
         return void res.status(err.status).json({ error: err.message });
       }
+      next(err);
+    }
+  });
+
+  api.get('/system/update', requireHost, async (req, res, next) => {
+    try {
+      const refresh = str(req.query.refresh).trim().toLowerCase();
+      const forceRefresh = refresh === '1' || refresh === 'true';
+      res.json(await systemUpdate.check({ forceRefresh }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  api.post('/system/update/apply', requireHost, async (_req, res, next) => {
+    try {
+      const result = await systemUpdate.apply();
+      res.status(result.supported && (result.started || result.alreadyRunning) ? 202 : 200).json(result);
+    } catch (err) {
       next(err);
     }
   });
@@ -788,7 +817,8 @@ export const createApp = ({
       err instanceof QueueError ||
       err instanceof LyricsError ||
       err instanceof PlaylistError ||
-      err instanceof DiscoveryError
+      err instanceof DiscoveryError ||
+      err instanceof SystemUpdateError
     ) {
       return void res.status(err.status).json({ error: err.message });
     }

@@ -1,0 +1,10 @@
+// Allow the jkbox service user to trigger jkbox-update.service via systemd/D-Bus
+// (compatible with NoNewPrivileges=true in jkbox.service).
+polkit.addRule(function(action, subject) {
+    if (action.id === "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") === "jkbox-update.service" &&
+        action.lookup("verb") === "start" &&
+        subject.user === "jkbox") {
+        return polkit.Result.YES;
+    }
+});

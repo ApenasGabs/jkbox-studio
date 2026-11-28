@@ -8,6 +8,7 @@ import { KioskRemoteControls } from './KioskRemoteControls';
 import { MdnsHostnamePanel } from './MdnsHostnamePanel';
 import { PlaylistManagerPanel } from './PlaylistManagerPanel';
 import { SpotifyConnectSelector } from './SpotifyConnectSelector';
+import { SystemUpdatePanel } from './SystemUpdatePanel';
 
 export interface RemoteHostPanelProps {
   config: AppConfig | null;
@@ -197,6 +198,7 @@ export function RemoteHostPanel({
                 onOpenPlaylistsTab={onOpenPlaylistsTab}
               />
               <MdnsHostnamePanel mdns={mdns ?? config?.mdns} onUpdated={onMdnsUpdated} onToast={onToast} />
+              <SystemUpdatePanel onToast={onToast} reloadKey={reloadKey} />
             </>
           )}
         </div>
