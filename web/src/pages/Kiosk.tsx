@@ -73,6 +73,8 @@ import {
 import { useWebcamKioskInput } from '../lib/useWebcamKioskInput';
 import { useSpotifyVolumeControl } from '../lib/useSpotifyVolume';
 import { useTrackLyrics } from '../lib/useTrackLyrics';
+import { resolveGuestModeAfterCommand } from '../lib/kioskGuestMode';
+import { Remote } from './Remote';
 
 type DefaultStageView = 'cover' | 'video' | 'video-lyrics' | 'lyrics';
 
@@ -167,6 +169,7 @@ export function Kiosk() {
   const [embedSrc, setEmbedSrc] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [catalogOpen, setCatalogOpen] = useState(false);
+  const [guestModeOpen, setGuestModeOpen] = useState(false);
   const [catalogTab, setCatalogTab] = useState<CatalogTab>('categories');
   const [catalogHistory, setCatalogHistory] = useState<CatalogRoute[]>([{ kind: 'root' }]);
   const [catalogFilter, setCatalogFilter] = useState('');
@@ -196,6 +199,7 @@ export function Kiosk() {
   const queueDrawerRef = useRef<HTMLDivElement>(null);
   const hostDialogRef = useRef<HTMLDivElement>(null);
   const catalogDialogRef = useRef<HTMLDivElement>(null);
+  const guestRemoteDialogRef = useRef<HTMLDivElement>(null);
   const unlockBtnRef = useRef<HTMLButtonElement>(null);
   const focusedElRef = useRef<HTMLElement | null>(null);
   const dpadActiveRef = useRef(false);
@@ -781,7 +785,7 @@ export function Kiosk() {
     stageMode: effectiveStageMode,
     hasTrack: Boolean(current),
     hasModalOpen: Boolean(
-      settingsOpen || catalogOpen || queueDrawerOpen || editingTrack || playlistPickerTrack || discoveryContext,
+      settingsOpen || catalogOpen || guestModeOpen || queueDrawerOpen || editingTrack || playlistPickerTrack || discoveryContext,
     ),
     unlocked,
     idle: cinemaIdle,
@@ -853,13 +857,15 @@ export function Kiosk() {
         ? 'playlist-picker'
         : editingTrack
           ? 'metadata'
-          : catalogOpen
-            ? 'catalog'
-            : settingsOpen
-              ? 'host'
-              : queueDrawerOpen
-                ? 'queue-drawer'
-                : 'main';
+          : guestModeOpen
+            ? 'guest-remote'
+            : catalogOpen
+              ? 'catalog'
+              : settingsOpen
+                ? 'host'
+                : queueDrawerOpen
+                  ? 'queue-drawer'
+                  : 'main';
 
   const getActiveScopeElements = useCallback((): HTMLElement[] => {
     if (activeScope === 'unlock') {
@@ -873,6 +879,9 @@ export function Kiosk() {
     }
     if (activeScope === 'metadata') {
       return getFocusableElements(document.querySelector('[data-kiosk-scope="metadata"]'));
+    }
+    if (activeScope === 'guest-remote') {
+      return getFocusableElements(guestRemoteDialogRef.current);
     }
     if (activeScope === 'catalog') {
       return getFocusableElements(catalogDialogRef.current);
@@ -1036,6 +1045,10 @@ export function Kiosk() {
           setEditingTrack(null);
           return;
         }
+        if (guestModeOpen) {
+          setGuestModeOpen(resolveGuestModeAfterCommand(guestModeOpen, command));
+          return;
+        }
         if (catalogOpen) {
           if (catalogHistory.length > 1) {
             setCatalogHistory((prev) => prev.slice(0, -1));
@@ -1062,6 +1075,7 @@ export function Kiosk() {
         if (discoveryContext) setDiscoveryContext(null);
         if (playlistPickerTrack) setPlaylistPickerTrack(null);
         if (editingTrack) setEditingTrack(null);
+        if (guestModeOpen) setGuestModeOpen(resolveGuestModeAfterCommand(guestModeOpen, command));
         if (catalogOpen) setCatalogOpen(false);
         if (queueDrawerOpen) setQueueDrawerOpen(false);
         setSettingsOpen((v) => !v);
@@ -1116,6 +1130,7 @@ export function Kiosk() {
       discoveryContext,
       playlistPickerTrack,
       editingTrack,
+      guestModeOpen,
       catalogOpen,
       catalogHistory.length,
       settingsOpen,
@@ -1958,6 +1973,10 @@ export function Kiosk() {
             setSettingsOpen(false);
             setDiscoveryContext(buildDiscoveryContext({ mode: 'vibe' }));
           }}
+          onOpenGuestMode={() => {
+            setSettingsOpen(false);
+            setGuestModeOpen(true);
+          }}
           reloadKey={catalogReloadKey}
           onCatalogChanged={() => setCatalogReloadKey((k) => k + 1)}
           onClose={() => setSettingsOpen(false)}
@@ -2032,6 +2051,12 @@ export function Kiosk() {
           </div>
         </div>
       )}
+
+      <KioskGuestOverlay
+        open={guestModeOpen}
+        dialogRef={guestRemoteDialogRef}
+        onClose={() => setGuestModeOpen(false)}
+      />
 
       <TrackMetadataModal
         track={editingTrack}
@@ -2331,6 +2356,7 @@ interface HostPanelProps {
   onOpenCatalog: () => void;
   onOpenPlaylistsTab: () => void;
   onDiscoverQueueVibe: () => void;
+  onOpenGuestMode: () => void;
   reloadKey: number;
   onCatalogChanged: () => void;
   onClose: () => void;
@@ -2366,6 +2392,7 @@ function HostPanel({
   onOpenCatalog,
   onOpenPlaylistsTab,
   onDiscoverQueueVibe,
+  onOpenGuestMode,
   reloadKey,
   onCatalogChanged,
   onClose,
@@ -2536,10 +2563,37 @@ function HostPanel({
           onOpenPlaylistsTab={onOpenPlaylistsTab}
         />
 
-        <a href="/remote" target="_blank" rel="noreferrer" className="text-sm text-accent-2 underline">
-          Abrir modo convidado nesta tela ↗
-        </a>
+        <button
+          type="button"
+          onClick={onOpenGuestMode}
+          className="rounded-xl border border-accent-2/35 bg-accent-2/10 px-4 py-2.5 text-left text-sm font-semibold text-accent-2 transition hover:bg-accent-2/20"
+        >
+          Abrir modo convidado nesta tela
+        </button>
       </div>
     </div>
   );
 }
+
+export interface KioskGuestOverlayProps {
+  open: boolean;
+  dialogRef?: RefObject<HTMLDivElement | null>;
+  onClose: () => void;
+}
+
+/** Full-screen Guest Mode drawer rendered over `<Kiosk />` without unmounting `<audio>` or `<video>`. */
+export const KioskGuestOverlay = ({ open, dialogRef, onClose }: KioskGuestOverlayProps) => {
+  if (!open) return null;
+  return (
+    <div
+      ref={dialogRef}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Modo convidado na TV"
+      data-kiosk-scope="guest-remote"
+      className="fixed inset-0 z-30 overflow-x-hidden overflow-y-auto bg-ink"
+    >
+      <Remote embedded onClose={onClose} />
+    </div>
+  );
+};

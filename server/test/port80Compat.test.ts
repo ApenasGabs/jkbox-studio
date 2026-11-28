@@ -113,6 +113,7 @@ describe('Port 80 Kiosk defaults, URL normalization, and legacy :3000 compatibil
       hostnameHelper: '/usr/local/bin/jkbox-hostname',
       settings: jukebox.settings,
       detectDockerBridge: () => false,
+      getIpv4Addresses: () => ['192.168.1.42'],
     });
     mdns.start();
     cleanups.push(() => mdns.stop());
