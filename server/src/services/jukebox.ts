@@ -139,10 +139,18 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       this.settings?.set('autoDjPlaylistId', null);
     }
     this._playbackOutput = normalizePlaybackOutput(this.settings?.get<unknown>('playback_output'), spotify.connected);
-    queue.setPlayablePredicate((track) => track.status === 'ready' || this._playbackOutput.type === 'spotify');
+    queue.setPlayablePredicate((track) => this.isTrackPlayable(track));
     downloads.on('ready', (track) => {
-      queue.advanceIfIdle();
+      const advanced = queue.advanceIfIdle();
+      if (!advanced && queue.isIdleWithoutPlayable()) {
+        this.maybeEnqueueAutoDj();
+      }
       void this.classifyTrackInBackground(track.id);
+    });
+    downloads.on('failed', (track) => {
+      if (this.hasActiveTrack(new Set([track.id])) && queue.isIdleWithoutPlayable()) {
+        this.maybeEnqueueAutoDj();
+      }
     });
     queue.on('started', (entry) => {
       if (this._playbackOutput.type === 'spotify') {
@@ -423,11 +431,24 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     }
   }
 
-  /** Resumes Spotify Connect playback/polling after a server restart if a track was already playing. */
+  private isTrackPlayable(track: Track): boolean {
+    return track.status === 'ready' || this._playbackOutput.type === 'spotify';
+  }
+
+  /** Resumes Spotify Connect playback/polling or starts Auto-DJ after a server restart when idle. */
   syncStartupPlayback(): void {
-    if (this._playbackOutput.type !== 'spotify') return;
+    this.queue.advanceIfIdle();
+    if (this._playbackOutput.type !== 'spotify') {
+      if (this._autoDjEnabled && this.queue.isIdleWithoutPlayable()) {
+        this.maybeEnqueueAutoDj();
+      }
+      return;
+    }
     const current = this.queue.state().nowPlaying;
     if (!current) {
+      if (this._autoDjEnabled && this.queue.isIdleWithoutPlayable() && this.maybeEnqueueAutoDj()) {
+        return;
+      }
       this.startSpotifyPolling();
       return;
     }
@@ -653,9 +674,26 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     return this._autoDjPlaylistId;
   }
 
+  get autoDjConfig(): AutoDjConfig {
+    return {
+      enabled: this._autoDjEnabled,
+      mode: this._autoDjMode,
+      category: this._autoDjCategory,
+      subgenre: this._autoDjSubgenre,
+      playlistId: this._autoDjPlaylistId,
+    };
+  }
+
   setAutoDjEnabled(enabled: boolean): boolean {
+    const changed = this._autoDjEnabled !== enabled;
     this._autoDjEnabled = enabled;
     this.settings?.set('autoDjEnabled', enabled);
+    if (enabled && this.queue.isIdleWithoutPlayable()) {
+      this.maybeEnqueueAutoDj();
+    }
+    if (changed) {
+      this.queue.emit('change');
+    }
     return this._autoDjEnabled;
   }
 
@@ -666,6 +704,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     subgenre?: string | null;
     playlistId?: string | null;
   }): AutoDjConfig {
+    const prev = this.autoDjConfig;
     if (patch.enabled !== undefined) {
       this._autoDjEnabled = patch.enabled;
       this.settings?.set('autoDjEnabled', this._autoDjEnabled);
@@ -692,13 +731,20 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       this._autoDjPlaylistId = patch.playlistId?.trim() || null;
       this.settings?.set('autoDjPlaylistId', this._autoDjPlaylistId);
     }
-    return {
-      enabled: this._autoDjEnabled,
-      mode: this._autoDjMode,
-      category: this._autoDjCategory,
-      subgenre: this._autoDjSubgenre,
-      playlistId: this._autoDjPlaylistId,
-    };
+    const next = this.autoDjConfig;
+    const changed =
+      prev.enabled !== next.enabled ||
+      prev.mode !== next.mode ||
+      prev.category !== next.category ||
+      prev.subgenre !== next.subgenre ||
+      prev.playlistId !== next.playlistId;
+    if (this._autoDjEnabled && this.queue.isIdleWithoutPlayable()) {
+      this.maybeEnqueueAutoDj();
+    }
+    if (changed) {
+      this.queue.emit('change');
+    }
+    return next;
   }
 
   clearAutoDjPlaylistIfMatches(playlistId: string): void {
@@ -709,6 +755,10 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       this._autoDjMode = 'vibe';
       this.settings?.set('autoDjMode', 'vibe');
     }
+    if (this._autoDjEnabled && this.queue.isIdleWithoutPlayable()) {
+      this.maybeEnqueueAutoDj();
+    }
+    this.queue.emit('change');
   }
 
   private hasActiveTrack(trackIds: ReadonlySet<string>): boolean {
@@ -786,16 +836,21 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     }
   }
 
-  /** Enqueues a cached track when Auto-DJ is enabled and playback just drained the queue. */
+  /** Enqueues a cached track when Auto-DJ is enabled and playback is idle with no playable tracks queued. */
   maybeEnqueueAutoDj(random?: () => number): Track | null {
     if (!this._autoDjEnabled) return null;
     if (this._playbackOutput.type === 'spotify' && this.consecutiveSpotifyMisses >= 5) return null;
     const { nowPlaying, queue: queued } = this.queue.state();
-    if (nowPlaying || queued.length > 0) return null;
+    if (nowPlaying || queued.some((entry) => this.isTrackPlayable(entry.track))) return null;
 
+    const queuedIds = new Set(queued.map((entry) => entry.trackId));
     const cached = this.tracks
       .listCached()
-      .filter((t) => this._playbackOutput.type !== 'spotify' || !this.spotifyUnavailableTrackIds.has(t.id));
+      .filter(
+        (t) =>
+          !queuedIds.has(t.id) &&
+          (this._playbackOutput.type !== 'spotify' || !this.spotifyUnavailableTrackIds.has(t.id)),
+      );
     if (cached.length === 0) return null;
 
     const recentTracks = this.queue.recentTracks(DEFAULT_AUTO_DJ_RECENT_WINDOW * 3);
@@ -813,7 +868,10 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
       subgenre: this._autoDjSubgenre,
       playlistTrackIds,
     });
-    if (!picked) return null;
+    if (!picked) {
+      this.notifyNoAutoDjCandidate();
+      return null;
+    }
 
     try {
       this.queue.enqueue(picked.id, 'auto-dj', 'Auto-DJ');
@@ -822,6 +880,29 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     } catch (err) {
       this.log(`[auto-dj] falha ao enfileirar faixa: ${errorMessage(err)}`);
       return null;
+    }
+  }
+
+  private notifyNoAutoDjCandidate(): void {
+    if (this._autoDjMode === 'category') {
+      const label = this._autoDjCategory ?? 'selecionada';
+      const msg = `Auto-DJ travado em "${label}", mas nenhuma faixa pronta corresponde no acervo.`;
+      this.log(`[auto-dj:category] ${msg}`);
+      this.emit('notice', msg, true);
+      return;
+    }
+    if (this._autoDjMode === 'playlist') {
+      const playlistName = this._autoDjPlaylistId ? this.playlists?.get(this._autoDjPlaylistId)?.name : null;
+      const label = playlistName ? `"${playlistName}"` : 'selecionada';
+      const msg = `Auto-DJ travado na playlist ${label}, mas nenhuma faixa dela está pronta no acervo.`;
+      this.log(`[auto-dj:playlist] ${msg}`);
+      this.emit('notice', msg, true);
+      return;
+    }
+    if (this._autoDjMode === 'vibe') {
+      const msg = 'Auto-DJ não encontrou nenhuma faixa compatível no acervo para continuar a vibe atual.';
+      this.log(`[auto-dj:vibe] ${msg}`);
+      this.emit('notice', msg, true);
     }
   }
 

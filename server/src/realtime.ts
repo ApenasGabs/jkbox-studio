@@ -4,7 +4,7 @@ import type { KioskControl } from './lib/kioskControl.js';
 import { type EffectivePublicUrlResult, resolveEffectivePublicUrl } from './lib/networkUrl.js';
 import type { Jukebox } from './services/jukebox.js';
 import type { MdnsService, MdnsStatus } from './services/mdns.js';
-import { type PlaybackOutput, REACTION_EMOJIS, type ReactionEmoji } from './types.js';
+import { type AutoDjConfig, type PlaybackOutput, REACTION_EMOJIS, type ReactionEmoji } from './types.js';
 
 export const KIOSK_COMMANDS = ['UP', 'DOWN', 'LEFT', 'RIGHT', 'SELECT', 'PLAY', 'BACK', 'MENU', 'SKIP'] as const;
 export type KioskCommand = (typeof KIOSK_COMMANDS)[number];
@@ -33,7 +33,7 @@ export interface RealtimeOptions {
 }
 
 export type ServerMessage =
-  | { type: 'state'; state: ReturnType<Jukebox['queue']['state']>; playbackOutput: PlaybackOutput }
+  | { type: 'state'; state: ReturnType<Jukebox['queue']['state']>; playbackOutput: PlaybackOutput; autoDj: AutoDjConfig }
   | { type: 'progress'; positionSec: number; paused: boolean }
   | { type: 'download'; trackId: string; status: string; progress: number; error: string | null }
   | { type: 'lyrics_offset'; trackId: string; offsetMs: number }
@@ -137,7 +137,12 @@ export function attachRealtime(server: Server, jukebox: Jukebox, options: Realti
     if (pending) return;
     pending = setImmediate(() => {
       pending = null;
-      broadcast({ type: 'state', state: queue.state(), playbackOutput: jukebox.playbackOutput });
+      broadcast({
+        type: 'state',
+        state: queue.state(),
+        playbackOutput: jukebox.playbackOutput,
+        autoDj: jukebox.autoDjConfig,
+      });
     });
   };
 
@@ -198,7 +203,12 @@ export function attachRealtime(server: Server, jukebox: Jukebox, options: Realti
   wss.on('connection', (socket, req) => {
     const localInputAllowed = isLocalInputConnection(req);
     socket.send(
-      JSON.stringify({ type: 'state', state: queue.state(), playbackOutput: jukebox.playbackOutput } satisfies ServerMessage),
+      JSON.stringify({
+        type: 'state',
+        state: queue.state(),
+        playbackOutput: jukebox.playbackOutput,
+        autoDj: jukebox.autoDjConfig,
+      } satisfies ServerMessage),
     );
     if (options.mdns) {
       socket.send(JSON.stringify({ type: 'mdns', mdns: options.mdns.status() } satisfies ServerMessage));

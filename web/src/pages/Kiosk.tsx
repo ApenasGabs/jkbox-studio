@@ -61,7 +61,7 @@ import type {
   Track,
 } from '../lib/types';
 import { useInterpolatedTime } from '../lib/useInterpolatedTime';
-import { type DownloadInfo, useJukebox } from '../lib/useJukebox';
+import { type DownloadInfo, mergeAutoDjIntoConfig, useJukebox } from '../lib/useJukebox';
 import { useKioskInput } from '../lib/useKioskInput';
 import {
   type GestureAction,
@@ -140,6 +140,7 @@ export function Kiosk() {
   const {
     state,
     playbackOutput,
+    autoDj,
     position,
     downloads,
     lyricsOffset,
@@ -291,6 +292,10 @@ export function Kiosk() {
       window.history.replaceState(null, '', '/');
     }
   }, [refreshConfig, toast.show]);
+
+  useEffect(() => {
+    setConfig((prev) => mergeAutoDjIntoConfig(prev, autoDj));
+  }, [autoDj]);
 
   useEffect(() => {
     if (notice) toast.show(notice.message, notice.error);

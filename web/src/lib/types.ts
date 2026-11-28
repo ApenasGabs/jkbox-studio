@@ -207,6 +207,14 @@ export interface NetworkInfo {
   publicUrlWarning: string | null;
 }
 
+export interface AutoDjConfig {
+  enabled: boolean;
+  mode: AutoDjMode;
+  category: string | null;
+  subgenre: string | null;
+  playlistId: string | null;
+}
+
 export interface AppConfig {
   publicUrl: string | null;
   lanIps?: string[];
@@ -276,7 +284,7 @@ export interface KioskInputEvent {
 }
 
 export type ServerMessage =
-  | { type: 'state'; state: JukeboxState; playbackOutput?: PlaybackOutput }
+  | { type: 'state'; state: JukeboxState; playbackOutput?: PlaybackOutput; autoDj?: AutoDjConfig }
   | { type: 'progress'; positionSec: number; paused: boolean }
   | { type: 'download'; trackId: string; status: TrackStatus; progress: number; error: string | null }
   | { type: 'lyrics_offset'; trackId: string; offsetMs: number }

@@ -50,8 +50,8 @@ describe('Jukebox Auto-DJ integration', () => {
     const t2 = jukebox.tracks.insertLocal(path.join(config.musicDir, 'Artist 2 - Song 2.mp3'), { title: 'Song 2', artist: 'Artist 2' });
     const t3 = jukebox.tracks.insertLocal(path.join(config.musicDir, 'Artist 3 - Song 3.mp3'), { title: 'Song 3', artist: 'Artist 3' });
 
-    jukebox.setAutoDjEnabled(true);
     jukebox.queue.enqueue(t1.id, 'guest-1', 'Ana');
+    jukebox.setAutoDjEnabled(true);
 
     const playing1 = jukebox.queue.state().nowPlaying!;
     expect(playing1.item.trackId).toBe(t1.id);
@@ -76,13 +76,13 @@ describe('Jukebox Auto-DJ integration', () => {
     expect(playing4.item.trackId).toBe(t1.id);
   });
 
-  it('does not trigger Auto-DJ while a requested track is still downloading in queue', async () => {
+  it('triggers Auto-DJ when a requested track is still downloading in queue without removing it, then plays it next', async () => {
     const { config, jukebox, media } = setup();
     fs.writeFileSync(path.join(config.musicDir, 'Local - Cached.mp3'), Buffer.alloc(128, 1));
     const local = jukebox.tracks.insertLocal(path.join(config.musicDir, 'Local - Cached.mp3'), { title: 'Cached', artist: 'Local' });
 
-    jukebox.setAutoDjEnabled(true);
     jukebox.queue.enqueue(local.id, 'guest-1', 'Ana');
+    jukebox.setAutoDjEnabled(true);
 
     media.hold();
     jukebox.enqueue({ result: ytResult('aaaaaaaaaaa'), requesterId: 'guest-2', requesterName: 'Bia' });
@@ -90,14 +90,26 @@ describe('Jukebox Auto-DJ integration', () => {
     const playing = jukebox.queue.state().nowPlaying!;
     jukebox.queue.ended(playing.item.id);
 
-    // Queue still has the downloading YouTube track, so Auto-DJ must NOT jump ahead
-    expect(jukebox.queue.state().nowPlaying).toBeNull();
+    // Auto-DJ fills the silence while Bia's request keeps downloading in queue
+    const autoPlaying = jukebox.queue.state().nowPlaying!;
+    expect(autoPlaying).not.toBeNull();
+    expect(autoPlaying.item.requesterId).toBe('auto-dj');
+    expect(autoPlaying.item.trackId).toBe(local.id);
     expect(jukebox.queue.state().queue).toHaveLength(1);
     expect(jukebox.queue.state().queue[0].requesterName).toBe('Bia');
+    expect(jukebox.queue.state().queue[0].track.sourceId).toBe('aaaaaaaaaaa');
 
+    // Calling maybeEnqueueAutoDj again while playing must not enqueue a duplicate
+    expect(jukebox.maybeEnqueueAutoDj()).toBeNull();
+    expect(jukebox.queue.state().queue).toHaveLength(1);
+
+    // Once download finishes and the Auto-DJ track ends, Bia's request plays next
     media.release();
     await jukebox.downloads.idle();
+    expect(jukebox.queue.state().nowPlaying?.item.id).toBe(autoPlaying.item.id);
+    jukebox.queue.ended(autoPlaying.item.id);
     expect(jukebox.queue.state().nowPlaying?.item.track.sourceId).toBe('aaaaaaaaaaa');
+    expect(jukebox.queue.state().nowPlaying?.item.requesterName).toBe('Bia');
   });
 
   it('persists autoDjEnabled setting in SQLite across restarts', () => {
@@ -231,19 +243,20 @@ describe('Jukebox Auto-DJ integration', () => {
       autoDjSubgenre: 'Funk Mandelão',
     });
 
-    // Locks exclusively to Funk Mandelão (f1), never picking Rock (r1) or Funk Anos 2000 (f2)
-    const pickedSub = jukebox.maybeEnqueueAutoDj(() => 0);
-    expect(pickedSub?.id).toBe(f1.id);
+    // Locks exclusively to Funk Mandelão (f1), starting immediately since player was idle
+    expect(jukebox.queue.state().nowPlaying?.item.trackId).toBe(f1.id);
+    // Calling maybeEnqueueAutoDj while already playing must not enqueue a duplicate
+    expect(jukebox.maybeEnqueueAutoDj(() => 0)).toBeNull();
 
-    // Clear subgenre -> locks to Funk (picks f2 since f1 is now playing / in queue after skip)
-    jukebox.queue.skip();
+    // Clear subgenre -> locks to Funk (picks f2 since f1 was playing before skip)
     await request(app)
       .post('/api/config/autodj')
       .set('x-host-pin', '1234')
       .send({ mode: 'category', category: 'Funk', subgenre: null })
       .expect(200);
+    jukebox.queue.skip();
     const playingAfterDrain = jukebox.queue.state().nowPlaying!;
-    expect([f1.id, f2.id]).toContain(playingAfterDrain.item.trackId);
+    expect(playingAfterDrain.item.trackId).toBe(f2.id);
   });
 
   it('locks selection to playlistTrackIds in playlist mode while respecting recent window', () => {
@@ -274,5 +287,165 @@ describe('Jukebox Auto-DJ integration', () => {
         playlistTrackIds: ['not-cached'],
       }),
     ).toBeNull();
+  });
+
+  it('triggers Auto-DJ immediately when a playing track ends with error tracks left in queue', async () => {
+    const { config, jukebox, media } = setup();
+    fs.writeFileSync(path.join(config.musicDir, 'Song A.mp3'), Buffer.alloc(128, 1));
+    fs.writeFileSync(path.join(config.musicDir, 'Song B.mp3'), Buffer.alloc(128, 2));
+    const tA = jukebox.tracks.insertLocal(path.join(config.musicDir, 'Song A.mp3'), { title: 'Song A', artist: 'Art A' });
+    const tB = jukebox.tracks.insertLocal(path.join(config.musicDir, 'Song B.mp3'), { title: 'Song B', artist: 'Art B' });
+
+    jukebox.queue.enqueue(tA.id, 'guest-1', 'Ana');
+    media.failIds.add('fail0000001');
+    jukebox.enqueue({ result: ytResult('fail0000001', 'Broken Track'), requesterId: 'guest-2', requesterName: 'Bia' });
+    await jukebox.downloads.idle();
+
+    expect(jukebox.queue.state().queue).toHaveLength(1);
+    expect(jukebox.queue.state().queue[0].track.status).toBe('error');
+
+    jukebox.setAutoDjEnabled(true);
+    const playingA = jukebox.queue.state().nowPlaying!;
+    jukebox.queue.ended(playingA.item.id);
+
+    const afterEnd = jukebox.queue.state();
+    expect(afterEnd.nowPlaying).not.toBeNull();
+    expect(afterEnd.nowPlaying!.item.requesterId).toBe('auto-dj');
+    expect(afterEnd.nowPlaying!.item.trackId).toBe(tB.id);
+    // The failed guest item stays visible in the queue without blocking playback
+    expect(afterEnd.queue).toHaveLength(1);
+    expect(afterEnd.queue[0].track.status).toBe('error');
+  });
+
+  it('starts Auto-DJ immediately when enabled or reconfigured while idle, and on startup', async () => {
+    const { config, jukebox } = setup({ HOST_PIN: '1234' });
+    const app = createApp({ config, jukebox });
+    fs.writeFileSync(path.join(config.musicDir, 'Funk 1.mp3'), Buffer.alloc(128, 1));
+    fs.writeFileSync(path.join(config.musicDir, 'Rock 1.mp3'), Buffer.alloc(128, 2));
+    const funk = jukebox.tracks.insertLocal(path.join(config.musicDir, 'Funk 1.mp3'), {
+      title: 'Funk 1',
+      artist: 'MC',
+      genre: 'Funk',
+    });
+    const rock = jukebox.tracks.insertLocal(path.join(config.musicDir, 'Rock 1.mp3'), {
+      title: 'Rock 1',
+      artist: 'Band',
+      genre: 'Rock',
+    });
+
+    // Activating Auto-DJ while player is idle starts playback immediately
+    await request(app)
+      .patch('/api/host/settings')
+      .set('x-host-pin', '1234')
+      .send({ autoDjEnabled: true })
+      .expect(200);
+    const first = jukebox.queue.state().nowPlaying;
+    expect(first).not.toBeNull();
+    expect(first!.item.requesterId).toBe('auto-dj');
+
+    // Disable, remove current -> player goes idle
+    await request(app)
+      .post('/api/config/autodj')
+      .set('x-host-pin', '1234')
+      .send({ enabled: false })
+      .expect(200);
+    jukebox.queue.remove(first!.item.id, 'host', true);
+    expect(jukebox.queue.state().nowPlaying).toBeNull();
+
+    // Switching config with enabled: true while idle starts matching category immediately
+    await request(app)
+      .post('/api/config/autodj')
+      .set('x-host-pin', '1234')
+      .send({ enabled: true, mode: 'category', category: 'Rock' })
+      .expect(200);
+    expect(jukebox.queue.state().nowPlaying?.item.trackId).toBe(rock.id);
+
+    // Simulate server restart with autoDjEnabled=true and idle queue -> syncStartupPlayback starts Auto-DJ
+    const activeBeforeRestart = jukebox.queue.state().nowPlaying!;
+    jukebox.setAutoDjEnabled(false);
+    jukebox.queue.remove(activeBeforeRestart.item.id, 'host', true);
+    jukebox.settings?.set('autoDjEnabled', true);
+    const reopened = createJukebox(loadConfig({ DATA_DIR: config.dataDir, WEB_DIR: config.webDir }), {
+      media: new FakeMedia(),
+      log: () => {},
+    });
+    expect(reopened.autoDjEnabled).toBe(true);
+    expect(reopened.queue.state().nowPlaying).toBeNull();
+    reopened.syncStartupPlayback();
+    expect(reopened.queue.state().nowPlaying?.item.trackId).toBe(rock.id);
+    expect(reopened.queue.state().nowPlaying?.item.requesterId).toBe('auto-dj');
+    expect(funk.id).toBeTruthy();
+  });
+
+  it('triggers Auto-DJ when a queued download fails while idle and when the last queued item is removed', async () => {
+    const { config, jukebox, media } = setup();
+    jukebox.setAutoDjEnabled(true);
+    expect(jukebox.queue.state().nowPlaying).toBeNull();
+
+    // 1. Queued download fails while player is idle -> Auto-DJ takes over once cached track exists
+    media.hold();
+    media.failIds.add('fail0000002');
+    jukebox.enqueue({ result: ytResult('fail0000002', 'Will Fail'), requesterId: 'guest-1', requesterName: 'Ana' });
+
+    fs.writeFileSync(path.join(config.musicDir, 'Cached.mp3'), Buffer.alloc(128, 1));
+    const cached = jukebox.tracks.insertLocal(path.join(config.musicDir, 'Cached.mp3'), {
+      title: 'Cached',
+      artist: 'Artist',
+    });
+
+    media.release();
+    await jukebox.downloads.idle();
+
+    const afterFail = jukebox.queue.state();
+    expect(afterFail.nowPlaying?.item.trackId).toBe(cached.id);
+    expect(afterFail.nowPlaying?.item.requesterId).toBe('auto-dj');
+    expect(afterFail.queue).toHaveLength(1);
+    expect(afterFail.queue[0].track.status).toBe('error');
+
+    // 2. Removing the last queued downloading item while idle -> Auto-DJ takes over
+    jukebox.setAutoDjConfig({ enabled: true, mode: 'category', category: 'Jazz' });
+    jukebox.queue.remove(afterFail.nowPlaying!.item.id, 'host', true);
+    jukebox.queue.remove(afterFail.queue[0].id, 'host', true);
+    expect(jukebox.queue.state().nowPlaying).toBeNull();
+
+    media.hold();
+    media.failIds.clear();
+    const { item: queuedPending } = jukebox.enqueue({
+      result: ytResult('pending0001', 'Pending'),
+      requesterId: 'guest-2',
+      requesterName: 'Bia',
+    });
+    // Switch back to random via settings/next state without triggering yet, or switch category after adding Jazz track
+    const jazzPath = path.join(config.musicDir, 'Jazz.mp3');
+    fs.writeFileSync(jazzPath, Buffer.alloc(128, 2));
+    const jazz = jukebox.tracks.insertLocal(jazzPath, {
+      title: 'Jazz Track',
+      artist: 'Jazz Artist',
+      genre: 'Jazz',
+    });
+    jukebox.queue.remove(queuedPending.id, 'guest-2', false);
+
+    expect(jukebox.queue.state().nowPlaying?.item.trackId).toBe(jazz.id);
+    expect(jukebox.queue.state().nowPlaying?.item.requesterId).toBe('auto-dj');
+    media.release();
+    await jukebox.downloads.idle();
+  });
+
+  it('emits a clear notice when restricted Auto-DJ mode has no ready candidates', () => {
+    const { config, jukebox } = setup();
+    fs.writeFileSync(path.join(config.musicDir, 'Pop.mp3'), Buffer.alloc(128, 1));
+    jukebox.tracks.insertLocal(path.join(config.musicDir, 'Pop.mp3'), {
+      title: 'Pop Song',
+      artist: 'Artist',
+      genre: 'Pop',
+    });
+
+    const notices: { message: string; error: boolean }[] = [];
+    jukebox.on('notice', (message, error) => notices.push({ message, error }));
+
+    jukebox.setAutoDjConfig({ enabled: true, mode: 'category', category: 'Jazz' });
+
+    expect(jukebox.queue.state().nowPlaying).toBeNull();
+    expect(notices.some((n) => n.error && n.message.includes('Jazz'))).toBe(true);
   });
 });
