@@ -235,6 +235,14 @@ export interface AppConfig {
 
 export type LyricsSource = 'lrclib' | 'local' | 'none';
 
+export interface LyricsPrefetchSummary {
+  total: number;
+  alreadyCached: number;
+  found: number;
+  empty: number;
+  transient: number;
+}
+
 export interface TrackLyrics {
   trackId: string;
   syncedLrc: string | null;

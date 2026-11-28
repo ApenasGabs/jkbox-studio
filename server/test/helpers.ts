@@ -78,7 +78,7 @@ export class FakeMedia implements MediaProvider {
 
 export function tempConfig(env: Record<string, string> = {}): Config {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jkbox-test-'));
-  return loadConfig({ DATA_DIR: dir, WEB_DIR: path.join(dir, 'no-web'), HOST_PIN_AUTO: 'false', ...env });
+  return loadConfig({ DATA_DIR: dir, WEB_DIR: path.join(dir, 'no-web'), HOST_PIN_AUTO: 'false', LYRICS_PREFETCH: 'false', ...env });
 }
 
 export function setup(env: Record<string, string> = {}, fetchFn?: FetchFn) {

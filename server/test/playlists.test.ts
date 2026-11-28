@@ -220,7 +220,7 @@ describe('internal playlists API & Auto-DJ', () => {
     expect(auto2.item.trackId).toBe(auto1.item.trackId === inPl1.id ? inPl2.id : inPl1.id);
 
     // Persists across restart
-    const reopened = createJukebox(loadConfig({ DATA_DIR: config.dataDir, WEB_DIR: config.webDir }), {
+    const reopened = createJukebox(loadConfig({ DATA_DIR: config.dataDir, WEB_DIR: config.webDir, LYRICS_PREFETCH: 'false' }), {
       media: new FakeMedia(),
       log: () => {},
     });

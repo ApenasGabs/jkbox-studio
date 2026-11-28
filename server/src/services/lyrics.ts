@@ -47,6 +47,28 @@ export interface LyricsEvents {
   cleared: [trackId: string];
 }
 
+/** Outcome of one background lookup: `transient` means it was not cached and will be retried later. */
+export type LyricsPrefetchOutcome = 'cached' | 'found' | 'empty' | 'transient';
+
+export interface LyricsPrefetchSummary {
+  total: number;
+  /** Already had a SQLite entry before the backfill started (no HTTP request). */
+  alreadyCached: number;
+  /** Newly cached synced/plain lyrics. */
+  found: number;
+  /** Newly cached as instrumental or "no lyrics found". */
+  empty: number;
+  /** Network/LRCLIB failures left uncached so a later run can retry. */
+  transient: number;
+}
+
+export interface LyricsPrefetchOptions {
+  /** Max simultaneous background lookups (default 2). */
+  concurrency?: number;
+  /** Minimum spacing between background lookup starts, in ms (default 250). */
+  minIntervalMs?: number;
+}
+
 export class LyricsError extends Error {
   constructor(
     message: string,
@@ -221,6 +243,12 @@ const EMPTY_LYRICS: LookupOutcome['lyrics'] = {
 /** Fetches, parses, caches, and manages synchronized lyrics from local `.lrc` files and LRCLIB. */
 export class LyricsService extends EventEmitter<LyricsEvents> {
   private readonly inFlight = new Map<string, Promise<TrackLyrics>>();
+  private readonly prefetchQueue: (() => void)[] = [];
+  private readonly prefetchPending = new Map<string, Promise<LyricsPrefetchOutcome>>();
+  private prefetchActive = 0;
+  private lastPrefetchStart = 0;
+  private readonly prefetchConcurrency: number;
+  private readonly prefetchIntervalMs: number;
 
   constructor(
     private readonly db: Db,
@@ -228,8 +256,11 @@ export class LyricsService extends EventEmitter<LyricsEvents> {
     private readonly fetchFn: FetchFn = fetch,
     private readonly log: (msg: string) => void = console.log,
     private readonly timeoutMs: number = DEFAULT_TIMEOUT_MS,
+    prefetchOptions: LyricsPrefetchOptions = {},
   ) {
     super();
+    this.prefetchConcurrency = Math.max(1, prefetchOptions.concurrency ?? 2);
+    this.prefetchIntervalMs = Math.max(0, prefetchOptions.minIntervalMs ?? 250);
   }
 
   getCached(trackId: string): TrackLyrics | null {
@@ -250,6 +281,62 @@ export class LyricsService extends EventEmitter<LyricsEvents> {
     });
     this.inFlight.set(track.id, task);
     return task;
+  }
+
+  /**
+   * Queues a low-priority background lookup so the track has lyrics offline later.
+   * Never rejects; tracks already in SQLite resolve to `'cached'` without HTTP.
+   */
+  prefetch(track: Track): Promise<LyricsPrefetchOutcome> {
+    if (this.getCached(track.id)) return Promise.resolve('cached');
+    const pending = this.prefetchPending.get(track.id);
+    if (pending) return pending;
+
+    const task = new Promise<void>((resolve) => this.prefetchQueue.push(resolve))
+      .then(() => this.runPrefetch(track))
+      .finally(() => {
+        this.prefetchPending.delete(track.id);
+        this.prefetchActive -= 1;
+        this.pumpPrefetch();
+      });
+    this.prefetchPending.set(track.id, task);
+    this.pumpPrefetch();
+    return task;
+  }
+
+  /** Backfills lyrics for every track without a SQLite entry, respecting the prefetch concurrency limit. */
+  async prefetchMissing(tracks: Track[]): Promise<LyricsPrefetchSummary> {
+    const summary: LyricsPrefetchSummary = { total: tracks.length, alreadyCached: 0, found: 0, empty: 0, transient: 0 };
+    const outcomes = await Promise.all(tracks.map((track) => this.prefetch(track)));
+    for (const outcome of outcomes) {
+      if (outcome === 'cached') summary.alreadyCached += 1;
+      else summary[outcome] += 1;
+    }
+    return summary;
+  }
+
+  private pumpPrefetch(): void {
+    while (this.prefetchActive < this.prefetchConcurrency && this.prefetchQueue.length > 0) {
+      this.prefetchActive += 1;
+      const wait = Math.max(0, this.lastPrefetchStart + this.prefetchIntervalMs - Date.now());
+      this.lastPrefetchStart = Date.now() + wait;
+      const start = this.prefetchQueue.shift()!;
+      if (wait > 0) setTimeout(start, wait);
+      else start();
+    }
+  }
+
+  private async runPrefetch(track: Track): Promise<LyricsPrefetchOutcome> {
+    if (this.getCached(track.id)) return 'cached';
+    try {
+      const lyrics = await this.getForTrack(track);
+      // resolveAndCache skips saving on transient LRCLIB failures, so a missing row means "retry later".
+      if (!this.getCached(track.id)) return 'transient';
+      return lyrics.syncedLrc || lyrics.plainLyrics ? 'found' : 'empty';
+    } catch (err) {
+      this.log(`[lyrics] falha na pré-busca de "${track.title}": ${err instanceof Error ? err.message : String(err)}`);
+      return 'transient';
+    }
   }
 
   /** Updates sync offset (ms) for a track and emits an `'offset'` event for WebSocket broadcast. */

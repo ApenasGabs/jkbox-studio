@@ -30,6 +30,19 @@ async function main() {
   void jukebox.autocategorizeLibrary().catch((err) => {
     console.warn(`[jkbox] falha na auto-categorização inicial: ${(err as Error).message}`);
   });
+  if (config.lyricsPrefetch) {
+    // Soft backfill: wait for startup to settle, then cache lyrics for offline parties (#64).
+    setTimeout(() => {
+      void jukebox
+        .prefetchMissingLyrics()
+        .then(({ found, empty, transient }) => {
+          if (found + empty + transient > 0) {
+            console.log(`[jkbox] letras pré-baixadas: ${found} encontradas, ${empty} sem letra, ${transient} falhas de rede`);
+          }
+        })
+        .catch((err) => console.warn(`[jkbox] falha na pré-busca de letras: ${(err as Error).message}`));
+    }, 30_000).unref();
+  }
   jukebox.downloads.resumeInterrupted();
   jukebox.queue.advanceIfIdle();
   jukebox.syncStartupPlayback();

@@ -118,7 +118,7 @@ describe('Jukebox Auto-DJ integration', () => {
     jukebox.setAutoDjEnabled(true);
     expect(jukebox.autoDjEnabled).toBe(true);
 
-    const reopened = createJukebox(loadConfig({ DATA_DIR: config.dataDir, WEB_DIR: config.webDir }), {
+    const reopened = createJukebox(loadConfig({ DATA_DIR: config.dataDir, WEB_DIR: config.webDir, LYRICS_PREFETCH: 'false' }), {
       media: new FakeMedia(),
       log: () => {},
     });
@@ -365,7 +365,7 @@ describe('Jukebox Auto-DJ integration', () => {
     jukebox.setAutoDjEnabled(false);
     jukebox.queue.remove(activeBeforeRestart.item.id, 'host', true);
     jukebox.settings?.set('autoDjEnabled', true);
-    const reopened = createJukebox(loadConfig({ DATA_DIR: config.dataDir, WEB_DIR: config.webDir }), {
+    const reopened = createJukebox(loadConfig({ DATA_DIR: config.dataDir, WEB_DIR: config.webDir, LYRICS_PREFETCH: 'false' }), {
       media: new FakeMedia(),
       log: () => {},
     });

@@ -317,6 +317,14 @@ export const createApp = ({
     }
   });
 
+  api.post('/library/lyrics/prefetch', requireHost, async (_req, res, next) => {
+    try {
+      res.json(await jukebox.prefetchMissingLyrics());
+    } catch (err) {
+      next(err);
+    }
+  });
+
   api.post('/library/autocategorize', requireHost, async (req, res, next) => {
     try {
       const rawForce = req.body?.force;

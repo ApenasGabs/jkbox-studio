@@ -17,6 +17,12 @@ export interface Config {
   videoMaxHeight: number;
   downloadConcurrency: number;
   playlistImportMaxTracks: number;
+  /** Background lyrics prefetch after downloads/imports + startup backfill (LYRICS_PREFETCH=false opts out). */
+  lyricsPrefetch: boolean;
+  /** Max simultaneous background LRCLIB lookups. */
+  lyricsPrefetchConcurrency: number;
+  /** Minimum spacing (ms) between background LRCLIB lookups to respect its rate limit. */
+  lyricsPrefetchIntervalMs: number;
   hostPin: string;
   /** Auto-generate a persisted 4-digit Host PIN when HOST_PIN is empty (HOST_PIN_AUTO=false opts out). */
   hostPinAuto: boolean;
@@ -92,6 +98,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     videoMaxHeight,
     downloadConcurrency: Math.max(1, int(env.DOWNLOAD_CONCURRENCY, 2)),
     playlistImportMaxTracks: Math.min(2000, Math.max(1, int(env.PLAYLIST_IMPORT_MAX_TRACKS, 500))),
+    lyricsPrefetch: (env.LYRICS_PREFETCH ?? 'true').toLowerCase() !== 'false',
+    lyricsPrefetchConcurrency: Math.min(8, Math.max(1, int(env.LYRICS_PREFETCH_CONCURRENCY, 2))),
+    lyricsPrefetchIntervalMs: Math.max(0, int(env.LYRICS_PREFETCH_INTERVAL_MS, 250)),
     hostPin: (env.HOST_PIN ?? '').trim(),
     hostPinAuto: (env.HOST_PIN_AUTO ?? 'true').toLowerCase() !== 'false',
     ytdlpPath: env.YTDLP_PATH || 'yt-dlp',
