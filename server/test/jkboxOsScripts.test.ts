@@ -241,6 +241,8 @@ exit 0
     expect(wifiUnit).toContain('/opt/jkbox/current/os/jkbox-wifi-fallback.sh');
     expect(udevRule).toContain('jkbox-usb-mount@%k.service');
     expect(kioskBrowserScript).toContain('--use-fake-ui-for-media-stream');
+    expect(kioskBrowserScript).toContain('--ignore-gpu-blocklist');
+    expect(kioskBrowserScript).toContain('--enable-webgl');
     expect(buttonsCfg.wsUrl).toBe('ws://127.0.0.1/ws');
     expect(buttonsCfg.profiles['usb-keyboard']).toBeTruthy();
     expect(buttonsCfg.profiles['zero-delay-arcade']).toBeTruthy();
