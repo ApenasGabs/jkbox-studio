@@ -42,8 +42,10 @@ import {
   STANDALONE_KIOSK_RETURN_LABEL,
 } from '../lib/kioskGuestMode';
 import { formatSpotifyOutputBadge } from '../lib/spotifyConnect';
+import { useQueueRetryActions } from '../lib/queueRetry';
 import {
   type AppConfig,
+  type JukeboxState,
   type PlaylistImportResult,
   type PlaylistSummary,
   type QueueEntry,
@@ -53,7 +55,7 @@ import {
   type Track,
 } from '../lib/types';
 import { useInterpolatedTime } from '../lib/useInterpolatedTime';
-import { useJukebox } from '../lib/useJukebox';
+import { type DownloadInfo, useJukebox } from '../lib/useJukebox';
 import { useTrackLyrics } from '../lib/useTrackLyrics';
 
 const TABS: { id: SearchSource; label: string }[] = [
@@ -93,6 +95,12 @@ export interface RemoteProps {
   embedded?: boolean;
   onClose?: () => void;
   locationHref?: string;
+  initialView?: 'search' | 'queue' | 'lyrics' | 'history';
+  initialState?: JukeboxState;
+  initialDownloads?: Record<string, DownloadInfo>;
+  initialConfig?: AppConfig | null;
+  initialHostVerified?: boolean;
+  clientId?: string;
 }
 
 const hasBrowserStorage = (): boolean =>
@@ -102,10 +110,24 @@ const readInitialGuestName = (): string => (hasBrowserStorage() ? getName() : ''
 
 const readSafeClientId = (): string => (hasBrowserStorage() ? getClientId() : 'kiosk-guest-preview');
 
-export const Remote = ({ embedded = false, onClose, locationHref }: RemoteProps = {}) => {
-  const { state, playbackOutput, position, downloads, lyricsOffset, mdns, setMdns, notice, connected, send } = useJukebox();
-  const [config, setConfig] = useState<AppConfig | null>(null);
-  const [view, setView] = useState<'search' | 'queue' | 'lyrics' | 'history'>('search');
+export const Remote = ({
+  embedded = false,
+  onClose,
+  locationHref,
+  initialView = 'search',
+  initialState,
+  initialDownloads,
+  initialConfig = null,
+  initialHostVerified = false,
+  clientId: clientIdOverride,
+}: RemoteProps = {}) => {
+  const { state: liveState, playbackOutput, position, downloads: liveDownloads, lyricsOffset, mdns, setMdns, notice, connected, send } = useJukebox();
+  const state =
+    liveState.nowPlaying || liveState.queue.length > 0 ? liveState : (initialState ?? liveState);
+  const downloads =
+    Object.keys(liveDownloads).length > 0 ? liveDownloads : (initialDownloads ?? liveDownloads);
+  const [config, setConfig] = useState<AppConfig | null>(initialConfig);
+  const [view, setView] = useState<'search' | 'queue' | 'lyrics' | 'history'>(initialView);
   const [name, setNameState] = useState(readInitialGuestName);
   const [query, setQuery] = useState('');
   const [source, setSource] = useState<SearchSource>('all');
@@ -130,7 +152,7 @@ export const Remote = ({ embedded = false, onClose, locationHref }: RemoteProps 
   const [importingPlaylist, setImportingPlaylist] = useState(false);
   const [importResult, setImportResult] = useState<PlaylistImportResult | null>(null);
   const [importError, setImportError] = useState<PlaylistImportErrorInfo | null>(null);
-  const [hostVerified, setHostVerified] = useState(false);
+  const [hostVerified, setHostVerified] = useState(initialHostVerified);
   const [hostPinOpen, setHostPinOpen] = useState(false);
   const [hostPanelOpen, setHostPanelOpen] = useState(false);
   const [spotifyVolume, setSpotifyVolume] = useState(80);
@@ -141,7 +163,10 @@ export const Remote = ({ embedded = false, onClose, locationHref }: RemoteProps 
   const reactionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const importingPlaylistRef = useRef(false);
   const toast = useToast();
-  const me = readSafeClientId();
+  const { retryingIds, batchRetryBusy, batchClearBusy, retryEntry, retryAllFailed, clearFailed } = useQueueRetryActions(
+    toast.show,
+  );
+  const me = clientIdOverride ?? readSafeClientId();
   const runtimeHref = locationHref ?? (typeof window !== 'undefined' ? window.location.href : '');
   const [latchedReturnToKiosk] = useState(() => !embedded && shouldShowReturnToKiosk(runtimeHref));
   const showReturnToKiosk = !embedded && (latchedReturnToKiosk || shouldShowReturnToKiosk(runtimeHref));
@@ -798,9 +823,18 @@ export const Remote = ({ embedded = false, onClose, locationHref }: RemoteProps 
             queue={state.queue}
             downloads={downloads}
             currentRemainingSec={queueRemainingSec}
+            clientId={me}
             onVote={vote}
             onRemove={remove}
+            onRetry={retryEntry}
             canRemove={(e) => canEditMetadata || e.requesterId === me}
+            canRetry={(e) => canEditMetadata || e.requesterId === me}
+            retryingTrackIds={retryingIds}
+            canManageFailed={canEditMetadata}
+            onRetryAllFailed={retryAllFailed}
+            onClearFailed={clearFailed}
+            batchRetryBusy={batchRetryBusy}
+            batchClearBusy={batchClearBusy}
           />
         </section>
       ) : view === 'lyrics' ? (

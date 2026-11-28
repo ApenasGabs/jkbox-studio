@@ -307,4 +307,55 @@ describe('HTTP API', () => {
     const maxClamped = await request(app).get('/api/history').query({ limit: 999 }).expect(200);
     expect(maxClamped.body.history).toHaveLength(2);
   });
+
+  it('retries failed tracks individually and in batch (Host only) and advances idle playback', async () => {
+    const { app, jukebox, media } = makeApp({ HOST_PIN: '1234' });
+    media.failIds.add('bbbbbbbbbbb');
+    media.failIds.add('ccccccccccc');
+
+    const r1 = await request(app).post('/api/queue').send({ result: ytResult('bbbbbbbbbbb'), clientId: 'guest-1', name: 'Ana' }).expect(201);
+    const r2 = await request(app).post('/api/queue').send({ result: ytResult('ccccccccccc'), clientId: 'guest-2', name: 'Bia' }).expect(201);
+    await jukebox.downloads.idle();
+
+    expect(jukebox.queue.state().nowPlaying).toBeNull();
+    expect(jukebox.queue.state().queue.map((e) => e.track.status)).toEqual(['error', 'error']);
+
+    // Batch actions require Host PIN
+    await request(app).post('/api/queue/retry-failed').expect(403);
+    await request(app).delete('/api/queue/failed').expect(403);
+
+    // Individual retry is open (guests & host) and advances idle playback once download succeeds
+    media.failIds.delete('bbbbbbbbbbb');
+    const singleRetry = await request(app).post(`/api/tracks/${r1.body.item.trackId}/retry`).expect(200);
+    expect(singleRetry.body).toEqual({ cached: false });
+    await jukebox.downloads.idle();
+    expect(jukebox.queue.state().nowPlaying?.item.trackId).toBe(r1.body.item.trackId);
+
+    // Batch retry retries remaining failed track
+    media.failIds.delete('ccccccccccc');
+    const batchRetry = await request(app).post('/api/queue/retry-failed').set('x-host-pin', '1234').expect(200);
+    expect(batchRetry.body).toEqual({ retried: 1, cached: 0 });
+    await jukebox.downloads.idle();
+    expect(jukebox.queue.state().queue.find((e) => e.trackId === r2.body.item.trackId)?.track.status).toBe('ready');
+  });
+
+  it('clears only failed queued tracks via DELETE /api/queue/failed (Host only)', async () => {
+    const { app, jukebox, media } = makeApp({ HOST_PIN: '1234' });
+    media.failIds.add('bbbbbbbbbbb');
+
+    await request(app).post('/api/queue').send({ result: ytResult('aaaaaaaaaaa'), clientId: 'a' }).expect(201);
+    await request(app).post('/api/queue').send({ result: ytResult('bbbbbbbbbbb'), clientId: 'b' }).expect(201);
+    await request(app).post('/api/queue').send({ result: ytResult('ccccccccccc'), clientId: 'c' }).expect(201);
+    await jukebox.downloads.idle();
+
+    expect(jukebox.queue.state().queue.map((e) => [e.track.sourceId, e.track.status])).toEqual([
+      ['bbbbbbbbbbb', 'error'],
+      ['ccccccccccc', 'ready'],
+    ]);
+
+    const cleared = await request(app).delete('/api/queue/failed').set('x-host-pin', '1234').expect(200);
+    expect(cleared.body).toEqual({ removed: 1 });
+    expect(jukebox.queue.state().nowPlaying?.item.track.sourceId).toBe('aaaaaaaaaaa');
+    expect(jukebox.queue.state().queue.map((e) => e.track.sourceId)).toEqual(['ccccccccccc']);
+  });
 });

@@ -1,5 +1,6 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import request from 'supertest';
 import { afterEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 import { createApp } from '../src/app.js';
@@ -195,5 +196,56 @@ describe('WebSocket realtime sync', () => {
     wss.close();
     mdns.stop();
     jukebox.stop();
+  });
+
+  it('broadcasts immediate pending/downloading transition on retry and advances playback when ready', async () => {
+    const { config, jukebox, media } = setup();
+    media.failIds.add('bbbbbbbbbbb');
+    const app = createApp({ config, jukebox });
+    server = http.createServer(app);
+    const wss = attachRealtime(server, jukebox);
+    await new Promise<void>((r) => server!.listen(0, r));
+    const url = `ws://127.0.0.1:${(server.address() as AddressInfo).port}/ws`;
+
+    const queued = await request(app)
+      .post('/api/queue')
+      .send({ result: ytResult('bbbbbbbbbbb'), clientId: 'guest-1', name: 'Ana' })
+      .expect(201);
+    await jukebox.downloads.idle();
+    expect(jukebox.queue.state().nowPlaying).toBeNull();
+    expect(jukebox.queue.state().queue[0].track.status).toBe('error');
+
+    const kiosk = new WebSocket(url);
+    const phone = new WebSocket(url);
+    await Promise.all([
+      nextMessage(kiosk, (m) => m.type === 'state'),
+      nextMessage(phone, (m) => m.type === 'state'),
+    ]);
+
+    const seenTransitions: Array<{ status: string }> = [];
+    phone.on('message', (raw) => {
+      const msg = JSON.parse(String(raw)) as ServerMessage;
+      if (msg.type === 'download' && msg.trackId === queued.body.item.trackId) {
+        seenTransitions.push({ status: msg.status });
+      }
+    });
+
+    const kioskNowPlaying = nextMessage(kiosk, (m) => m.type === 'state' && m.state.nowPlaying?.item.trackId === queued.body.item.trackId);
+    const phoneNowPlaying = nextMessage(phone, (m) => m.type === 'state' && m.state.nowPlaying?.item.trackId === queued.body.item.trackId);
+
+    media.failIds.delete('bbbbbbbbbbb');
+    await request(app).post(`/api/tracks/${queued.body.item.trackId}/retry`).expect(200);
+    await jukebox.downloads.idle();
+
+    const [kioskState, phoneState] = await Promise.all([kioskNowPlaying, phoneNowPlaying]);
+    expect(kioskState.state.nowPlaying.item.track.status).toBe('ready');
+    expect(phoneState.state.nowPlaying.item.track.status).toBe('ready');
+    expect(seenTransitions[0]?.status).toBe('pending');
+    expect(seenTransitions.some((t) => t.status === 'downloading')).toBe(true);
+    expect(seenTransitions.at(-1)?.status).toBe('ready');
+
+    kiosk.close();
+    phone.close();
+    wss.close();
   });
 });

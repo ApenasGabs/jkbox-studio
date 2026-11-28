@@ -109,6 +109,20 @@ export class QueueService extends EventEmitter<QueueEvents> {
     }
   }
 
+  /** Removes all queued items whose track download failed (`status = 'error'`). */
+  clearFailed(): number {
+    const result = this.db
+      .prepare(
+        `UPDATE queue SET status = 'removed', finished_at = ?
+         WHERE status = 'queued'
+           AND track_id IN (SELECT id FROM tracks WHERE status = 'error')`,
+      )
+      .run(Date.now());
+    const removed = Number(result.changes);
+    if (removed > 0) this.emit('change');
+    return removed;
+  }
+
   skip(): void {
     if (!this.currentRow()) return;
     this.finishCurrent('played');

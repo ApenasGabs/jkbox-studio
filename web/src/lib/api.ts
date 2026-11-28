@@ -175,7 +175,9 @@ export const api = {
     request<{ history: QueueEntry[] }>(`/api/history?${new URLSearchParams({ limit: String(limit) })}`),
   skip: () => post<JukeboxState>('/api/player/skip'),
   ended: (queueId: number) => post<JukeboxState>('/api/player/ended', { queueId }),
-  retry: (trackId: string) => post<{ cached: boolean }>(`/api/tracks/${trackId}/retry`),
+  retry: (trackId: string) => post<{ cached: boolean }>(`/api/tracks/${encodeURIComponent(trackId)}/retry`),
+  retryFailedQueue: () => post<{ retried: number; cached: number }>('/api/queue/retry-failed'),
+  clearFailedQueue: () => request<{ removed: number }>('/api/queue/failed', { method: 'DELETE' }),
   lyrics: (trackId: string, signal?: AbortSignal) =>
     request<TrackLyrics>(`/api/tracks/${encodeURIComponent(trackId)}/lyrics`, { signal }),
   updateLyricsOffset: (trackId: string, offsetMs: number) =>
