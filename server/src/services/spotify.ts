@@ -394,12 +394,14 @@ export class SpotifyService {
           artist,
           album: null,
           durationSec,
-          thumbnail,
+          // Embed trackList items carry no per-track cover; never reuse the playlist cover here (#63).
+          thumbnail: null,
           spotifyUri: item.uri!,
         });
       }
 
       if (tracks.length === 0) return null;
+      await this.hydrateEmbedTracks(tracks);
       return {
         title,
         description,
@@ -407,6 +409,58 @@ export class SpotifyService {
         totalCount: list.length,
         tracks,
       };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Fills real album cover, album name and duration for embed-extracted tracks via `GET /v1/tracks?ids=`
+   * (batches of 50). Tracks the API could not resolve fall back to the public oEmbed thumbnail.
+   */
+  private async hydrateEmbedTracks(tracks: SearchResult[]): Promise<void> {
+    const pending = new Set<SearchResult>();
+    for (let i = 0; i < tracks.length; i += 50) {
+      const batch = tracks.slice(i, i + 50);
+      try {
+        const ids = batch.map((t) => t.sourceId).join(',');
+        const data = await this.api<{ tracks?: (SpotifyTrack | null)[] }>(`/tracks?ids=${ids}`, {}, 'any');
+        const byId = new Map((data.tracks ?? []).filter((t): t is SpotifyTrack => !!t?.id).map((t) => [t.id, t]));
+        for (const track of batch) {
+          const full = byId.get(track.sourceId);
+          if (!full) {
+            pending.add(track);
+            continue;
+          }
+          const real = spotifyTrackToResult(full);
+          track.thumbnail = real.thumbnail;
+          track.album = real.album ?? track.album;
+          track.durationSec = real.durationSec ?? track.durationSec;
+          if (!track.thumbnail) pending.add(track);
+        }
+      } catch {
+        for (const track of batch) pending.add(track);
+      }
+    }
+
+    const queue = [...pending];
+    const worker = async () => {
+      for (let track = queue.shift(); track; track = queue.shift()) {
+        track.thumbnail = await this.fetchOEmbedThumbnail(track.sourceId);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, queue.length) }, worker));
+  }
+
+  private async fetchOEmbedThumbnail(trackId: string): Promise<string | null> {
+    try {
+      const res = await this.fetchFn(
+        `https://open.spotify.com/oembed?url=${encodeURIComponent(`spotify:track:${trackId}`)}`,
+        { signal: AbortSignal.timeout(5_000) },
+      );
+      if (!res.ok) return null;
+      const body = (await res.json()) as { thumbnail_url?: unknown };
+      return typeof body.thumbnail_url === 'string' && body.thumbnail_url ? body.thumbnail_url : null;
     } catch {
       return null;
     }

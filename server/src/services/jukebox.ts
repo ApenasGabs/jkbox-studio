@@ -1279,7 +1279,14 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     const persistedTracks: Track[] = validResults.map((res) => {
       const track = this.tracks.upsertFromResult(res);
       const patch: Partial<Pick<Track, 'thumbnail' | 'spotifyUri' | 'durationSec' | 'album'>> = {};
-      if (!track.thumbnail && res.thumbnail) patch.thumbnail = res.thumbnail;
+      // Self-heal tracks contaminated by older imports that copied the playlist cover onto every track (#63).
+      const contaminated =
+        !!extracted.thumbnail &&
+        track.thumbnail === extracted.thumbnail &&
+        !!res.thumbnail &&
+        res.thumbnail !== extracted.thumbnail;
+      if ((!track.thumbnail || contaminated) && res.thumbnail) patch.thumbnail = res.thumbnail;
+      if (contaminated && res.album) patch.album = res.album;
       if (!track.spotifyUri && res.spotifyUri) patch.spotifyUri = res.spotifyUri;
       if (track.durationSec === null && res.durationSec != null) patch.durationSec = res.durationSec;
       if (!track.album && res.album) patch.album = res.album;
