@@ -941,4 +941,161 @@ describe('Spotify integration', () => {
     expect(offCtx.media.videoDownloads).toEqual([]);
     offCtx.jukebox.stop();
   });
+
+  it('accepts 200 OK plain-text snapshot responses and empty 2xx bodies on Spotify playback controls', async () => {
+    // Cobertura em server/test/spotify.test.ts para 200 OK com corpo texto-plano (ex.: "j7zJr8gqhn...")
+    let responseMode: 'text-plain' | 'no-content-type' | 'empty-200' = 'text-plain';
+    const buildControlResponse = (): Response => {
+      if (responseMode === 'empty-200') {
+        return new Response('', { status: 200 });
+      }
+      if (responseMode === 'no-content-type') {
+        const raw = new Response(new TextEncoder().encode('j7zJr8gqhn...'), { status: 200 });
+        raw.headers.delete('content-type');
+        return raw;
+      }
+      return new Response('j7zJr8gqhn...', {
+        status: 200,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      });
+    };
+
+    const observedContentTypes: (string | null)[] = [];
+    const baseFake = fakeSpotify();
+    const fetchFn: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.includes('/v1/me/player') && (method === 'PUT' || method === 'POST')) {
+        const res = buildControlResponse();
+        observedContentTypes.push(res.headers.get('content-type'));
+        return res;
+      }
+      return baseFake.fetchFn(input, init);
+    };
+
+    const { config, jukebox } = setup(SPOTIFY_ENV, fetchFn);
+    const app = createApp({ config, jukebox });
+    const state = new URL((await request(app).get('/api/spotify/auth')).headers.location).searchParams.get('state');
+    await request(app).get('/api/spotify/callback').query({ code: 'c', state });
+
+    for (const mode of ['text-plain', 'no-content-type', 'empty-200'] as const) {
+      responseMode = mode;
+      await expect(jukebox.spotify.playTrack('spotify:track:t2', 'spk-sala', 1500)).resolves.toBeUndefined();
+      await expect(jukebox.spotify.pausePlayback('spk-sala')).resolves.toBeUndefined();
+      await expect(jukebox.spotify.resumePlayback('spk-sala')).resolves.toBeUndefined();
+      await expect(jukebox.spotify.transferPlayback('tv-quarto', true)).resolves.toBeUndefined();
+      await expect(jukebox.spotify.setVolume(70, 'tv-quarto')).resolves.toBeUndefined();
+      await expect(jukebox.spotify['api']('/me/player/next', { method: 'POST' }, 'user')).resolves.toBeUndefined();
+      await expect(jukebox.spotify['api']('/me/player/previous', { method: 'POST' }, 'user')).resolves.toBeUndefined();
+    }
+
+    expect(observedContentTypes).toContain('text/plain; charset=utf-8');
+    expect(observedContentTypes).toContain(null);
+    jukebox.stop();
+  });
+
+  it('keeps parsing application/json endpoints and rejects invalid JSON where JSON is expected', async () => {
+    let corruptJson = false;
+    const playlistId = '37i9dQZF1DXcBWIGoYBM5M';
+    const baseFake = fakeSpotify({
+      playbackState: {
+        is_playing: true,
+        progress_ms: 9_000,
+        item: track('t1', 'One More Time'),
+      },
+    });
+
+    const fetchFn: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/api/token')) return baseFake.fetchFn(input, init);
+      if (corruptJson && method === 'GET') {
+        return new Response('j7zJr8gqhn...', {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.includes(`/v1/playlists/${playlistId}`) && method === 'GET') {
+        return json({
+          id: playlistId,
+          name: 'Playlist JSON Valida',
+          tracks: { items: [{ item: track('t1', 'One More Time') }], next: null, total: 1 },
+        });
+      }
+      return baseFake.fetchFn(input, init);
+    };
+
+    const { config, jukebox } = setup(SPOTIFY_ENV, fetchFn);
+    const app = createApp({ config, jukebox });
+    const state = new URL((await request(app).get('/api/spotify/auth')).headers.location).searchParams.get('state');
+    await request(app).get('/api/spotify/callback').query({ code: 'c', state });
+
+    const devices = await jukebox.spotify.getDevices();
+    expect(devices).toHaveLength(2);
+    const playback = await jukebox.spotify.getPlaybackState();
+    expect(playback?.trackId).toBe('t1');
+    const searchResults = await jukebox.spotify.search('One More Time');
+    expect(searchResults[0]?.sourceId).toBe('t1');
+    const playlistDetails = await jukebox.spotify.getPlaylistDetails(playlistId);
+    expect(playlistDetails.title).toBe('Playlist JSON Valida');
+    expect(playlistDetails.tracks).toHaveLength(1);
+
+    corruptJson = true;
+    await expect(jukebox.spotify.getDevices()).rejects.toThrow(SyntaxError);
+    await expect(jukebox.spotify.getPlaybackState()).rejects.toThrow(SyntaxError);
+    await expect(jukebox.spotify.search('One More Time')).rejects.toThrow(SyntaxError);
+    await expect(jukebox.spotify.getPlaylistDetails(playlistId)).rejects.toThrow(SyntaxError);
+    jukebox.stop();
+  });
+
+  it('skips, pauses, and resumes on Spotify Connect without error toast or state desync when API returns 200 OK plain text', async () => {
+    // Reproduz o fluxo completo: selecionar dispositivo Spotify Connect, iniciar reprodução e clicar em pular faixa / pausar / retomar
+    // sem emitir toast de erro para clientes conectados quando a API responde 200 OK texto-plano ("j7zJr8gqhn...").
+    const baseFake = fakeSpotify();
+    const fetchFn: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.includes('/v1/me/player') && method === 'PUT') {
+        return new Response('j7zJr8gqhn...', {
+          status: 200,
+          headers: { 'Content-Type': 'text/plain' },
+        });
+      }
+      return baseFake.fetchFn(input, init);
+    };
+
+    const { config, jukebox } = setup(SPOTIFY_ENV, fetchFn);
+    const app = createApp({ config, jukebox });
+    const notices: { message: string; error: boolean }[] = [];
+    jukebox.on('notice', (message, error) => notices.push({ message, error }));
+
+    const state = new URL((await request(app).get('/api/spotify/auth')).headers.location).searchParams.get('state');
+    await request(app).get('/api/spotify/callback').query({ code: 'c', state });
+
+    await request(app).post('/api/spotify/device').send({ deviceId: 'spk-sala' }).expect(200);
+
+    const t2 = (await request(app).get('/api/search').query({ q: 'https://open.spotify.com/track/t2' })).body.results[0];
+    const t3 = (await request(app).get('/api/search').query({ q: 'https://open.spotify.com/track/t3' })).body.results[0];
+    await request(app).post('/api/queue').send({ result: t2, clientId: 'u1', name: 'Ana' }).expect(201);
+    await request(app).post('/api/queue').send({ result: t3, clientId: 'u2', name: 'Leo' }).expect(201);
+
+    await vi.waitFor(() => expect(jukebox['activeSpotifyTrackUri']).toBe('spotify:track:t2'));
+    expect(jukebox.queue.state().nowPlaying?.paused).toBe(false);
+    expect(jukebox['spotifyPollTimer']).not.toBeNull();
+
+    // Pular faixa com resposta 200 OK texto-plano mantém polling ativo e não marca como pausada nem emite toast de erro
+    await request(app).post('/api/player/skip').expect(200);
+    await vi.waitFor(() => expect(jukebox['activeSpotifyTrackUri']).toBe('spotify:track:t3'));
+    expect(jukebox.queue.state().nowPlaying?.item.track.sourceId).toBe('t3');
+    expect(jukebox.queue.state().nowPlaying?.paused).toBe(false);
+    expect(jukebox['spotifyPollTimer']).not.toBeNull();
+
+    await request(app).post('/api/spotify/player/pause').expect(200, { ok: true, paused: true });
+    await request(app).post('/api/spotify/player/resume').expect(200, { ok: true, paused: false });
+    await request(app).post('/api/spotify/player/volume').send({ volume: 55 }).expect(200, { ok: true, volume: 55 });
+
+    expect(notices.filter((n) => n.error)).toEqual([]);
+    await jukebox.downloads.idle();
+    jukebox.stop();
+  });
 });

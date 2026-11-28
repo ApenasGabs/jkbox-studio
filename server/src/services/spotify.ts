@@ -103,6 +103,15 @@ export class SpotifyError extends Error {
 
 export type FetchFn = typeof fetch;
 
+interface SpotifyApiOptions {
+  expectJson?: boolean;
+}
+
+const isPlaybackCommandRequest = (path: string, method?: string): boolean => {
+  const normalizedMethod = (method ?? 'GET').toUpperCase();
+  return /^\/me\/player(?:[/?]|$)/.test(path) && (normalizedMethod === 'PUT' || normalizedMethod === 'POST');
+};
+
 function mapDevice(device: SpotifyApiDevice): SpotifyDevice {
   return {
     id: device.id ?? '',
@@ -505,13 +514,14 @@ export class SpotifyService {
 
   async transferPlayback(deviceId: string, play = false): Promise<void> {
     this.requireConfigured();
-    await this.api(
+    await this.api<void>(
       '/me/player',
       {
         method: 'PUT',
         body: JSON.stringify({ device_ids: [deviceId], play }),
       },
       'user',
+      { expectJson: false },
     );
   }
 
@@ -522,26 +532,27 @@ export class SpotifyService {
     if (typeof positionMs === 'number' && Number.isFinite(positionMs) && positionMs > 0) {
       body.position_ms = Math.round(positionMs);
     }
-    await this.api(
+    await this.api<void>(
       `/me/player/play${query}`,
       {
         method: 'PUT',
         body: JSON.stringify(body),
       },
       'user',
+      { expectJson: false },
     );
   }
 
   async pausePlayback(deviceId?: string): Promise<void> {
     this.requireConfigured();
     const query = deviceId ? `?${new URLSearchParams({ device_id: deviceId })}` : '';
-    await this.api(`/me/player/pause${query}`, { method: 'PUT' }, 'user');
+    await this.api<void>(`/me/player/pause${query}`, { method: 'PUT' }, 'user', { expectJson: false });
   }
 
   async resumePlayback(deviceId?: string): Promise<void> {
     this.requireConfigured();
     const query = deviceId ? `?${new URLSearchParams({ device_id: deviceId })}` : '';
-    await this.api(`/me/player/play${query}`, { method: 'PUT' }, 'user');
+    await this.api<void>(`/me/player/play${query}`, { method: 'PUT' }, 'user', { expectJson: false });
   }
 
   async setVolume(volumePercent: number, deviceId?: string): Promise<void> {
@@ -549,7 +560,7 @@ export class SpotifyService {
     const clamped = Math.max(0, Math.min(100, Math.round(volumePercent)));
     const params = new URLSearchParams({ volume_percent: String(clamped) });
     if (deviceId) params.set('device_id', deviceId);
-    await this.api(`/me/player/volume?${params}`, { method: 'PUT' }, 'user');
+    await this.api<void>(`/me/player/volume?${params}`, { method: 'PUT' }, 'user', { expectJson: false });
   }
 
   /** Creates (or reuses) the shared collaborative playlist for the jukebox session. */
@@ -674,7 +685,12 @@ export class SpotifyService {
     return this.appToken.token;
   }
 
-  private async api<T>(path: string, init: RequestInit = {}, kind: 'app' | 'user' | 'any' = 'any'): Promise<T> {
+  private async api<T>(
+    path: string,
+    init: RequestInit = {},
+    kind: 'app' | 'user' | 'any' = 'any',
+    options: SpotifyApiOptions = {},
+  ): Promise<T> {
     const token = await this.accessToken(kind);
     const headers = new Headers(init.headers);
     headers.set('Authorization', `Bearer ${token}`);
@@ -718,8 +734,23 @@ export class SpotifyService {
       }
       throw new SpotifyError(`Spotify API ${res.status}${detail ? `: ${detail}` : ''}`, res.status);
     }
-    if (res.status === 204) return undefined as T;
+    if (res.status === 204 || res.status === 205) return undefined as T;
     const text = await res.text();
-    return (text ? JSON.parse(text) : undefined) as T;
+    if (!text.trim()) return undefined as T;
+    const expectJson = options.expectJson ?? !isPlaybackCommandRequest(path, init.method);
+    if (!expectJson) {
+      const contentType = res.headers.get('content-type') ?? '';
+      if (/\bapplication\/json\b/i.test(contentType)) {
+        try {
+          return JSON.parse(text) as T;
+        } catch {
+          // Endpoints 2xx de controle do Spotify Connect podem responder snapshot ID em texto plano
+          // sem interromper markSpotifyTrackPlaying(...), this.stopSpotifyPolling() ou this.queue.reportProgress(..., true).
+          return undefined as T;
+        }
+      }
+      return undefined as T;
+    }
+    return JSON.parse(text) as T;
   }
 }
