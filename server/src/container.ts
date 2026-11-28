@@ -26,7 +26,10 @@ export function createJukebox(config: Config, overrides: ContainerOverrides = {}
   const playlists = new PlaylistRepository(db, tracks);
   const media = overrides.media ?? new YtDlp(config.ytdlpPath, config.audioFormat, config.ytdlpExtraArgs);
   const spotify = new SpotifyService(config.spotify, settings, overrides.fetchFn);
-  const lyrics = new LyricsService(db, config.musicDir, overrides.fetchFn, overrides.log);
+  const lyrics = new LyricsService(db, config.musicDir, overrides.fetchFn, overrides.log, undefined, {
+    concurrency: config.lyricsPrefetchConcurrency,
+    minIntervalMs: config.lyricsPrefetchIntervalMs,
+  });
   const classifier = new ClassifierService(
     db,
     tracks,
@@ -62,6 +65,7 @@ export function createJukebox(config: Config, overrides: ContainerOverrides = {}
     playlists,
   );
   jukebox.playlistImportMaxTracks = config.playlistImportMaxTracks;
+  jukebox.lyricsPrefetchEnabled = config.lyricsPrefetch;
   jukebox.discovery = new DiscoveryService(
     tracks,
     queue,

@@ -20,7 +20,7 @@ import type {
 import { isCanonicalCategory, type AutocategorizeSummary, type ClassifierService } from './classifier.js';
 import type { DiscoveryService } from './discovery.js';
 import type { DownloadManager } from './downloads.js';
-import type { LyricsService } from './lyrics.js';
+import type { LyricsPrefetchSummary, LyricsService } from './lyrics.js';
 import { PlaylistError, type PlaylistRepository } from './playlists.js';
 import { QueueError, type QueueService } from './queue.js';
 import {
@@ -110,6 +110,9 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
   private readonly classifyingTrackIds = new Set<string>();
   private readonly pendingClassifications = new Set<Promise<void>>();
   public playlistImportMaxTracks = DEFAULT_PLAYLIST_IMPORT_MAX_TRACKS;
+  /** Auto-prefetch lyrics after downloads/imports so tracks keep lyrics offline (#64). */
+  public lyricsPrefetchEnabled = true;
+  private lyricsBackfill: Promise<LyricsPrefetchSummary> | null = null;
 
   constructor(
     readonly tracks: TrackRepository,
@@ -146,6 +149,7 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
         this.maybeEnqueueAutoDj();
       }
       void this.classifyTrackInBackground(track.id);
+      this.prefetchLyricsInBackground(track);
     });
     downloads.on('failed', (track) => {
       if (this.hasActiveTrack(new Set([track.id])) && queue.isIdleWithoutPlayable()) {
@@ -1203,6 +1207,24 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
   }
 
   /**
+   * Backfills lyrics for every cached track lacking a SQLite entry (#64).
+   * Concurrent calls share the same run; transient failures stay uncached for a later retry.
+   */
+  prefetchMissingLyrics(): Promise<LyricsPrefetchSummary> {
+    if (!this.lyricsBackfill) {
+      this.lyricsBackfill = this.lyrics.prefetchMissing(this.tracks.listCached()).finally(() => {
+        this.lyricsBackfill = null;
+      });
+    }
+    return this.lyricsBackfill;
+  }
+
+  private prefetchLyricsInBackground(track: Track): void {
+    if (!this.lyricsPrefetchEnabled) return;
+    void this.lyrics.prefetch(track);
+  }
+
+  /**
    * Imports a YouTube/Spotify playlist or Spotify album by URL:
    * persists tracks + playlist idempotently by `(source, sourceId)`,
    * enqueues tracks with deduplication, triggers video-first background downloads,
@@ -1307,8 +1329,10 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
 
     for (const track of persistedTracks) {
       const cached = this.downloads.ensure(track.id);
-      if (cached) alreadyCached += 1;
-      else downloading += 1;
+      if (cached) {
+        alreadyCached += 1;
+        this.prefetchLyricsInBackground(track);
+      } else downloading += 1;
 
       if (shouldEnqueue && queued < MAX_ENQUEUE_ON_IMPORT) {
         const outcome = this.queue.enqueue(track.id, requesterId, requesterName);

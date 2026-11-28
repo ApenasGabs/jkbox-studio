@@ -431,7 +431,7 @@ interface LibraryMaintenancePanelProps {
   children?: ReactNode;
 }
 
-/** Local library: rescan, auto-categorize (normal and forced) and "populate similar" discovery. */
+/** Local library: rescan, auto-categorize (normal and forced), offline lyrics backfill and "populate similar" discovery. */
 export function LibraryMaintenancePanel({ onCatalogChanged, onOpenCatalog, onDiscoverQueueVibe, run, children }: LibraryMaintenancePanelProps) {
   const [autocategorizing, setAutocategorizing] = useState(false);
   const autocategorize = (force: boolean) => {
@@ -446,6 +446,14 @@ export function LibraryMaintenancePanel({ onCatalogChanged, onOpenCatalog, onDis
         return 'Nenhuma faixa pendente para auto-categorizar';
       },
     ).finally(() => setAutocategorizing(false));
+  };
+  const [prefetchingLyrics, setPrefetchingLyrics] = useState(false);
+  const prefetchLyrics = () => {
+    setPrefetchingLyrics(true);
+    void run(api.prefetchMissingLyrics, ({ found, empty, transient }) => {
+      if (found + empty + transient === 0) return 'Todas as músicas do acervo já têm letra salva';
+      return `Letras: ${found} encontrada(s), ${empty} instrumental/sem letra, ${transient} falha(s) de rede`;
+    }).finally(() => setPrefetchingLyrics(false));
   };
   return (
     <section className="glass flex flex-col gap-2 p-4">
@@ -493,6 +501,15 @@ export function LibraryMaintenancePanel({ onCatalogChanged, onOpenCatalog, onDis
           ♻️ Forçar recategorização
         </button>
       </div>
+      <button
+        type="button"
+        disabled={prefetchingLyrics}
+        onClick={prefetchLyrics}
+        title="Busca e salva as letras de todas as músicas baixadas para tocar sem internet"
+        className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm font-medium text-zinc-200 transition hover:bg-white/15 disabled:opacity-50"
+      >
+        {prefetchingLyrics ? 'Baixando letras…' : '🎤 Baixar letras faltantes do acervo'}
+      </button>
       {onDiscoverQueueVibe && (
         <button
           type="button"

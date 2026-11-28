@@ -22,6 +22,7 @@ import type {
   SpotifyDevice,
   SpotifyStatus,
   Track,
+  LyricsPrefetchSummary,
   TrackLyrics,
   TrackMetadataPatch,
   HostPinStatus,
@@ -215,6 +216,7 @@ export const api = {
       autoDjPlaylistId: string | null;
     }>('/api/config/autodj', settings),
   rescanLibrary: () => post<{ added: number }>('/api/library/rescan'),
+  prefetchMissingLyrics: () => post<LyricsPrefetchSummary>('/api/library/lyrics/prefetch'),
   autocategorizeLibrary: (options?: { force?: boolean }) =>
     post<{ processed: number; updated: number; skippedManual: number; failed: number }>(
       '/api/library/autocategorize',
