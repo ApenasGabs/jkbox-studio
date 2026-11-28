@@ -174,11 +174,11 @@ export const createApp = ({
 
   api.post('/config/autodj', requireHost, (req, res) => {
     const body = req.body ?? {};
-    const rawEnabled = body.enabled ?? body.autoDjEnabled;
-    const rawMode = body.mode ?? body.autoDjMode;
-    const rawCategory = body.category ?? body.autoDjCategory;
-    const rawSubgenre = body.subgenre ?? body.autoDjSubgenre;
-    const rawPlaylistId = body.playlistId ?? body.autoDjPlaylistId;
+    const rawEnabled = body.enabled !== undefined ? body.enabled : body.autoDjEnabled;
+    const rawMode = body.mode !== undefined ? body.mode : body.autoDjMode;
+    const rawCategory = body.category !== undefined ? body.category : body.autoDjCategory;
+    const rawSubgenre = body.subgenre !== undefined ? body.subgenre : body.autoDjSubgenre;
+    const rawPlaylistId = body.playlistId !== undefined ? body.playlistId : body.autoDjPlaylistId;
 
     if (rawEnabled !== undefined && typeof rawEnabled !== 'boolean') {
       return void res.status(400).json({ error: 'enabled deve ser booleano' });

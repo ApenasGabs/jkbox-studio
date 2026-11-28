@@ -53,7 +53,7 @@ import {
   type Track,
 } from '../lib/types';
 import { useInterpolatedTime } from '../lib/useInterpolatedTime';
-import { useJukebox } from '../lib/useJukebox';
+import { mergeAutoDjIntoConfig, useJukebox } from '../lib/useJukebox';
 import { useTrackLyrics } from '../lib/useTrackLyrics';
 
 const TABS: { id: SearchSource; label: string }[] = [
@@ -103,7 +103,7 @@ const readInitialGuestName = (): string => (hasBrowserStorage() ? getName() : ''
 const readSafeClientId = (): string => (hasBrowserStorage() ? getClientId() : 'kiosk-guest-preview');
 
 export const Remote = ({ embedded = false, onClose, locationHref }: RemoteProps = {}) => {
-  const { state, playbackOutput, position, downloads, lyricsOffset, mdns, setMdns, notice, connected, send } = useJukebox();
+  const { state, playbackOutput, autoDj, position, downloads, lyricsOffset, mdns, setMdns, notice, connected, send } = useJukebox();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [view, setView] = useState<'search' | 'queue' | 'lyrics' | 'history'>('search');
   const [name, setNameState] = useState(readInitialGuestName);
@@ -202,6 +202,10 @@ export const Remote = ({ embedded = false, onClose, locationHref }: RemoteProps 
     const timer = setTimeout(() => setCatalogFilter(detectPlaylistLink(query) ? '' : query), 250);
     return () => clearTimeout(timer);
   }, [query]);
+
+  useEffect(() => {
+    setConfig((prev) => mergeAutoDjIntoConfig(prev, autoDj));
+  }, [autoDj]);
 
   useEffect(() => {
     if (!embedded && notice) toast.show(notice.message, notice.error);
