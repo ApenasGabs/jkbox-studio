@@ -29,7 +29,9 @@ export interface DownloadManagerOptions {
 export class DownloadManager extends EventEmitter<DownloadEvents> {
   private readonly pendingHigh: string[] = [];
   private readonly pendingLow: string[] = [];
+  private readonly pendingVideos = new Map<string, string>();
   private readonly active = new Set<string>();
+  private readonly activeVideos = new Set<string>();
   private readonly videoPromises = new Map<string, Promise<string | null>>();
   private readonly youtubeIdResolvers = new Map<string, Promise<string | null>>();
   private readonly lastEmit = new Map<string, number>();
@@ -106,7 +108,13 @@ export class DownloadManager extends EventEmitter<DownloadEvents> {
 
   /** Resolves once all queued downloads (including background video backfills) have settled. */
   async idle(): Promise<void> {
-    while (this.activeCount > 0 || this.videoPromises.size > 0 || this.youtubeIdResolvers.size > 0) {
+    while (
+      this.activeCount > 0 ||
+      this.pendingVideos.size > 0 ||
+      this.activeVideos.size > 0 ||
+      this.videoPromises.size > 0 ||
+      this.youtubeIdResolvers.size > 0
+    ) {
       await new Promise((r) => setTimeout(r, 5));
     }
   }
@@ -153,12 +161,38 @@ export class DownloadManager extends EventEmitter<DownloadEvents> {
   }
 
   private pump(): void {
-    while (this.active.size < this.concurrency && (this.pendingHigh.length > 0 || this.pendingLow.length > 0)) {
+    while (
+      this.active.size + this.activeVideos.size < this.concurrency &&
+      (this.pendingHigh.length > 0 || this.pendingLow.length > 0)
+    ) {
       const id = this.pendingHigh.length > 0 ? this.pendingHigh.shift()! : this.pendingLow.shift()!;
       this.active.add(id);
       this.run(id).finally(() => {
         this.active.delete(id);
         this.lastEmit.delete(id);
+        this.pump();
+      });
+    }
+
+    // Background video backfills yield to pending audio and leave at least 1 audio slot free when concurrency > 1.
+    const maxVideoSlots = this.concurrency > 1 ? this.concurrency - 1 : 1;
+    while (
+      this.pendingHigh.length === 0 &&
+      this.pendingLow.length === 0 &&
+      this.active.size + this.activeVideos.size < this.concurrency &&
+      this.activeVideos.size < maxVideoSlots &&
+      this.pendingVideos.size > 0
+    ) {
+      const next = this.pendingVideos.entries().next();
+      if (next.done) break;
+      const [trackId, youtubeId] = next.value;
+      this.pendingVideos.delete(trackId);
+      const current = this.tracks.get(trackId);
+      if (!current || this.hasVideoFile(current)) continue;
+      if (this.linkTwinVideo(trackId, youtubeId)) continue;
+      this.activeVideos.add(trackId);
+      void this.startVideoDownload(trackId, youtubeId).finally(() => {
+        this.activeVideos.delete(trackId);
         this.pump();
       });
     }
@@ -197,12 +231,22 @@ export class DownloadManager extends EventEmitter<DownloadEvents> {
     return task;
   }
 
+  private linkTwinVideo(trackId: string, youtubeId: string): boolean {
+    const twin = this.tracks.findReadyByYoutubeId(youtubeId);
+    if (!twin || twin.id === trackId || !this.hasVideoFile(twin)) return false;
+    this.tracks.update(trackId, { videoPath: twin.videoPath });
+    const updated = this.tracks.get(trackId);
+    if (updated) this.emit('video', updated);
+    return true;
+  }
+
   private startVideoDownload(
     trackId: string,
     youtubeId: string,
     options: { onProgress?: (fraction: number) => void; emitEvent?: boolean } = {},
   ): Promise<string | null> {
     if (this.videoMode !== 'cache' || !this.media.downloadVideo) return Promise.resolve(null);
+    this.pendingVideos.delete(trackId);
     const existing = this.videoPromises.get(trackId);
     if (existing) return existing;
 
@@ -225,16 +269,12 @@ export class DownloadManager extends EventEmitter<DownloadEvents> {
     return promise;
   }
 
-  private ensureVideoBackfill(track: Track): void {
-    if (this.videoMode !== 'cache' || !track.youtubeId || this.hasVideoFile(track)) return;
-    const twin = this.tracks.findReadyByYoutubeId(track.youtubeId);
-    if (twin && twin.id !== track.id && this.hasVideoFile(twin)) {
-      this.tracks.update(track.id, { videoPath: twin.videoPath });
-      const updated = this.tracks.get(track.id);
-      if (updated) this.emit('video', updated);
-      return;
-    }
-    void this.startVideoDownload(track.id, track.youtubeId);
+  private ensureVideoBackfill(track: Track, shouldPump = true): void {
+    if (this.videoMode !== 'cache' || !this.media.downloadVideo || !track.youtubeId || this.hasVideoFile(track)) return;
+    if (this.videoPromises.has(track.id) || this.pendingVideos.has(track.id)) return;
+    if (this.linkTwinVideo(track.id, track.youtubeId)) return;
+    this.pendingVideos.set(track.id, track.youtubeId);
+    if (shouldPump) this.pump();
   }
 
   private async downloadVideoSafe(
@@ -276,35 +316,32 @@ export class DownloadManager extends EventEmitter<DownloadEvents> {
         const twin = this.tracks.findReadyByYoutubeId(youtubeId);
         if (twin && twin.id !== trackId && this.tracks.isCached(twin)) {
           const videoPath = this.tracks.isVideoCached(twin) ? twin.videoPath : null;
-          this.tracks.update(trackId, { status: 'ready', progress: 1, filePath: twin.filePath, videoPath });
+          this.tracks.update(trackId, { status: 'ready', progress: 1, filePath: twin.filePath, videoPath, error: null });
           const ready = this.tracks.get(trackId)!;
           this.emit('ready', ready);
-          if (!videoPath) this.ensureVideoBackfill(ready);
+          if (!videoPath) this.ensureVideoBackfill(ready, false);
           return;
         }
       }
 
-      const wantsVideo = this.videoMode === 'cache' && !!this.media.downloadVideo;
       const { filePath } = await this.media.download(youtubeId, path.join(this.musicDir, trackId), (fraction) => {
-        this.emitThrottledProgress(trackId, wantsVideo ? fraction * 0.5 : fraction);
+        this.emitThrottledProgress(trackId, fraction);
       });
       if (!fs.existsSync(filePath)) throw new Error(`Arquivo baixado não encontrado: ${filePath}`);
 
       const fresh = this.tracks.get(trackId);
-      let videoPath: string | null = null;
-      if (wantsVideo) {
-        if (fresh && this.hasVideoFile(fresh)) {
-          videoPath = fresh.videoPath;
-        } else {
-          videoPath = await this.startVideoDownload(trackId, youtubeId, {
-            onProgress: (fraction) => this.emitThrottledProgress(trackId, 0.5 + fraction * 0.5),
-            emitEvent: false,
-          });
+      let videoPath: string | null = fresh && this.hasVideoFile(fresh) ? fresh.videoPath : null;
+      if (!videoPath) {
+        const twin = this.tracks.findReadyByYoutubeId(youtubeId);
+        if (twin && twin.id !== trackId && this.hasVideoFile(twin)) {
+          videoPath = twin.videoPath;
         }
       }
 
       this.tracks.update(trackId, { status: 'ready', progress: 1, filePath, videoPath, error: null });
-      this.emit('ready', this.tracks.get(trackId)!);
+      const ready = this.tracks.get(trackId)!;
+      this.emit('ready', ready);
+      if (!videoPath) this.ensureVideoBackfill(ready, false);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.tracks.update(trackId, { status: 'error', error: message });

@@ -1,4 +1,7 @@
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { AudioFormat } from '../config.js';
 import type { SearchResult } from '../types.js';
 import { YOUTUBE_ID_RE } from '../lib/validate.js';
@@ -95,10 +98,37 @@ export function parseProgressLine(line: string): number | null {
   return Math.min(1, Math.max(0, downloaded / size));
 }
 
-/** Builds the yt-dlp format selector for lightweight MP4 clips up to `maxHeight`. */
+/** Builds the yt-dlp format selector for audio downloads, preferring native stream copy when available. */
+export function buildAudioFormatSelector(audioFormat: AudioFormat): string {
+  if (audioFormat === 'm4a') return 'bestaudio[ext=m4a]/bestaudio/best';
+  if (audioFormat === 'opus') return 'bestaudio[acodec=opus]/bestaudio/best';
+  return 'bestaudio/best';
+}
+
+/** Builds the yt-dlp format selector for lightweight video-only MP4 clips up to `maxHeight`. */
 export function buildVideoFormatSelector(maxHeight: number): string {
   const height = Math.max(144, Math.round(maxHeight));
-  return `bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${height}][ext=mp4]/best`;
+  return `bestvideo[height<=${height}][ext=mp4][vcodec^=avc1]/bestvideo[height<=${height}][ext=mp4]/best[height<=${height}][ext=mp4]`;
+}
+
+/** Resolves a fast temporary directory (tmpfs `/tmp` when available, otherwise `os.tmpdir()`). */
+export function resolveTempDir(): string {
+  const preferred = '/tmp/jkbox-ytdlp';
+  try {
+    if (fs.existsSync('/tmp')) {
+      fs.mkdirSync(preferred, { recursive: true });
+      return preferred;
+    }
+  } catch {
+    // Fall back to os.tmpdir() when /tmp is unavailable or not writable.
+  }
+  const fallback = path.join(os.tmpdir(), 'jkbox-ytdlp');
+  try {
+    fs.mkdirSync(fallback, { recursive: true });
+    return fallback;
+  } catch {
+    return os.tmpdir();
+  }
 }
 
 /** Defense in depth: never interpolate anything but a canonical video id into a yt-dlp URL. */
@@ -194,12 +224,21 @@ export class YtDlp implements MediaProvider {
     onProgress: (fraction: number) => void,
   ): Promise<DownloadResult> {
     assertVideoId(videoId);
+    const homeDir = path.dirname(outputBase);
+    const baseName = path.basename(outputBase);
+    const tempDir = resolveTempDir();
     let filePath = '';
     await this.run(
       [
         `https://www.youtube.com/watch?v=${videoId}`,
         '--no-playlist',
+        '-N',
+        '4',
         ...formatArgs,
+        '--paths',
+        `home:${homeDir}`,
+        '--paths',
+        `temp:${tempDir}`,
         '--progress',
         '--newline',
         '--progress-template',
@@ -207,7 +246,7 @@ export class YtDlp implements MediaProvider {
         '--print',
         'after_move:filepath',
         '-o',
-        `${outputBase}.%(ext)s`,
+        `${baseName}.%(ext)s`,
       ],
       (line) => {
         const fraction = parseProgressLine(line);
@@ -226,16 +265,13 @@ export class YtDlp implements MediaProvider {
       this.audioFormat,
       [
         '-f',
-        'bestaudio/best',
+        buildAudioFormatSelector(this.audioFormat),
         '-x',
         '--audio-format',
         this.audioFormat,
         '--audio-quality',
         '0',
         '--embed-metadata',
-        '--embed-thumbnail',
-        '--convert-thumbnails',
-        'jpg',
       ],
       onProgress,
     );
@@ -251,7 +287,7 @@ export class YtDlp implements MediaProvider {
       videoId,
       outputBase,
       'mp4',
-      ['-f', buildVideoFormatSelector(maxHeight), '--merge-output-format', 'mp4'],
+      ['-f', buildVideoFormatSelector(maxHeight)],
       onProgress,
     );
   }
