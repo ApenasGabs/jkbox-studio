@@ -196,6 +196,9 @@ describe('internal playlists API & Auto-DJ', () => {
       .send({ enabled: true, mode: 'playlist', playlistId: 'missing' })
       .expect(404);
 
+    // Play an outside track first, then enable playlist-locked Auto-DJ and drain -> picks only from Churrasco ready tracks
+    jukebox.queue.enqueue(outside1.id, 'guest-1', 'Ana');
+
     const updated = await request(app)
       .post('/api/config/autodj')
       .set('x-host-pin', '9999')
@@ -207,8 +210,6 @@ describe('internal playlists API & Auto-DJ', () => {
       autoDjPlaylistId: pl.id,
     });
 
-    // Play an outside track first, then drain -> Auto-DJ must pick only from Churrasco ready tracks
-    jukebox.queue.enqueue(outside1.id, 'guest-1', 'Ana');
     jukebox.queue.ended(jukebox.queue.state().nowPlaying!.item.id);
     const auto1 = jukebox.queue.state().nowPlaying!;
     expect([inPl1.id, inPl2.id]).toContain(auto1.item.trackId);

@@ -55,7 +55,7 @@ import {
   type Track,
 } from '../lib/types';
 import { useInterpolatedTime } from '../lib/useInterpolatedTime';
-import { type DownloadInfo, useJukebox } from '../lib/useJukebox';
+import { type DownloadInfo, mergeAutoDjIntoConfig, useJukebox } from '../lib/useJukebox';
 import { useTrackLyrics } from '../lib/useTrackLyrics';
 
 const TABS: { id: SearchSource; label: string }[] = [
@@ -121,7 +121,19 @@ export const Remote = ({
   initialHostVerified = false,
   clientId: clientIdOverride,
 }: RemoteProps = {}) => {
-  const { state: liveState, playbackOutput, position, downloads: liveDownloads, lyricsOffset, mdns, setMdns, notice, connected, send } = useJukebox();
+  const {
+    state: liveState,
+    playbackOutput,
+    autoDj,
+    position,
+    downloads: liveDownloads,
+    lyricsOffset,
+    mdns,
+    setMdns,
+    notice,
+    connected,
+    send,
+  } = useJukebox();
   const state =
     liveState.nowPlaying || liveState.queue.length > 0 ? liveState : (initialState ?? liveState);
   const downloads =
@@ -227,6 +239,10 @@ export const Remote = ({
     const timer = setTimeout(() => setCatalogFilter(detectPlaylistLink(query) ? '' : query), 250);
     return () => clearTimeout(timer);
   }, [query]);
+
+  useEffect(() => {
+    setConfig((prev) => mergeAutoDjIntoConfig(prev, autoDj));
+  }, [autoDj]);
 
   useEffect(() => {
     if (!embedded && notice) toast.show(notice.message, notice.error);

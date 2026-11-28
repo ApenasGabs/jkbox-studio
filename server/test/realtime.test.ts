@@ -248,4 +248,43 @@ describe('WebSocket realtime sync', () => {
     phone.close();
     wss.close();
   });
+
+  it('broadcasts state with updated autoDj config whenever autoDjEnabled or config changes', async () => {
+    const { config, jukebox } = setup();
+    server = http.createServer(createApp({ config, jukebox }));
+    const wss = attachRealtime(server, jukebox);
+    await new Promise<void>((r) => server!.listen(0, r));
+    const url = `ws://127.0.0.1:${(server.address() as AddressInfo).port}/ws`;
+
+    const kiosk = new WebSocket(url);
+    const phone = new WebSocket(url);
+    const [initialKiosk] = await Promise.all([
+      nextMessage(kiosk, (m) => m.type === 'state'),
+      nextMessage(phone, (m) => m.type === 'state'),
+    ]);
+    expect(initialKiosk.autoDj).toEqual({
+      enabled: false,
+      mode: 'vibe',
+      category: null,
+      subgenre: null,
+      playlistId: null,
+    });
+
+    const kioskUpdated = nextMessage(kiosk, (m) => m.type === 'state' && m.autoDj?.enabled === true);
+    const phoneUpdated = nextMessage(phone, (m) => m.type === 'state' && m.autoDj?.enabled === true);
+    jukebox.setAutoDjConfig({ enabled: true, mode: 'random' });
+    const [kMsg, pMsg] = await Promise.all([kioskUpdated, phoneUpdated]);
+    expect(kMsg.autoDj).toEqual({
+      enabled: true,
+      mode: 'random',
+      category: null,
+      subgenre: null,
+      playlistId: null,
+    });
+    expect(pMsg.autoDj).toEqual(kMsg.autoDj);
+
+    kiosk.close();
+    phone.close();
+    wss.close();
+  });
 });

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   KIOSK_COMMANDS,
+  type AppConfig,
+  type AutoDjConfig,
   type JukeboxState,
   type KioskCommand,
   type KioskInputEvent,
@@ -44,10 +46,33 @@ export interface JukeboxNotice {
 const REACTION_TTL_MS = 3000;
 const MAX_ACTIVE_REACTIONS = 24;
 
+/** Applies live WebSocket Auto-DJ configuration updates onto the loaded AppConfig. */
+export function mergeAutoDjIntoConfig(prev: AppConfig | null, autoDj: AutoDjConfig | null): AppConfig | null {
+  if (!prev || !autoDj) return prev;
+  if (
+    prev.autoDjEnabled === autoDj.enabled &&
+    prev.autoDjMode === autoDj.mode &&
+    prev.autoDjCategory === autoDj.category &&
+    prev.autoDjSubgenre === autoDj.subgenre &&
+    prev.autoDjPlaylistId === autoDj.playlistId
+  ) {
+    return prev;
+  }
+  return {
+    ...prev,
+    autoDjEnabled: autoDj.enabled,
+    autoDjMode: autoDj.mode,
+    autoDjCategory: autoDj.category,
+    autoDjSubgenre: autoDj.subgenre,
+    autoDjPlaylistId: autoDj.playlistId,
+  };
+}
+
 /** Live jukebox state over WebSocket with automatic reconnection. */
 export function useJukebox() {
   const [state, setState] = useState<JukeboxState>({ nowPlaying: null, queue: [] });
   const [playbackOutput, setPlaybackOutput] = useState<PlaybackOutput>({ type: 'local' });
+  const [autoDj, setAutoDj] = useState<AutoDjConfig | null>(null);
   const [position, setPosition] = useState({ positionSec: 0, paused: false });
   const [downloads, setDownloads] = useState<Record<string, DownloadInfo>>({});
   const [lyricsOffset, setLyricsOffset] = useState<LyricsOffsetEvent | null>(null);
@@ -100,6 +125,7 @@ export function useJukebox() {
         if (msg.type === 'state') {
           setState(msg.state);
           if (msg.playbackOutput) setPlaybackOutput(msg.playbackOutput);
+          if (msg.autoDj) setAutoDj(msg.autoDj);
           setPosition({ positionSec: msg.state.nowPlaying?.positionSec ?? 0, paused: msg.state.nowPlaying?.paused ?? false });
         } else if (msg.type === 'progress') {
           setPosition({ positionSec: msg.positionSec, paused: msg.paused });
@@ -164,6 +190,7 @@ export function useJukebox() {
   return {
     state,
     playbackOutput,
+    autoDj,
     position,
     downloads,
     lyricsOffset,

@@ -60,6 +60,16 @@ export class QueueService extends EventEmitter<QueueEvents> {
     this.playablePredicate = predicate;
   }
 
+  /** True when at least one queued item satisfies the current playback backend's playable predicate. */
+  hasPlayableQueued(): boolean {
+    return this.ordered().some((entry) => this.playablePredicate(entry.track));
+  }
+
+  /** True when nothing is playing and no queued item can start immediately. */
+  isIdleWithoutPlayable(): boolean {
+    return !this.currentRow() && !this.hasPlayableQueued();
+  }
+
   enqueue(trackId: string, requesterId: string, requesterName: string): EnqueueResult {
     if (!this.tracks.get(trackId)) throw new QueueError('Faixa não encontrada', 404);
     const existing = this.db
@@ -102,10 +112,11 @@ export class QueueService extends EventEmitter<QueueEvents> {
       this.finishCurrent('removed');
       const advanced = this.advanceIfIdle();
       this.emit('change');
-      if (!advanced && this.ordered().length === 0) this.emit('drained');
+      if (!advanced && this.isIdleWithoutPlayable()) this.emit('drained');
     } else {
       this.setStatus(queueId, 'removed');
       this.emit('change');
+      if (this.isIdleWithoutPlayable()) this.emit('drained');
     }
   }
 
@@ -128,7 +139,7 @@ export class QueueService extends EventEmitter<QueueEvents> {
     this.finishCurrent('played');
     const advanced = this.advanceIfIdle();
     this.emit('change');
-    if (!advanced && this.ordered().length === 0) this.emit('drained');
+    if (!advanced && this.isIdleWithoutPlayable()) this.emit('drained');
   }
 
   /** Called by the kiosk or Spotify poller when a track reaches its natural end (idempotent per item). */
