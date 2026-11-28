@@ -543,6 +543,14 @@ export const createApp = ({
     }
   });
 
+  api.post('/queue/retry-failed', requireHost, (_req, res) => {
+    res.json(jukebox.retryFailedQueue());
+  });
+
+  api.delete('/queue/failed', requireHost, (_req, res) => {
+    res.json({ removed: queue.clearFailed() });
+  });
+
   api.delete('/queue/:id', (req, res, next) => {
     try {
       queue.remove(Number(req.params.id), str(req.body?.clientId) || str(req.query.clientId), isHost(req));
@@ -577,8 +585,7 @@ export const createApp = ({
 
   api.post('/tracks/:id/retry', (req, res, next) => {
     try {
-      if (!tracks.get(req.params.id)) return void res.status(404).json({ error: 'Faixa não encontrada' });
-      res.json({ cached: downloads.ensure(req.params.id) });
+      res.json(jukebox.retryTrack(req.params.id));
     } catch (err) {
       next(err);
     }

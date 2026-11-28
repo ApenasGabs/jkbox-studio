@@ -73,6 +73,7 @@ import {
 import { useWebcamKioskInput } from '../lib/useWebcamKioskInput';
 import { useSpotifyVolumeControl } from '../lib/useSpotifyVolume';
 import { useTrackLyrics } from '../lib/useTrackLyrics';
+import { useQueueRetryActions } from '../lib/queueRetry';
 import { resolveGuestModeAfterCommand } from '../lib/kioskGuestMode';
 import { Remote } from './Remote';
 
@@ -224,6 +225,9 @@ export function Kiosk() {
   const embedSyncRef = useRef<{ queueId: number; lastTimeSec: number; updatedAtMs: number; paused: boolean } | null>(null);
   const wasSpotifyOutputRef = useRef(false);
   const toast = useToast();
+  const { retryingIds, batchRetryBusy, batchClearBusy, retryEntry, retryAllFailed, clearFailed } = useQueueRetryActions(
+    toast.show,
+  );
 
   const isSpotifyOutput = playbackOutput.type === 'spotify';
   const spotifyBadge = formatSpotifyOutputBadge(playbackOutput);
@@ -1839,7 +1843,13 @@ export function Kiosk() {
             currentRemainingSec={queueRemainingSec}
             onVote={(entry) => run(() => api.vote(entry.id))}
             onRemove={remove}
-            onRetry={(entry) => run(() => api.retry(entry.trackId), 'Tentando baixar novamente')}
+            onRetry={retryEntry}
+            retryingTrackIds={retryingIds}
+            canManageFailed
+            onRetryAllFailed={retryAllFailed}
+            onClearFailed={clearFailed}
+            batchRetryBusy={batchRetryBusy}
+            batchClearBusy={batchClearBusy}
           />
         </aside>
       ) : (
@@ -1909,7 +1919,13 @@ export function Kiosk() {
               currentRemainingSec={queueRemainingSec}
               onVote={(entry) => run(() => api.vote(entry.id))}
               onRemove={remove}
-              onRetry={(entry) => run(() => api.retry(entry.trackId), 'Tentando baixar novamente')}
+              onRetry={retryEntry}
+              retryingTrackIds={retryingIds}
+              canManageFailed
+              onRetryAllFailed={retryAllFailed}
+              onClearFailed={clearFailed}
+              batchRetryBusy={batchRetryBusy}
+              batchClearBusy={batchClearBusy}
             />
           </div>
         </div>
@@ -2268,6 +2284,12 @@ function QueueSidebarContent({
   onVote,
   onRemove,
   onRetry,
+  retryingTrackIds,
+  canManageFailed,
+  onRetryAllFailed,
+  onClearFailed,
+  batchRetryBusy,
+  batchClearBusy,
 }: {
   accessTargets: RemoteAccessTargets;
   publicUrlWarning: string | null;
@@ -2279,7 +2301,13 @@ function QueueSidebarContent({
   currentRemainingSec: number | null;
   onVote: (entry: QueueEntry) => void;
   onRemove: (entry: QueueEntry) => void;
-  onRetry: (entry: QueueEntry) => void;
+  onRetry: (entry: QueueEntry) => void | Promise<unknown>;
+  retryingTrackIds: Record<string, boolean>;
+  canManageFailed?: boolean;
+  onRetryAllFailed: () => void | Promise<unknown>;
+  onClearFailed: () => void | Promise<unknown>;
+  batchRetryBusy: boolean;
+  batchClearBusy: boolean;
 }) {
   return (
     <>
@@ -2303,6 +2331,12 @@ function QueueSidebarContent({
             onVote={onVote}
             onRemove={onRemove}
             onRetry={onRetry}
+            retryingTrackIds={retryingTrackIds}
+            canManageFailed={canManageFailed}
+            onRetryAllFailed={onRetryAllFailed}
+            onClearFailed={onClearFailed}
+            batchRetryBusy={batchRetryBusy}
+            batchClearBusy={batchClearBusy}
             compact
           />
         </div>

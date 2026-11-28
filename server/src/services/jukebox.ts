@@ -1052,6 +1052,43 @@ export class Jukebox extends EventEmitter<JukeboxEvents> {
     return { ...outcome, cached };
   }
 
+  /** Retries downloading a track and updates connected clients / advances idle playback. */
+  retryTrack(trackId: string): { cached: boolean } {
+    const track = this.tracks.get(trackId);
+    if (!track) throw new QueueError('Faixa não encontrada', 404);
+    const wasError = track.status === 'error';
+    const cached = this.downloads.ensure(trackId);
+    if (cached) {
+      this.queue.advanceIfIdle();
+    }
+    if (wasError || cached) {
+      this.queue.emit('change');
+    }
+    return { cached };
+  }
+
+  /** Retries all queued tracks currently in `error` status. */
+  retryFailedQueue(): { retried: number; cached: number } {
+    const failedEntries = this.queue.state().queue.filter((entry) => entry.track.status === 'error');
+    const seen = new Set<string>();
+    let retried = 0;
+    let cached = 0;
+    for (const entry of failedEntries) {
+      if (seen.has(entry.trackId)) continue;
+      seen.add(entry.trackId);
+      const isCached = this.downloads.ensure(entry.trackId);
+      retried += 1;
+      if (isCached) cached += 1;
+    }
+    if (cached > 0) {
+      this.queue.advanceIfIdle();
+    }
+    if (retried > 0) {
+      this.queue.emit('change');
+    }
+    return { retried, cached };
+  }
+
   enqueuePlaylist(
     playlistId: string,
     options: { requesterId?: string; requesterName?: string; shuffle?: boolean; count?: number } = {},

@@ -88,6 +88,7 @@ export class DownloadManager extends EventEmitter<DownloadEvents> {
     }
 
     this.tracks.update(trackId, { status: 'pending', progress: 0, error: null });
+    this.emit('progress', this.tracks.get(trackId)!);
     if (priority === 'low') this.pendingLow.push(trackId);
     else this.pendingHigh.push(trackId);
     this.pump();
